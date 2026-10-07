@@ -1,0 +1,14 @@
+{
+  "name": "claude-code-pr-watch",
+  "description": "pr-watch: a Claude Code mod that keeps a live pane of the GitHub PRs a session touches.",
+  "owner": {
+    "name": "eliraz-refael"
+  },
+  "plugins": [
+    {
+      "name": "pr-watch",
+      "source": "./",
+      "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "pr-watch",
+  "version": "0.2.0",
+  "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "eliraz-refael"
+  },
+  "repository": "https://github.com/ElirazKed/claude-code-pr-watch",
+  "keywords": ["github", "pull-requests", "ci", "mod", "pane"]
+}
