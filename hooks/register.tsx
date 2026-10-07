@@ -6,11 +6,12 @@ import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from
 import {
   STEPS,
   ago,
+  created,
   cwdOf,
   derive,
   findPrUrls,
   isActive,
-  isGhPrCommand,
+  isGhOnePrCommand,
   metaOf,
   placeholder,
   refFromGhCommand,
@@ -331,9 +332,9 @@ async function refreshStatus($: EngineInterface) {
   $.ui.status(focus === undefined ? undefined : `PR #${focus.number}: ${focus.headline}`)
 }
 
-// `isExplicit`: the person named the PR, so it is watched whatever its state. Otherwise (a gh
-// command Claude ran) only an open PR is: GitHub is asked first, so a merged or closed one
-// never gets a card; the person can still watch it by name.
+// `isExplicit`: the person named the PR, so it is watched whatever its state. Otherwise (a PR
+// Claude opened) only an open PR is: GitHub is asked first, so a merged or closed one never
+// gets a card; the person can still watch it by name.
 async function track($: EngineInterface, refs: PrRef[], isExplicit = false) {
   const known = new Set((await read($, prs)).map(pr => pr.url))
   const fresh = refs.filter(ref => !known.has(ref.url))
@@ -503,28 +504,31 @@ export const register: Register = on => {
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
 
-    // PRs Claude creates, views, checks or merges through gh are watched without asking.
-    if (e.tool === 'Bash' && isGhPrCommand(e.command)) {
-      let refs = findPrUrls(`${e.command}\n${ran.text ?? ''}`)
-      const fromFlags = refFromGhCommand(e.command)
-      if (refs.length === 0 && fromFlags !== null) refs = [fromFlags]
-      if (refs.length === 0 && !ran.isError) {
-        // `gh pr checks 12`, `gh pr merge`: ask gh which PR that was, from the same directory.
-        const num = e.command.match(/\bgh\s+pr\s+\w+\s+#?(\d+)\b/)?.[1]
-        const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], null, cwdOf(e.command))
-        if (res.exitCode === 0) refs = findPrUrls(res.stdout)
-      }
-      if (refs.length > 0) await track($, refs)
+    // A PR Claude opened is watched without asking.
+    const input = e as unknown as Record<string, unknown>
+    const made = created(String(e.tool), input, ran.text ?? '')
+    if (made.length > 0) {
+      await track($, made)
 
       return ran
     }
 
-    // Any other PR Claude touched: have Claude offer to watch it, once per PR.
+    // Any other PR Claude touched (read for research, checked, merged): have Claude offer to
+    // watch it, once per PR.
+    let touched = suggestable(String(e.tool), input, ran.text ?? '')
+    if (touched.length === 0 && e.tool === 'Bash' && isGhOnePrCommand(e.command) && !ran.isError) {
+      const fromFlags = refFromGhCommand(e.command)
+      if (fromFlags !== null) touched = [fromFlags]
+      else {
+        // `gh pr checks 12`, `gh pr merge`: ask gh which PR that was, from the same directory.
+        const num = e.command.match(/\bgh\s+pr\s+[\w-]+\s+#?(\d+)\b/)?.[1]
+        const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], null, cwdOf(e.command))
+        if (res.exitCode === 0) touched = findPrUrls(res.stdout)
+      }
+    }
     const watched = new Set((await read($, prs)).map(pr => pr.url))
     const asked = new Set(await read($, suggested))
-    const fresh = suggestable(String(e.tool), e as unknown as Record<string, unknown>, ran.text ?? '').filter(
-      ref => !watched.has(ref.url) && !asked.has(ref.url),
-    )
+    const fresh = touched.filter(ref => !watched.has(ref.url) && !asked.has(ref.url))
     if (fresh.length === 0) return ran
     await update($, suggested, list => [...list, ...fresh.map(ref => ref.url)])
     const named = fresh.map(ref => `${ref.repo}#${ref.number} (${ref.url})`).join(', ')

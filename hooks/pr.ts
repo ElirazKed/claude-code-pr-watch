@@ -26,13 +26,32 @@ export function refFromGhCommand(command: string): PrRef | null {
   return { url: `https://github.com/${name}/pull/${number}`, repo: name, number }
 }
 
-// PRs a tool call touched other than through `gh pr` (auto-tracked): a PR link in what
-// Claude sent (WebFetch, gh api, curl, MCP args), a GitHub-MCP pull request call, or a
-// PR link in the output of git push / gh / a pull-request tool. Capped: a changelog full
-// of links is not "dealing with" those PRs.
+const toolName = (tool: string) => tool.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '')
+
+// `gh`/`git` as a command (start of the line, or after ; & | or a paren), not a word in an
+// argument, a heredoc or a commit message.
+const asCommand = (pattern: string) => new RegExp(String.raw`(?:^|[;&|(])\s*${pattern}`, 'm')
+const GH_PR_CREATE = asCommand(String.raw`gh\s+pr\s+create\b`)
+const GH_OR_PUSH = asCommand(String.raw`(?:gh\s+|git\s+push\b)`)
+const GH_ONE_PR = asCommand(String.raw`gh\s+pr\s+(?:view|checks|diff|merge|ready|edit|comment|review|close|reopen|checkout|update-branch)\b`)
+
+// PRs Claude opened (`gh pr create`, a create-pull-request MCP tool): the only ones watched
+// without asking. The new PR's link is in the output.
+export function created(tool: string, input: Record<string, unknown>, output: string): PrRef[] {
+  const command = typeof input.command === 'string' ? input.command : ''
+  const isCreate =
+    tool === 'Bash' ? GH_PR_CREATE.test(command) : /create_?pull_?request|create_?prs?$/i.test(toolName(tool))
+
+  return isCreate ? findPrUrls(output) : []
+}
+
+// PRs a tool call touched that Claude did not open, to offer: a PR link in what Claude sent
+// (WebFetch, gh api, curl, MCP args), a GitHub-MCP pull request call, or a PR link in the
+// output of git push / gh / a pull-request tool. Capped: a changelog full of links is not
+// "dealing with" those PRs.
 export function suggestable(tool: string, input: Record<string, unknown>, output: string): PrRef[] {
   const found = findPrUrls(JSON.stringify(input))
-  const isPrTool = /pull|(^|_)prs?(_|$)/i.test(tool.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, ''))
+  const isPrTool = /pull|(^|_)prs?(_|$)/i.test(toolName(tool))
   if (isPrTool) {
     const repo = [input.owner, input.repo].every(v => typeof v === 'string') ? `${input.owner}/${input.repo}` : null
     const num = Number(input.pull_number ?? input.pullNumber ?? input.number ?? NaN)
@@ -41,14 +60,16 @@ export function suggestable(tool: string, input: Record<string, unknown>, output
     }
   }
   const command = typeof input.command === 'string' ? input.command : ''
-  if (isPrTool || /\bgit\s+push\b|\bgh\s+/.test(command)) found.push(...findPrUrls(output))
+  if (isPrTool || GH_OR_PUSH.test(command)) found.push(...findPrUrls(output))
   const unique = [...new Map(found.map(ref => [ref.url, ref])).values()]
 
   return unique.length > 3 ? unique.slice(0, 1) : unique
 }
 
-export function isGhPrCommand(command: string): boolean {
-  return /\bgh\s+pr\b/.test(command)
+// A `gh pr` subcommand about one PR, which gh resolves to the current branch's PR when no
+// number is given (`gh pr checks`). Not list, status or create.
+export function isGhOnePrCommand(command: string): boolean {
+  return GH_ONE_PR.test(command)
 }
 
 // The directory a `cd dir && gh pr ...` command ran in, if it says.

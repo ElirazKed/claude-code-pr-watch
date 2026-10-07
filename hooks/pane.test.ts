@@ -249,7 +249,49 @@ test('a session reads a fresh round another session ran, and asks GitHub nothing
   await ui.unmount()
 })
 
-test('a merged PR a gh command touched is never added, however recently it merged', async ($, on) => {
+test('a PR Claude only read through gh is offered, not added', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  let opens = 0
+  on('ui.open', () => ((opens += 1), { value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  fakeHost(on, clock, GH)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: RUNNING }, text: `View this pull request on GitHub: ${RUNNING}` }))
+
+  const viewed = await $.tool.call({ tool: 'Bash', command: `gh pr view ${RUNNING}`, description: 'view' } as never)
+  await clock.advance(100)
+
+  expect(viewed.context?.join(' ')).toContain('acme/app#12')
+  expect(opens).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /#12/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a PR Claude opened with gh pr create is watched without asking', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  let opens = 0
+  on('ui.open', () => ((opens += 1), { value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  fakeHost(on, clock, GH)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: RUNNING }, text: `${RUNNING}\n` }))
+
+  const made = await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill', description: 'open PR' } as never)
+  await clock.advance(100)
+
+  expect(made.context ?? []).toEqual([])
+  expect(opens).toBe(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /#12/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a merged PR Claude opened is never added, however recently it merged', async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   let opens = 0
   on('ui.open', () => ((opens += 1), { value: { isPlaced: true } }))
@@ -261,7 +303,7 @@ test('a merged PR a gh command touched is never added, however recently it merge
   fakeHost(on, clock, { ...GH, [OLD]: pr(OLD, { state: 'MERGED', mergedAt: '2026-10-07T11:59:00Z' }) })
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: OLD }, text: OLD }))
 
-  await $.tool.call({ tool: 'Bash', command: `gh pr view ${OLD}`, description: 'view' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill', description: 'open PR' } as never)
   await clock.advance(100)
 
   expect(opens).toBe(0)

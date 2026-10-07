@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cwdOf, derive, findPrUrls, refFromGhCommand, stepIndex, suggestable } from './pr'
+import { created, cwdOf, derive, findPrUrls, isGhOnePrCommand, refFromGhCommand, stepIndex, suggestable } from './pr'
 import type { GhPr } from './pr'
 
 const base: GhPr = {
@@ -207,5 +207,37 @@ describe('suggesting PRs Claude touched', () => {
   test('not PR links that merely sit in a file Claude read', async () => {
     expect(suggestable('Read', { file_path: '/repo/CHANGELOG.md' }, `fixed in ${url}`)).toEqual([])
     expect(suggestable('Bash', { command: 'cat CHANGELOG.md' }, `fixed in ${url}`)).toEqual([])
+  })
+
+  test('not a gh or git push that is only a word inside the command', async () => {
+    expect(suggestable('Bash', { command: "cat <<'EOF'\nsee gh docs, then git push\nEOF" }, `fixed in ${url}`)).toEqual([])
+    expect(suggestable('Bash', { command: 'cd /repo && gh api repos/acme/app' }, url).map(r => r.url)).toEqual([url])
+  })
+})
+
+describe('PRs Claude opened', () => {
+  const url = 'https://github.com/acme/app/pull/9'
+
+  test('gh pr create, alone or after cd', async () => {
+    expect(created('Bash', { command: 'gh pr create --fill' }, `${url}\n`).map(r => r.url)).toEqual([url])
+    expect(created('Bash', { command: 'cd /repo && gh pr create -t x -b y' }, url).map(r => r.url)).toEqual([url])
+  })
+
+  test('a create-pull-request MCP tool', async () => {
+    expect(created('mcp__github__create_pull_request', { owner: 'acme', repo: 'app' }, `{"html_url":"${url}"}`).length).toBe(1)
+  })
+
+  test('not a PR Claude only read, listed or checked', async () => {
+    for (const command of [`gh pr view ${url}`, 'gh pr list', 'gh pr checks 9', "git commit -m 'run gh pr create later'"]) {
+      expect(created('Bash', { command }, url)).toEqual([])
+    }
+    expect(created('mcp__github__get_pull_request', { owner: 'acme', repo: 'app', pull_number: 9 }, url)).toEqual([])
+  })
+
+  test('gh resolves a number-less command to one PR only for single-PR subcommands', async () => {
+    expect(isGhOnePrCommand('gh pr checks')).toBe(true)
+    expect(isGhOnePrCommand('cd /repo && gh pr view --json title')).toBe(true)
+    expect(isGhOnePrCommand('gh pr list --limit 30')).toBe(false)
+    expect(isGhOnePrCommand('gh pr status')).toBe(false)
   })
 })

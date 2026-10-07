@@ -32,9 +32,9 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 
 ## What it watches
 
-- **Automatically:** PRs Claude creates, views, checks or merges with `gh pr …`. Only open PRs are picked up; a merged or closed one never gets a card.
+- **Automatically:** PRs Claude opens (`gh pr create`, or a GitHub MCP create-pull-request call). Only open PRs are picked up; a merged or closed one never gets a card.
 - **When you ask:** `/pr-watch <url>`, or paste a PR link in a prompt. These are watched in any state.
-- **When offered:** if Claude touches a PR some other way (a fetched link, a GitHub MCP call, `git push` output), it asks you once whether to watch it.
+- **When offered:** if Claude touches any other PR (`gh pr view`/`checks`/`merge`, a fetched link, a GitHub MCP call, `git push` output), it asks you once whether to watch it. A PR Claude only read while researching doesn't land in your pane.
 
 `/pr-watch` opens the pane, and `/pr-watch stop <number|url|all>` stops watching. Finished PRs stay until you dismiss them, `d` dismisses them all, and `r` refreshes.
 
