@@ -63,6 +63,27 @@ type CheckItem = {
   status?: string
   conclusion?: string
   state?: string
+  workflow?: string
+  startedAt?: string | null
+  createdAt?: string | null
+}
+
+// GitHub keeps every run of a check on the head commit: each pull_request event (a label,
+// an edit, a re-run) starts another, and the rollup lists them all. The PR page shows the
+// latest of each, so fold to that, or a failure that a later run fixed stays red.
+export function latestRuns(items: readonly CheckItem[]): CheckItem[] {
+  const latest = new Map<string, { item: CheckItem; at: number; order: number }>()
+  items.forEach((item, order) => {
+    const isContext = item.__typename === 'StatusContext' || item.state !== undefined
+    const key = isContext ? `status:${item.context ?? ''}` : `run:${item.workflow ?? ''}/${item.name ?? ''}`
+    // A run not started yet (queued, waiting) is the newest of its check.
+    const stamp = isContext ? item.createdAt : item.startedAt
+    const at = stamp == null ? (isContext ? 0 : Number.POSITIVE_INFINITY) : Date.parse(stamp) || 0
+    const held = latest.get(key)
+    if (held === undefined || at > held.at || (at === held.at && order > held.order)) latest.set(key, { item, at, order })
+  })
+
+  return [...latest.values()].sort((a, b) => a.order - b.order).map(entry => entry.item)
 }
 
 const PASSED = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED'])
@@ -73,7 +94,7 @@ export function emptyChecks(): Checks {
 
 export function summarizeChecks(items: readonly CheckItem[] | null | undefined): Checks {
   const checks = emptyChecks()
-  for (const item of items ?? []) {
+  for (const item of latestRuns(items ?? [])) {
     checks.total += 1
     const isContext = item.__typename === 'StatusContext' || item.state !== undefined
     const verdict = isContext

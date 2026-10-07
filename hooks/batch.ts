@@ -10,8 +10,8 @@ const FRAGMENT = `fragment pr on PullRequest {
   additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt }
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
-    ... on CheckRun { name status conclusion }
-    ... on StatusContext { context state }
+    ... on CheckRun { name status conclusion startedAt checkSuite { workflowRun { workflow { name } } } }
+    ... on StatusContext { context state createdAt }
   } } } } } }
 }`
 
@@ -37,12 +37,25 @@ export type BatchResult = {
 }
 
 type GqlPr = Omit<GhPr, 'statusCheckRollup'> & {
-  commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: GhPr['statusCheckRollup'] } } | null } }[] }
+  commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: GqlCheck[] } } | null } }[] }
 }
 
 type GqlReply = {
   data?: Record<string, unknown> | null
   errors?: { type?: string; message?: string }[]
+}
+
+type GqlCheck = NonNullable<GhPr['statusCheckRollup']>[number] & {
+  checkSuite?: { workflowRun?: { workflow?: { name?: string } | null } | null } | null
+}
+
+// A check run's workflow name, lifted out of its suite, so two workflows' same-named jobs
+// stay apart when runs are folded to the latest of each.
+function flattenCheck(node: GqlCheck) {
+  const { checkSuite, ...check } = node
+  const workflow = checkSuite?.workflowRun?.workflow?.name
+
+  return workflow === undefined ? check : { ...check, workflow }
 }
 
 const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
@@ -73,7 +86,8 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
       return
     }
     const { commits, ...rest } = pr
-    result.found.set(ref.url, { ...rest, statusCheckRollup: commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [] })
+    const nodes = commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []
+    result.found.set(ref.url, { ...rest, statusCheckRollup: nodes.map(flattenCheck) })
   })
 
   return result

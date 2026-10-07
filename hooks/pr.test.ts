@@ -90,10 +90,10 @@ describe('lifecycle', () => {
   })
 
   test('conflicts outrank failing CI, which stays in the line', async () => {
-    const d = derive({ ...base, mergeStateStatus: 'DIRTY', statusCheckRollup: [run('validate-distill', 'COMPLETED', 'FAILURE'), run('lint', 'COMPLETED', 'SUCCESS')] })
+    const d = derive({ ...base, mergeStateStatus: 'DIRTY', statusCheckRollup: [run('lint-docs', 'COMPLETED', 'FAILURE'), run('lint', 'COMPLETED', 'SUCCESS')] })
     expect(d.pill).toBe('⚠ CONFLICTS')
     expect(d.tone).toBe('error')
-    expect(d.headline).toBe('Merge conflicts with base · failing: validate-distill')
+    expect(d.headline).toBe('Merge conflicts with base · failing: lint-docs')
     expect(d.stage).toBe('checks')
   })
 
@@ -113,6 +113,55 @@ describe('lifecycle', () => {
 
   test('a conflicted draft says so', async () => {
     expect(derive({ ...base, isDraft: true, mergeStateStatus: 'DIRTY' }).headline).toBe('Draft · merge conflicts')
+  })
+
+  test('a check re-run on the same commit counts by its latest run, as the PR page does', async () => {
+    const at = (name: string, conclusion: string, startedAt: string) => ({ ...run(name, 'COMPLETED', conclusion), workflow: 'Docs Check', startedAt })
+    const d = derive({
+      ...base,
+      statusCheckRollup: [
+        at('lint-docs', 'FAILURE', '2026-10-07T13:55:50Z'),
+        at('lint-docs', 'SUCCESS', '2026-10-07T14:07:48Z'),
+        at('lint-docs', 'SUCCESS', '2026-10-07T14:00:32Z'),
+        run('lint', 'COMPLETED', 'SUCCESS'),
+      ],
+    })
+    expect(d.pill).not.toBe('✗ CI FAILED')
+    expect(d.checks).toMatchObject({ passed: 2, failed: 0, total: 2 })
+  })
+
+  test('a queued re-run after a failure is what counts: CI is running again', async () => {
+    const d = derive({
+      ...base,
+      statusCheckRollup: [
+        { ...run('e2e', 'COMPLETED', 'FAILURE'), startedAt: '2026-10-07T13:00:00Z' },
+        { ...run('e2e', 'QUEUED'), startedAt: null },
+      ],
+    })
+    expect(d.pill).toBe('● CI RUNNING')
+    expect(d.checks.total).toBe(1)
+  })
+
+  test("two workflows' same-named jobs are separate checks", async () => {
+    const d = derive({
+      ...base,
+      statusCheckRollup: [
+        { ...run('test', 'COMPLETED', 'SUCCESS'), workflow: 'Unit' },
+        { ...run('test', 'COMPLETED', 'FAILURE'), workflow: 'E2E' },
+      ],
+    })
+    expect(d.checks).toMatchObject({ passed: 1, failed: 1, total: 2 })
+  })
+
+  test('a status context counts by its latest report', async () => {
+    const d = derive({
+      ...base,
+      statusCheckRollup: [
+        { __typename: 'StatusContext', context: 'ci/jenkins', state: 'FAILURE', createdAt: '2026-10-07T10:00:00Z' },
+        { __typename: 'StatusContext', context: 'ci/jenkins', state: 'SUCCESS', createdAt: '2026-10-07T11:00:00Z' },
+      ],
+    })
+    expect(d.checks).toMatchObject({ passed: 1, failed: 0, total: 1 })
   })
 
   test('green CI waiting on approval', async () => {
