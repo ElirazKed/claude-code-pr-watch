@@ -97,3 +97,7 @@ claude plugin test .                 # the *.test.ts suites
 `tsc -p .` type-checks once Claude Code has loaded the mod, which writes `.claude-plugin/types/`.
 
 `main` is protected: changes land through a pull request, once the `test` check (validate + tests, in `.github/workflows/ci.yml`) passes. History stays linear, so merge with squash or rebase; merge commits are turned off.
+
+## License
+
+[MIT](LICENSE)
