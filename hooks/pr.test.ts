@@ -390,8 +390,8 @@ describe('merging', () => {
   test('busy only for as long as a run can take; a mark with no start time is no mark', async () => {
     const at = Date.parse('2026-10-07T12:00:00Z')
     expect(isBusy({ at }, at + 1_000)).toBe(true)
-    expect(isBusy({ at }, at + 89_000)).toBe(true)
-    expect(isBusy({ at }, at + 91_000)).toBe(false)
+    expect(isBusy({ at }, at + 119_000)).toBe(true)
+    expect(isBusy({ at }, at + 121_000)).toBe(false)
     expect(isBusy(undefined, at)).toBe(false)
     // What an older version of this mod kept: the wording, no time.
     expect(isBusy('Merging…' as never, at)).toBe(false)
@@ -401,6 +401,10 @@ describe('merging', () => {
     const kept = mergeableOf(open)
     const { repository: _r, viewerCanEnableAutoMerge: _e, ...older } = open
     expect(mergeOf(older, kept)).toEqual(kept)
+    // What the entry says of the PR itself still holds the button back.
+    expect(mergeOf({ ...older, mergeable: 'CONFLICTING' }, kept).canMerge).toBe(false)
+    expect(mergeOf({ ...older, isDraft: true }, kept).canMerge).toBe(false)
+    expect(mergeOf({ ...older, mergeStateStatus: 'BLOCKED' }, kept).canMerge).toBe(false)
     expect(mergeOf(open, noMerge())).toEqual(kept)
     // Merged or closed is known whatever the version.
     expect(mergeOf({ ...older, state: 'MERGED' }, kept)).toEqual(noMerge())

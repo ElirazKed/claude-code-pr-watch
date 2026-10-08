@@ -629,7 +629,7 @@ test('a merge left busy (a reload mid-run, a gh that never ends) gives its butto
   expect(await ui.find({ text: '◌ Merging…' })).toBeDefined()
   expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
 
-  await clock.advance(91_000)
+  await clock.advance(121_000)
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ text: /Merging…/ })).toBeUndefined()
   await clock.advance(10)
@@ -837,7 +837,7 @@ test('a collection left busy gives the button back once stale', async ($, on) =>
   await clock.advance(10)
   expect(await ui.find({ text: '◌ Collecting logs…' })).toBeDefined()
 
-  await clock.advance(91_000)
+  await clock.advance(121_000)
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ text: /Collecting logs/ })).toBeUndefined()
   await ui.press({ key: `fix:${BROKEN}` })
@@ -854,7 +854,7 @@ test('a stale busy mark goes with the rest of the row when the card moves', asyn
   const fixtures: Record<string, unknown> = { [BROKEN]: broken }
   const { ui, clock, fills } = await fixCard($, on, fixtures, () => hung.promise)
   void ui.press({ key: `fix:${BROKEN}` })
-  await clock.advance(91_000)
+  await clock.advance(121_000)
   // The failing job is re-run and passes: the card moves, and what the row held goes.
   fixtures[BROKEN] = pr(BROKEN, { statusCheckRollup: [actionsJob('build', 903, 'SUCCESS'), actionsJob('lint', 902, 'SUCCESS')] })
   await ui.press({ key: 'refresh' })

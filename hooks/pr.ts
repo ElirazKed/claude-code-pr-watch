@@ -239,7 +239,6 @@ export function metaOf(pr: GhPr) {
     deletions: pr.deletions,
     author: pr.author?.login ?? '',
     mergedAt: pr.mergedAt,
-    merge: mergeableOf(pr),
   }
 }
 
@@ -267,8 +266,13 @@ export function noMerge(): Mergeable {
 
 // An entry written by an older version of this mod (one that won the poll lease) has no merge
 // facts: the card keeps what it last knew of them rather than lose its merge row for a round.
+// What the entry says of the PR itself still counts: no button on a draft or a conflicted
+// branch, and no merge now unless GitHub would merge it now.
 export function mergeOf(pr: GhPr, kept: Mergeable): Mergeable {
-  return pr.state === 'OPEN' && pr.repository === undefined ? kept : mergeableOf(pr)
+  if (pr.state !== 'OPEN' || pr.repository !== undefined) return mergeableOf(pr)
+  if (pr.isDraft || isConflicted(pr)) return { ...kept, canMerge: false, canAuto: false }
+
+  return { ...kept, canMerge: kept.canMerge && MERGES_NOW.has(pr.mergeStateStatus ?? '') }
 }
 
 export function mergeableOf(pr: GhPr): Mergeable {
@@ -347,9 +351,10 @@ export function mergeError(stderr: string): { message: string; isMethodRefused: 
   return { message, isMethodRefused: METHOD_REFUSED.test(message) }
 }
 
-// gh runs well inside this (its own timeouts stop it sooner): a busy mark older than this was
-// left by a module reload mid-run, so the row shows its buttons again.
-export const BUSY_MS = 90_000
+// gh runs well inside this (its own timeouts stop it sooner; a collection's longest is a token,
+// the checks and a log in turn, 20 + 20 + 60 s): a busy mark older than this was left by a
+// module reload mid-run, so the row shows its buttons again.
+export const BUSY_MS = 120_000
 
 export function isBusy(busy: Busy | undefined, now: number): busy is Busy {
   return typeof busy?.at === 'number' && now - busy.at < BUSY_MS

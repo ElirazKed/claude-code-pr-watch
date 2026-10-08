@@ -388,7 +388,8 @@ const BUSY: Record<MergeRun['action'], string> = {
 // then asks GitHub again at once so the card shows what happened.
 async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   const method = run.action === 'cancel-auto' ? undefined : run.method
-  if (!(await claimMerge($, pr.url, { method, busy: { action: run.action, at: await $.clock.now() } }))) return
+  const busy = { action: run.action, at: await $.clock.now() }
+  if (!(await claimMerge($, pr.url, { method, busy }))) return
   let ask: MergeAsk = { method }
   try {
     const login = (await readShared($)).accounts[ownerOf(pr)] ?? ''
@@ -403,7 +404,8 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   } catch {
     ask = { method, error: 'gh pr merge did not finish' }
   }
-  await setAsk($, pr.url, ask)
+  // Only while the row is still this run's: not on a dismissed card, nor over a later press.
+  await update($, merging, all => (all[pr.url]?.busy?.at === busy.at ? { ...all, [pr.url]: ask } : all))
   await fetchNow($, [refOf(pr)])
 }
 
@@ -413,6 +415,11 @@ async function setFix($: EngineInterface, url: string, ask: FixAsk | null) {
 
     return ask === null ? rest : { ...rest, [url]: ask }
   })
+}
+
+// A collection's outcome, only while the row is still its own (see runMerge).
+async function settleFix($: EngineInterface, url: string, at: number, ask: FixAsk) {
+  await update($, fixing, all => (all[url]?.busy?.at === at ? { ...all, [url]: ask } : all))
 }
 
 // claimMerge for the Fix with Claude row: a second press while the logs come starts nothing.
@@ -448,7 +455,7 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
       failures = pr.checks.failing.map(name => ({ name, workflow: null, conclusion: 'failed', url: null, summary: null, jobId: null }))
     }
     if (failures.length === 0) {
-      await setFix($, pr.url, { error: 'No check is failing on the latest runs now' })
+      await settleFix($, pr.url, busy.at, { error: 'No check is failing on the latest runs now' })
       await fetchNow($, [refOf(pr)])
 
       return
@@ -473,7 +480,7 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
     const error = [problem, logProblems(handoffs)].filter(Boolean).join('; ') || undefined
     await handOver($, pr, fixPrompt(pr, handoffs), error)
   } catch {
-    await setFix($, pr.url, { error: "Couldn't hand the failure over" })
+    await settleFix($, pr.url, busy.at, { error: "Couldn't hand the failure over" })
   }
 }
 
