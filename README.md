@@ -53,6 +53,17 @@ A card offers a merge button once GitHub would merge the PR now (open, not a dra
 - **Which account:** `gh pr merge` runs as the gh account that can see the repo, the one the poller reads it with.
 - **When GitHub says no:** its message shows on the card. If it refused the method itself (say, a ruleset that allows only rebase), that method isn't offered for the repo again this session.
 
+## Fix with Claude
+
+A card whose CI failed (at least one check failing on its latest run, counted the way the card counts them) has a **Fix with Claude** button. It collects what failed and puts it in your prompt box as a draft: read it, change it if you like, and press Enter to send it to this session. Nothing reaches Claude until you do.
+
+- **What's in it:** the PR (repo, number, title, link, head branch → base), each failing check with its conclusion and link, the failed steps' logs, and the ask: find the cause and fix it on this branch, or say first if the repo or branch isn't checked out here. It doesn't ask Claude to push or merge.
+- **Logs:** for GitHub Actions jobs, `gh run view --job <id> --log-failed`, for the first 3 failing jobs. Each log loses its colour codes, timestamps and runner group markers, and keeps its last 120 lines, where the error usually is; all the logs together stay under about 12 KB. The draft says when a log was trimmed.
+- **Other CI:** a check from another CI app, or a commit status, has no log to fetch here, so its name, conclusion, summary or description, and link go in instead.
+- **Which account:** the checks and logs are fetched as the gh account that can see the repo, the one the poller reads it with.
+- **When something won't come:** the card says why (say, *No log for build: GitHub no longer keeps this log*), and the draft still has the names and links.
+- **No prompt box:** where the box won't take a draft, the card asks instead, *Send CI failure of #12 to Claude?*, and only **Confirm** (`y`) sends it; **Cancel** (`n`) sends nothing.
+
 ## How it polls
 
 Every session on the machine shares **one** poller, so 30 sessions watching 30 PRs cost about one GitHub call every 20–60 seconds, not 30.

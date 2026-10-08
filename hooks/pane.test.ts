@@ -62,6 +62,14 @@ const asGql = (fixture: Record<string, unknown>) => {
 }
 
 type MergeReply = { exitCode: number; stderr?: string }
+type RunReply = { exitCode: number; stdout?: string; stderr?: string }
+
+// A job's failed step as `gh run view --job <id> --log-failed` prints it.
+const FAILED_LOG = [
+  'build\tRun tests\t2026-10-07T11:58:01.1000000Z ##[group]Run npm test',
+  'build\tRun tests\t2026-10-07T11:58:02.2000000Z \u001b[31mFAIL\u001b[0m src/upload.test.ts',
+  'build\tRun tests\t2026-10-07T11:58:02.3000000Z Error: expected 3 retries, got 1',
+].join('\n')
 
 // What GitHub does when a `gh pr merge` goes through: the PR merges, or auto-merge turns on or off.
 function merged(gh: Record<string, unknown>, argv: readonly string[]) {
@@ -78,7 +86,8 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // Stands for gh, $HOME and the file system: answers batched queries from `gh`, keeps files in
 // memory (stamped with the mocked time, so mtimes are heartbeats), and records each gh argv.
 // `branchPr`: what `gh pr view` answers for the current branch. `merge`: how `gh pr merge`
-// ends; by default it goes through, and `merges` records each one's argv.
+// ends; by default it goes through, and `merges` records each one's argv. `runLog`: what
+// `gh run view` prints, a failed job's log by default; `runs` records each argv.
 function fakeHost(
   on: On,
   clock: Clock,
@@ -86,9 +95,11 @@ function fakeHost(
   files = new Map<string, { text: string; mtimeMs: number }>(),
   branchPr?: string,
   merge: (argv: readonly string[]) => MergeReply = () => ({ exitCode: 0 }),
+  runLog: (argv: readonly string[]) => RunReply | Promise<RunReply> = () => ({ exitCode: 0, stdout: FAILED_LOG }),
 ) {
   const queries: string[][] = []
   const merges: string[][] = []
+  const runs: string[][] = []
   on('env.get', () => ({ value: '/home/me' }))
   on('fs.read', ($, e) => ({ value: files.get(e.path)?.text ?? '' }))
   on('fs.write', ($, e) => (files.set(e.path, { text: e.text, mtimeMs: clock.now() }), { value: undefined }))
@@ -108,6 +119,11 @@ function fakeHost(
 
       return out(reply.exitCode, '', reply.stderr)
     }
+    if (e.argv[1] === 'run' && e.argv[2] === 'view') {
+      runs.push([...e.argv])
+
+      return Promise.resolve(runLog(e.argv)).then(reply => out(reply.exitCode, reply.stdout ?? '', reply.stderr))
+    }
     if (e.argv[1] === 'auth') return out(0, '  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\n')
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     if (e.argv[1] !== 'api') return out(1, '')
@@ -125,7 +141,7 @@ function fakeHost(
     return out(urls.every(url => url in gh) ? 0 : 1, JSON.stringify({ data }))
   })
 
-  return { queries, files, merges }
+  return { queries, files, merges, runs }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -542,5 +558,116 @@ test("a method GitHub refuses shows its message and isn't offered again", async 
   expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Rebase & merge')
   // Rebase is all that is left, so there is nothing to switch to.
   expect(await ui.find({ key: `method:${READY}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+const BROKEN = 'https://github.com/acme/app/pull/31'
+// A GitHub Actions job (its databaseId is the job's id) and another CI's commit status.
+const actionsJob = (name: string, id: number, conclusion: string) => ({
+  ...check(name, 'COMPLETED', conclusion),
+  startedAt: '2026-10-07T11:50:00Z',
+  databaseId: id,
+  detailsUrl: `https://github.com/acme/app/actions/runs/5/job/${id}`,
+  checkSuite: { workflowRun: { workflow: { name: 'CI' } } },
+})
+const jenkins = { __typename: 'StatusContext', context: 'ci/jenkins', state: 'FAILURE', description: 'tests failed', targetUrl: 'https://ci.example.com/job/7' }
+const broken = pr(BROKEN, { statusCheckRollup: [actionsJob('build', 901, 'FAILURE'), actionsJob('lint', 902, 'SUCCESS'), jenkins] })
+
+// Watches `fixtures` and draws the pane, with a prompt box that takes drafts unless `fill`
+// says otherwise; `fills` and `sent` are what reached the box and the session.
+async function fixCard(
+  $: Parameters<TestBody>[0],
+  on: On,
+  fixtures: Record<string, unknown>,
+  runLog?: (argv: readonly string[]) => RunReply | Promise<RunReply>,
+  fill: () => { isFilled: boolean } = () => ({ isFilled: true }),
+) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const fills: string[] = []
+  const sent: string[] = []
+  const { runs } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', ($, e) => (fills.push(e.text), fill()))
+  on('prompt.submit', ($, e) => (sent.push(e.text), { text: e.text }))
+  await $.command.run({
+    command: 'pr-watch',
+    args: Object.keys(fixtures).join(' '),
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: true, columns: 180 },
+  })
+  await clock.advance(100)
+
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), clock, runs, fills, sent }
+}
+
+test('a card whose CI failed offers Fix with Claude; a running or green one does not', async ($, on) => {
+  const { ui } = await fixCard($, on, { [BROKEN]: broken, [RUNNING]: GH[RUNNING], [READY]: mergeable() })
+  expect((await ui.find({ key: `fix:${BROKEN}` }))?.props.label).toBe('Fix with Claude')
+  expect(await ui.find({ key: `fix:${RUNNING}` })).toBeUndefined()
+  expect(await ui.find({ key: `fix:${READY}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("Fix with Claude fetches the failed job's log and drafts the hand-off in the prompt box", async ($, on) => {
+  const { ui, runs, fills, sent } = await fixCard($, on, { [BROKEN]: broken })
+  await ui.press({ key: `fix:${BROKEN}` })
+
+  expect(runs).toEqual([['gh', 'run', 'view', '--job', '901', '--log-failed', '-R', 'acme/app']])
+  expect(fills).toHaveLength(1)
+  const draft = fills[0] ?? ''
+  expect(draft).toContain('CI failed on acme/app#31')
+  expect(draft).toContain('- CI / build · failure · https://github.com/acme/app/actions/runs/5/job/901')
+  expect(draft).toContain('- ci/jenkins · failure · tests failed · https://ci.example.com/job/7')
+  expect(draft).toContain('Error: expected 3 retries, got 1')
+  expect(draft).not.toContain('lint')
+  // A draft, not a message: nothing reaches Claude until the person presses Enter.
+  expect(sent).toEqual([])
+  expect(await ui.find({ text: /Drafted in the prompt box/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('while the logs come, the card says so', async ($, on) => {
+  let release = () => {}
+  const held = new Promise<RunReply>(resolve => (release = () => resolve({ exitCode: 0, stdout: FAILED_LOG })))
+  const { ui, clock } = await fixCard($, on, { [BROKEN]: broken }, () => held)
+  const pressed = ui.press({ key: `fix:${BROKEN}` })
+  await clock.advance(10)
+
+  expect(await ui.find({ text: '◌ Collecting logs…' })).toBeDefined()
+  release()
+  await pressed
+  expect(await ui.find({ text: /Collecting logs/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a log GitHub no longer keeps is said on the card, and the names and links still go', async ($, on) => {
+  const gone = () => ({ exitCode: 1, stderr: 'failed to get run log: HTTP 410: Server Error (https://api.github.com/repos/acme/app/actions/runs/5/logs)\n' })
+  const { ui, fills } = await fixCard($, on, { [BROKEN]: broken }, gone)
+  await ui.press({ key: `fix:${BROKEN}` })
+
+  expect(await ui.find({ text: '✗ No log for build: GitHub no longer keeps this log' })).toBeDefined()
+  const draft = fills[0] ?? ''
+  expect(draft).toContain('- CI / build · failure · https://github.com/acme/app/actions/runs/5/job/901')
+  expect(draft).toContain('build: no log (GitHub no longer keeps this log).')
+  expect(draft).toContain('https://ci.example.com/job/7')
+  await ui.unmount()
+})
+
+test("where the prompt box won't take a draft, it asks first; Cancel sends nothing, Confirm sends it", async ($, on) => {
+  const { ui, fills, sent } = await fixCard($, on, { [BROKEN]: broken }, undefined, () => ({ isFilled: false }))
+  await ui.press({ key: `fix:${BROKEN}` })
+  expect(fills).toHaveLength(1)
+  expect(await ui.find({ text: 'Send CI failure of #31 to Claude?' })).toBeDefined()
+
+  await ui.press({ key: `fix-cancel:${BROKEN}` })
+  expect(sent).toEqual([])
+  expect(await ui.find({ text: /Send CI failure/ })).toBeUndefined()
+
+  await ui.press({ key: `fix:${BROKEN}` })
+  await ui.press({ key: `fix-confirm:${BROKEN}` })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('CI failed on acme/app#31')
+  expect(await ui.find({ text: '✓ Sent to Claude' })).toBeDefined()
   await ui.unmount()
 })

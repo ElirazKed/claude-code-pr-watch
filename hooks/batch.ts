@@ -1,6 +1,6 @@
 // One GraphQL query for many PRs: an aliased field per PR, so a tick costs one call whatever
 // the count, plus the rate limit it left. `gh pr view` fields, shaped back the way it gives them.
-import type { GhPr, PrRef, RepoMerge } from './pr'
+import type { CheckItem, GhPr, PrRef, RepoMerge } from './pr'
 
 // GitHub caps a query's node count; 100 checks for each of 40 PRs stays far inside it. The
 // repo's merge settings ride on each PR's own repository field: plain scalars, which cost
@@ -106,4 +106,29 @@ export function chunks<T>(items: readonly T[], size = BATCH_SIZE): T[][] {
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
 
   return out
+}
+
+// One PR's checks with what handing a failure to Claude needs: a GitHub Actions run's job id
+// (its databaseId) and the links and summaries the rest have. Asked only on that press, so
+// the poller's query stays as lean as it was; the same alias shape keeps one parser.
+export function checksQuery(ref: PrRef): string {
+  const [owner = '', name = ''] = ref.repo.split('/')
+
+  return `query {
+  p0: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) {
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+      __typename
+      ... on CheckRun { name status conclusion startedAt databaseId detailsUrl title summary checkSuite { workflowRun { workflow { name } } } }
+      ... on StatusContext { context state createdAt description targetUrl }
+    } } } } } }
+  } }
+}`
+}
+
+export function parseChecks(stdout: string, stderr: string, ref: PrRef): { checks: CheckItem[] } | { error: string } {
+  const reply = parseReply(stdout, stderr, [ref])
+  if (reply.error !== null) return { error: reply.error }
+  const pr = reply.found.get(ref.url)
+
+  return pr === undefined ? { error: "Not found, or this gh account can't see it" } : { checks: pr.statusCheckRollup ?? [] }
 }
