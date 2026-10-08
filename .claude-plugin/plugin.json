@@ -1,11 +1,29 @@
 {
   "name": "pr-watch",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "eliraz-refael"
   },
   "repository": "https://github.com/ElirazKed/claude-code-pr-watch",
-  "keywords": ["github", "pull-requests", "ci", "mod", "pane"]
+  "keywords": ["github", "pull-requests", "ci", "mod", "pane"],
+  "userConfig": {
+    "poll_active_seconds": {
+      "type": "number",
+      "title": "PR poll interval while something moves (seconds)",
+      "description": "How often GitHub is asked while a watched PR's CI runs or it is about to merge. Shared by every session on the machine; checked on a 10 s tick.",
+      "default": 20,
+      "min": 10,
+      "max": 600
+    },
+    "poll_idle_seconds": {
+      "type": "number",
+      "title": "PR poll interval when idle (seconds)",
+      "description": "How often GitHub is asked while no watched PR is moving. Shared by every session on the machine; checked on a 10 s tick.",
+      "default": 60,
+      "min": 10,
+      "max": 3600
+    }
+  }
 }

@@ -63,8 +63,12 @@ type Shared = {
   rate: RateLimit | null
 }
 
-const FAST_MS = 20_000
-const SLOW_MS = 60_000
+// How often a round runs while some PR moves, and otherwise: the `poll_active_seconds` and
+// `poll_idle_seconds` options, kept current by `config.set`.
+const MIN_POLL_MS = 10_000
+const pace = { fastMs: 20_000, slowMs: 60_000 }
+const seconds = (value: unknown, fallback: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.max(MIN_POLL_MS, value * 1_000) : fallback
 // A session whose file has not been touched for this long has exited.
 const ALIVE_MS = 60_000
 const LEASE_MS = 30_000
@@ -254,7 +258,7 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, i
   if (isRound) {
     const isMoving = [...found.values()].some(pr => derive(pr).isMoving)
     shared.fetchedAt = at
-    shared.nextAt = at + (isMoving ? FAST_MS : SLOW_MS)
+    shared.nextAt = at + (isMoving ? pace.fastMs : pace.slowMs)
     if (shared.rate !== null && shared.rate.remaining < LOW_RATE) {
       shared.nextAt = Math.max(shared.nextAt, Date.parse(shared.rate.resetAt) || 0)
     }
@@ -418,7 +422,21 @@ async function restore($: EngineInterface, carried: TrackedPr[]) {
   await syncAnimation($)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  pace.fastMs = seconds(options.poll_active_seconds, 20_000)
+  pace.slowMs = seconds(options.poll_idle_seconds, 60_000)
+
+  // A change in /config applies from the next round, no reload needed.
+  on('config.set', async ($, e, next) => {
+    const done = await next(e)
+    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds)$/)?.[1]
+    if (field === undefined || done.deny !== undefined) return done
+    if (field === 'poll_active_seconds') pace.fastMs = seconds(done.value, pace.fastMs)
+    else pace.slowMs = seconds(done.value, pace.slowMs)
+
+    return done
+  }).catch(($, e, next) => next(e))
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'pr-watch',

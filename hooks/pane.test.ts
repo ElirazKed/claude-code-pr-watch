@@ -355,3 +355,38 @@ test('a PR the person stopped watching stays stopped when Claude acts on it agai
   expect(await ui.find({ text: /#12/ })).toBeUndefined()
   await ui.unmount()
 })
+
+// Starts a session watching `url` and runs one round; what the round wrote to results.json.
+async function oneRound($: Parameters<TestBody>[0], on: On, url: string) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  fakeHost(on, clock, GH, files)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: url, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(10_500)
+  const shared = JSON.parse(files.get('/home/me/.cache/pr-watch/results.json')?.text ?? '{}')
+
+  return { gap: shared.nextAt - shared.fetchedAt, clock, files }
+}
+
+test('the poll intervals come from the options', { options: { poll_active_seconds: 15, poll_idle_seconds: 45 } }, async ($, on) => {
+  expect((await oneRound($, on, RUNNING)).gap).toBe(15_000)
+})
+
+test('the idle interval from the options', { options: { poll_active_seconds: 15, poll_idle_seconds: 45 } }, async ($, on) => {
+  expect((await oneRound($, on, FAILING)).gap).toBe(45_000)
+})
+
+test('a /config change to the interval applies from the next round', async ($, on) => {
+  on('config.set', ($, e) => ({ value: e.value }))
+  const { clock, files } = await oneRound($, on, FAILING)
+  await $.config.set({ key: 'pr-watch.poll_idle_seconds', value: 120 })
+  await clock.advance(60_000)
+  const shared = JSON.parse(files.get('/home/me/.cache/pr-watch/results.json')?.text ?? '{}')
+
+  expect(shared.nextAt - shared.fetchedAt).toBe(120_000)
+})

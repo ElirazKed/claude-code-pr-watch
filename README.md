@@ -46,7 +46,18 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 
 - Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
 - When the shared results are due, one session takes a short lease and fetches every live session's PRs in one batched GraphQL query (40 per query). It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
-- It polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
+- By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
+
+### Poll intervals
+
+Both intervals are settings in `/config`:
+
+| Setting | Default | Range |
+|---|---|---|
+| `poll_active_seconds`: while a watched PR's CI runs or it's about to merge | 20 | 10–600 |
+| `poll_idle_seconds`: while nothing is moving | 60 | 10–3600 |
+
+A change applies from the next round, with no reload needed. Sessions check on a 10s tick, so an interval is rounded up to the next tick. The session that runs a round uses its own settings, so keep them the same across Claude Code configs that share the machine.
 - With several `gh` accounts logged in, a PR the active account can't see is retried with the others. The cache remembers which **login** sees which owner, never a token.
 
 ## Develop
