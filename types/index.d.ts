@@ -50,19 +50,23 @@ export type TrackedPr = {
   merge: Mergeable
 }
 
-// A card's merge row between presses: the method picked, the question asked, gh running,
-// or what GitHub said no with.
+// A press's work under way, from when it started: a mark older than a run can take was left by
+// a reload mid-run, and counts for nothing.
+export type Busy = { at: number }
+
+// A card's merge row between presses: the method picked, the question asked, gh running (and
+// for which action), or what GitHub said no with.
 export type MergeAsk = {
   method?: MergeMethod
   asking?: 'merge' | 'auto'
-  busy?: string
+  busy?: Busy & { action: 'merge' | 'auto' | 'cancel-auto' }
   error?: string
 }
 
 // A card's Fix with Claude row: logs being collected, the message held for a yes where no
 // prompt box can take it as a draft, what came of it, or what went wrong.
 export type FixAsk = {
-  busy?: string
+  busy?: Busy
   asking?: string
   done?: string
   error?: string

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { FixAsk, MergeAsk, TrackedPr } from '../types'
+import type { Busy, FixAsk, MergeAsk, TrackedPr } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
   MERGE_LABEL,
@@ -11,8 +11,10 @@ import {
   derive,
   findPrUrls,
   isActive,
+  isBusy,
   mergeArgv,
   mergeError,
+  mergeOf,
   mergeQuestion,
   metaOf,
   nextMethod,
@@ -322,6 +324,7 @@ async function apply($: EngineInterface, shared: Shared) {
       state: entry.pr.state,
       ...derive(entry.pr),
       ...metaOf(entry.pr),
+      merge: mergeOf(entry.pr, current.merge),
       checkedAt: entry.at,
       error: entry.error ?? null,
     }
@@ -336,7 +339,7 @@ async function apply($: EngineInterface, shared: Shared) {
   await update($, now, () => at)
   // What a Fix with Claude press said belongs to the failure it was about.
   if (moved.length > 0) {
-    await update($, fixing, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || ask.busy !== undefined)))
+    await update($, fixing, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || isBusy(ask.busy, at))))
   }
   await refreshStatus($)
   await syncAnimation($)
@@ -362,6 +365,19 @@ async function oneQuestion($: EngineInterface) {
   await update($, fixing, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
 }
 
+// Marks a card's merge row busy for a run, unless a run already holds it: false then, so a
+// second press (a double click, `y` twice) starts nothing. One write, so two can't both win.
+async function claimMerge($: EngineInterface, url: string, ask: MergeAsk & Required<Pick<MergeAsk, 'busy'>>) {
+  let isClaimed = false
+  await update($, merging, all => {
+    isClaimed = !isBusy(all[url]?.busy, ask.busy.at)
+
+    return isClaimed ? { ...all, [url]: ask } : all
+  })
+
+  return isClaimed
+}
+
 const BUSY: Record<MergeRun['action'], string> = {
   merge: 'Merging…',
   auto: 'Turning on auto-merge…',
@@ -372,7 +388,8 @@ const BUSY: Record<MergeRun['action'], string> = {
 // then asks GitHub again at once so the card shows what happened.
 async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   const method = run.action === 'cancel-auto' ? undefined : run.method
-  await setAsk($, pr.url, { method, busy: BUSY[run.action] })
+  const busy = { action: run.action, at: await $.clock.now() }
+  if (!(await claimMerge($, pr.url, { method, busy }))) return
   let ask: MergeAsk = { method }
   try {
     const login = (await readShared($)).accounts[ownerOf(pr)] ?? ''
@@ -387,7 +404,8 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   } catch {
     ask = { method, error: 'gh pr merge did not finish' }
   }
-  await setAsk($, pr.url, ask)
+  // Only while the row is still this run's: not on a dismissed card, nor over a later press.
+  await update($, merging, all => (all[pr.url]?.busy?.at === busy.at ? { ...all, [pr.url]: ask } : all))
   await fetchNow($, [refOf(pr)])
 }
 
@@ -399,11 +417,29 @@ async function setFix($: EngineInterface, url: string, ask: FixAsk | null) {
   })
 }
 
+// A collection's outcome, only while the row is still its own (see runMerge).
+async function settleFix($: EngineInterface, url: string, at: number, ask: FixAsk) {
+  await update($, fixing, all => (all[url]?.busy?.at === at ? { ...all, [url]: ask } : all))
+}
+
+// claimMerge for the Fix with Claude row: a second press while the logs come starts nothing.
+async function claimFix($: EngineInterface, url: string, busy: Busy) {
+  let isClaimed = false
+  await update($, fixing, all => {
+    isClaimed = !isBusy(all[url]?.busy, busy.at)
+
+    return isClaimed ? { ...all, [url]: { busy } } : all
+  })
+
+  return isClaimed
+}
+
 // Collects what failed on a card, as the gh account the poller found sees the repo: the
 // failing checks as GitHub has them now, and the failed steps' logs of the first few Actions
 // jobs. A part that won't come is said on the card; the rest still goes, names and links.
 async function collectFailure($: EngineInterface, pr: TrackedPr) {
-  await setFix($, pr.url, { busy: 'Collecting logs…' })
+  const busy = { at: await $.clock.now() }
+  if (!(await claimFix($, pr.url, busy))) return
   try {
     const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
     let failures: Failure[]
@@ -419,7 +455,7 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
       failures = pr.checks.failing.map(name => ({ name, workflow: null, conclusion: 'failed', url: null, summary: null, jobId: null }))
     }
     if (failures.length === 0) {
-      await setFix($, pr.url, { error: 'No check is failing on the latest runs now' })
+      await settleFix($, pr.url, busy.at, { error: 'No check is failing on the latest runs now' })
       await fetchNow($, [refOf(pr)])
 
       return
@@ -438,12 +474,13 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
         }
       }),
     )
-    // Dismissed while the logs came: its card, and so its draft, are gone.
-    if ((await read($, fixing))[pr.url]?.busy === undefined) return
+    // Dismissed while the logs came (its card, and so its draft, are gone), or pressed again
+    // once this run looked stale: the later press drafts.
+    if ((await read($, fixing))[pr.url]?.busy?.at !== busy.at) return
     const error = [problem, logProblems(handoffs)].filter(Boolean).join('; ') || undefined
     await handOver($, pr, fixPrompt(pr, handoffs), error)
   } catch {
-    await setFix($, pr.url, { error: "Couldn't hand the failure over" })
+    await settleFix($, pr.url, busy.at, { error: "Couldn't hand the failure over" })
   }
 }
 
@@ -787,7 +824,7 @@ export const register: Register = (on, options) => {
           {`✗ ${ask.error}`}
         </Text>
       )
-      if (ask.busy !== undefined) return <Text color="suggestion">{`◌ ${ask.busy}`}</Text>
+      if (isBusy(ask.busy, at)) return <Text color="suggestion">{`◌ ${BUSY[ask.busy.action]}`}</Text>
       if (pr.merge.isAuto) {
         return (
           <Box flexDirection="column">
@@ -857,7 +894,7 @@ export const register: Register = (on, options) => {
           {`✗ ${ask.error}`}
         </Text>
       )
-      if (ask.busy !== undefined) return <Text color="suggestion">{`◌ ${ask.busy}`}</Text>
+      if (isBusy(ask.busy, at)) return <Text color="suggestion">◌ Collecting logs…</Text>
       const text = ask.asking
       if (text !== undefined) {
         return (

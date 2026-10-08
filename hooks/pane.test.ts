@@ -52,11 +52,20 @@ type On = Parameters<TestBody>[1]
 
 type Clock = ReturnType<typeof mock.clock>
 
+const FAILED = new Set(['ACTION_REQUIRED', 'CANCELLED', 'FAILURE', 'STALE', 'STARTUP_FAILURE', 'TIMED_OUT'])
+
 // gh's GraphQL shape for a fixture: the repository alias with its merge settings, and the PR
-// in it, checks nested under the head commit.
-const asGql = (fixture: Record<string, unknown>) => {
+// in it, checks nested under the head commit. A check run's title and summary come only by
+// the commit's check suites, for failed runs, and only when `query` asks for them there.
+const asGql = (fixture: Record<string, unknown>, query = '') => {
   const { statusCheckRollup, repository, ...rest } = fixture
-  const commits = { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: statusCheckRollup } } } }] }
+  const all = statusCheckRollup as Record<string, unknown>[]
+  const nodes = all.map(({ title: _t, summary: _s, ...item }) => item)
+  const failed = all
+    .filter(item => FAILED.has(String(item.conclusion)) && typeof item.databaseId === 'number')
+    .map(item => ({ databaseId: item.databaseId, title: item.title ?? null, summary: item.summary ?? null }))
+  const suites = query.includes('checkSuites') ? { checkSuites: { nodes: [{ checkRuns: { nodes: failed } }] } } : {}
+  const commits = { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes } }, ...suites } }] }
 
   return { ...(repository as object | undefined), pullRequest: { ...rest, closedAt: null, commits } }
 }
@@ -86,7 +95,8 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // Stands for gh, $HOME and the file system: answers batched queries from `gh`, keeps files in
 // memory (stamped with the mocked time, so mtimes are heartbeats), and records each gh argv.
 // `branchPr`: what `gh pr view` answers for the current branch. `merge`: how `gh pr merge`
-// ends; by default it goes through, and `merges` records each one's argv. `runLog`: what
+// ends (now, or once a promise settles); by default it goes through, and `merges` records each
+// one's argv. `runLog`: what
 // `gh run view` prints, a failed job's log by default; `runs` records each argv.
 function fakeHost(
   on: On,
@@ -94,7 +104,7 @@ function fakeHost(
   gh: Record<string, unknown>,
   files = new Map<string, { text: string; mtimeMs: number }>(),
   branchPr?: string,
-  merge: (argv: readonly string[]) => MergeReply = () => ({ exitCode: 0 }),
+  merge: (argv: readonly string[]) => MergeReply | Promise<MergeReply> = () => ({ exitCode: 0 }),
   runLog: (argv: readonly string[]) => RunReply | Promise<RunReply> = () => ({ exitCode: 0, stdout: FAILED_LOG }),
 ) {
   const queries: string[][] = []
@@ -114,10 +124,12 @@ function fakeHost(
     })
     if (e.argv[1] === 'pr' && e.argv[2] === 'merge') {
       merges.push([...e.argv])
-      const reply = merge(e.argv)
-      if (reply.exitCode === 0) merged(gh, e.argv)
 
-      return out(reply.exitCode, '', reply.stderr)
+      return Promise.resolve(merge(e.argv)).then(reply => {
+        if (reply.exitCode === 0) merged(gh, e.argv)
+
+        return out(reply.exitCode, '', reply.stderr)
+      })
     }
     if (e.argv[1] === 'run' && e.argv[2] === 'view') {
       runs.push([...e.argv])
@@ -134,7 +146,7 @@ function fakeHost(
       const url = `https://github.com/${owner}/${name}/pull/${num}`
       urls.push(url)
       const fixture = gh[url] as Record<string, unknown> | undefined
-      data[`p${i}`] = fixture === undefined ? null : asGql(fixture)
+      data[`p${i}`] = fixture === undefined ? null : asGql(fixture, query)
     }
     queries.push(urls)
 
@@ -436,7 +448,6 @@ const repo = (extra: Record<string, unknown> = {}) => ({
   squashMergeAllowed: true,
   rebaseMergeAllowed: true,
   mergeCommitAllowed: false,
-  autoMergeAllowed: true,
   viewerDefaultMergeMethod: 'SQUASH',
   viewerPermission: 'WRITE',
   ...extra,
@@ -454,14 +465,27 @@ const mergeable = (extra: Record<string, unknown> = {}) =>
   })
 
 // Watches #21 as `fixture` and draws the pane; `merges` is every `gh pr merge` argv since.
-async function mergeCard($: Parameters<TestBody>[0], on: On, fixture: Record<string, unknown>, merge?: (argv: readonly string[]) => MergeReply) {
+async function mergeCard(
+  $: Parameters<TestBody>[0],
+  on: On,
+  fixture: Record<string, unknown>,
+  merge?: (argv: readonly string[]) => MergeReply | Promise<MergeReply>,
+) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
   const { merges } = fakeHost(on, clock, { [READY]: fixture }, undefined, undefined, merge)
   await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges }
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, clock }
+}
+
+// A gh reply that waits for `release()`, so a test can act while gh runs.
+function held<T>(reply: T) {
+  let release = () => {}
+  const promise = new Promise<T>(resolve => (release = () => resolve(reply)))
+
+  return { promise, release: () => release() }
 }
 
 test('a clean PR offers Squash & merge, asks first, and Confirm merges it', async ($, on) => {
@@ -561,6 +585,113 @@ test("a method GitHub refuses shows its message and isn't offered again", async 
   await ui.unmount()
 })
 
+test('a double Confirm runs one merge, and its success stands', async ($, on) => {
+  const gh = held<MergeReply>({ exitCode: 0 })
+  const { ui, merges, clock } = await mergeCard($, on, mergeable(), () => gh.promise)
+  await ui.press({ key: `merge:${READY}` })
+  // `y` twice before the pane redraws: both presses reach the same Confirm.
+  const first = ui.press({ key: `confirm:${READY}` })
+  const second = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Merging…' })).toBeDefined()
+  gh.release()
+  await Promise.all([first, second])
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--squash']])
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  expect(await ui.find({ text: /^✗/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a double press of Cancel auto-merge runs it once', async ($, on) => {
+  const auto = mergeable({ mergeStateStatus: 'BLOCKED', autoMergeRequest: { enabledAt: '2026-10-07T11:00:00Z', mergeMethod: 'SQUASH' } })
+  const gh = held<MergeReply>({ exitCode: 0 })
+  const { ui, merges, clock } = await mergeCard($, on, auto, () => gh.promise)
+  const first = ui.press({ key: `cancel-auto:${READY}` })
+  const second = ui.press({ key: `cancel-auto:${READY}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Cancelling auto-merge…' })).toBeDefined()
+  gh.release()
+  await Promise.all([first, second])
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--disable-auto']])
+  await ui.unmount()
+})
+
+test('a merge left busy (a reload mid-run, a gh that never ends) gives its buttons back once stale', async ($, on) => {
+  // The first run never comes back, as one a reload cut off never does.
+  const hung = held<MergeReply>({ exitCode: 0 })
+  let calls = 0
+  const { ui, merges, clock } = await mergeCard($, on, mergeable(), () => ((calls += 1), calls === 1 ? hung.promise : { exitCode: 0 }))
+  await ui.press({ key: `merge:${READY}` })
+  void ui.press({ key: `confirm:${READY}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Merging…' })).toBeDefined()
+  expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
+
+  await clock.advance(121_000)
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ text: /Merging…/ })).toBeUndefined()
+  await clock.advance(10)
+  await ui.press({ key: `merge:${READY}` })
+  await ui.press({ key: `confirm:${READY}` })
+  expect(merges).toHaveLength(2)
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  hung.release()
+  await ui.unmount()
+})
+
+test("an error that only mentions a merge method shows, and hides no method", async ($, on) => {
+  const fail = () => ({ exitCode: 1, stderr: 'GraphQL: Pull request is in clean status, but the merge method squash could not be applied (mergePullRequest)\n' })
+  const { ui } = await mergeCard($, on, mergeable(), fail)
+  await ui.press({ key: `merge:${READY}` })
+  await ui.press({ key: `confirm:${READY}` })
+
+  expect(await ui.find({ text: '✗ Pull request is in clean status, but the merge method squash could not be applied' })).toBeDefined()
+  expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Squash & merge')
+  expect((await ui.find({ key: `method:${READY}` }))?.props.label).toBe('⇄ rebase')
+  await ui.unmount()
+})
+
+test('once every method is refused, the card keeps the error and offers no button', async ($, on) => {
+  const refuse = () => ({ exitCode: 1, stderr: 'GraphQL: Squash merges are not allowed on this repository. (mergePullRequest)\n' })
+  const { ui } = await mergeCard($, on, mergeable({ repository: repo({ rebaseMergeAllowed: false }) }), refuse)
+  await ui.press({ key: `merge:${READY}` })
+  await ui.press({ key: `confirm:${READY}` })
+
+  expect(await ui.find({ text: '✗ Squash merges are not allowed on this repository.' })).toBeDefined()
+  expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a round an older version of the mod ran keeps the card's merge row", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  fakeHost(on, clock, { [READY]: mergeable() }, files)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  // A session on a version from before the merge button won the lease: its entry has no
+  // merge facts (and a newer title, so the round is seen to land).
+  const fresh: Record<string, unknown> = mergeable({ title: 'Retry uploads, take two' })
+  const { repository: _r, viewerCanEnableAutoMerge: _e, viewerCanDisableAutoMerge: _d, ...older } = fresh
+  const at = clock.now()
+  files.set('/home/me/.cache/pr-watch/results.json', {
+    text: JSON.stringify({ fetchedAt: at, nextAt: at + 60_000, prs: { [READY]: { at, pr: older } }, accounts: {}, rate: null }),
+    mtimeMs: at,
+  })
+  await clock.advance(10_500)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /Retry uploads, take two/ })).toBeDefined()
+  expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Squash & merge')
+  await ui.unmount()
+})
+
 const BROKEN = 'https://github.com/acme/app/pull/31'
 // A GitHub Actions job (its databaseId is the job's id) and another CI's commit status.
 const actionsJob = (name: string, id: number, conclusion: string) => ({
@@ -573,23 +704,35 @@ const actionsJob = (name: string, id: number, conclusion: string) => ({
 const jenkins = { __typename: 'StatusContext', context: 'ci/jenkins', state: 'FAILURE', description: 'tests failed', targetUrl: 'https://ci.example.com/job/7' }
 const broken = pr(BROKEN, { statusCheckRollup: [actionsJob('build', 901, 'FAILURE'), actionsJob('lint', 902, 'SUCCESS'), jenkins] })
 
+type Submitted = { text: string } | { drop: string }
+
 // Watches `fixtures` and draws the pane, with a prompt box that takes drafts unless `fill`
-// says otherwise; `fills` and `sent` are what reached the box and the session.
+// says otherwise, and a session that takes prompts unless `submit` drops them; `fills` and
+// `sent` are what reached the box and the session, `box` what the box holds, and `type` puts
+// the person's own text in it.
 async function fixCard(
   $: Parameters<TestBody>[0],
   on: On,
   fixtures: Record<string, unknown>,
   runLog?: (argv: readonly string[]) => RunReply | Promise<RunReply>,
   fill: () => { isFilled: boolean } = () => ({ isFilled: true }),
+  submit: (text: string) => Submitted = text => ({ text }),
 ) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
   const fills: string[] = []
   const sent: string[] = []
+  let box = ''
   const { runs } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
-  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
-  on('prompt.fill', ($, e) => (fills.push(e.text), fill()))
-  on('prompt.submit', ($, e) => (sent.push(e.text), { text: e.text }))
+  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+  on('prompt.fill', ($, e) => {
+    fills.push(e.text)
+    const reply = fill()
+    if (reply.isFilled) box = e.mode === 'append' ? `${box}${e.text}` : e.text
+
+    return reply
+  })
+  on('prompt.submit', ($, e) => (sent.push(e.text), submit(e.text)))
   await $.command.run({
     command: 'pr-watch',
     args: Object.keys(fixtures).join(' '),
@@ -598,7 +741,7 @@ async function fixCard(
   })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), clock, runs, fills, sent }
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), clock, runs, fills, sent, box: () => box, type: (text: string) => (box = text) }
 }
 
 test('a card whose CI failed offers Fix with Claude; a running or green one does not', async ($, on) => {
@@ -669,5 +812,108 @@ test("where the prompt box won't take a draft, it asks first; Cancel sends nothi
   expect(sent).toHaveLength(1)
   expect(sent[0]).toContain('CI failed on acme/app#31')
   expect(await ui.find({ text: '✓ Sent to Claude' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a double press of Fix with Claude collects and drafts once', async ($, on) => {
+  const gh = held<RunReply>({ exitCode: 0, stdout: FAILED_LOG })
+  const { ui, clock, runs, fills } = await fixCard($, on, { [BROKEN]: broken }, () => gh.promise)
+  const first = ui.press({ key: `fix:${BROKEN}` })
+  const second = ui.press({ key: `fix:${BROKEN}` })
+  await clock.advance(10)
+  gh.release()
+  await Promise.all([first, second])
+
+  expect(runs).toHaveLength(1)
+  expect(fills).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a collection left busy gives the button back once stale', async ($, on) => {
+  const hung = held<RunReply>({ exitCode: 0, stdout: FAILED_LOG })
+  let calls = 0
+  const { ui, clock, fills } = await fixCard($, on, { [BROKEN]: broken }, () => ((calls += 1), calls === 1 ? hung.promise : { exitCode: 0, stdout: FAILED_LOG }))
+  void ui.press({ key: `fix:${BROKEN}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Collecting logs…' })).toBeDefined()
+
+  await clock.advance(121_000)
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ text: /Collecting logs/ })).toBeUndefined()
+  await ui.press({ key: `fix:${BROKEN}` })
+  expect(fills).toHaveLength(1)
+  // The cut-off run, back at last, drafts nothing over the later press's.
+  hung.release()
+  await clock.advance(10)
+  expect(fills).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a stale busy mark goes with the rest of the row when the card moves', async ($, on) => {
+  const hung = held<RunReply>({ exitCode: 0, stdout: FAILED_LOG })
+  const fixtures: Record<string, unknown> = { [BROKEN]: broken }
+  const { ui, clock, fills } = await fixCard($, on, fixtures, () => hung.promise)
+  void ui.press({ key: `fix:${BROKEN}` })
+  await clock.advance(121_000)
+  // The failing job is re-run and passes: the card moves, and what the row held goes.
+  fixtures[BROKEN] = pr(BROKEN, { statusCheckRollup: [actionsJob('build', 903, 'SUCCESS'), actionsJob('lint', 902, 'SUCCESS')] })
+  await ui.press({ key: 'refresh' })
+  hung.release()
+  await clock.advance(10)
+
+  expect(fills).toEqual([])
+  await ui.unmount()
+})
+
+test("the draft carries a failed run's summary, asked of failed runs only", async ($, on) => {
+  const summed = pr(BROKEN, {
+    statusCheckRollup: [
+      { ...actionsJob('build', 901, 'FAILURE'), title: '3 tests failed', summary: 'upload.test.ts: expected 3 retries' },
+      { ...actionsJob('lint', 902, 'SUCCESS'), title: 'Lint passed', summary: 'x'.repeat(65_000) },
+    ],
+  })
+  const { ui, fills } = await fixCard($, on, { [BROKEN]: summed })
+  await ui.press({ key: `fix:${BROKEN}` })
+
+  expect(fills[0]).toContain('- CI / build · failure · 3 tests failed · upload.test.ts: expected 3 retries · https://github.com/acme/app/actions/runs/5/job/901')
+  expect(fills[0]).not.toContain('Lint passed')
+  await ui.unmount()
+})
+
+test('a send a hook refuses takes back "Sent to Claude" and says why', async ($, on) => {
+  const { ui, clock, sent } = await fixCard($, on, { [BROKEN]: broken }, undefined, () => ({ isFilled: false }), () => ({ drop: 'Blocked by a hook' }))
+  await ui.press({ key: `fix:${BROKEN}` })
+  await ui.press({ key: `fix-confirm:${BROKEN}` })
+  await clock.advance(10)
+
+  expect(sent.length).toBeGreaterThan(0)
+  expect(await ui.find({ text: '✗ Not sent: Blocked by a hook' })).toBeDefined()
+  expect(await ui.find({ text: /Sent to Claude/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a card dismissed while its logs come drafts nothing', async ($, on) => {
+  const gh = held<RunReply>({ exitCode: 0, stdout: FAILED_LOG })
+  const { ui, clock, fills } = await fixCard($, on, { [BROKEN]: broken, [RUNNING]: GH[RUNNING] }, () => gh.promise)
+  const pressed = ui.press({ key: `fix:${BROKEN}` })
+  await clock.advance(10)
+  await ui.press({ key: `dismiss:${BROKEN}` })
+  gh.release()
+  await pressed
+
+  expect(fills).toEqual([])
+  await ui.unmount()
+})
+
+test("a second press replaces its earlier draft and keeps the person's text before it", async ($, on) => {
+  const { ui, fills, box, type } = await fixCard($, on, { [BROKEN]: broken })
+  await ui.press({ key: `fix:${BROKEN}` })
+  const draft = box()
+  type(`Look at this one first.\n\n${draft}`)
+  await ui.press({ key: `fix:${BROKEN}` })
+
+  expect(fills).toHaveLength(2)
+  expect(box().startsWith('Look at this one first.\n\nCI failed on acme/app#31')).toBe(true)
+  expect(box().split('CI failed on acme/app#31')).toHaveLength(2)
   await ui.unmount()
 })
