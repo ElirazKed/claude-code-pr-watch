@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { MergeAsk, TrackedPr } from '../types'
+import type { FixAsk, MergeAsk, TrackedPr } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
   MERGE_LABEL,
@@ -22,8 +22,10 @@ import {
   stepIndex,
   touched,
 } from './pr'
-import { buildQuery, chunks, parseReply } from './batch'
+import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batch'
 import type { RateLimit } from './batch'
+import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
+import type { Failure, Handoff } from './fix'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -38,6 +40,7 @@ const dropped = atom({ plugin: 'pr-watch', key: 'dropped' } as const, [])
 const merging = atom({ plugin: 'pr-watch', key: 'merging' } as const, {})
 // Methods GitHub refused for a repo: not offered again this session.
 const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
+const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -95,10 +98,10 @@ let prunedAt = 0
 
 const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null })
 
-async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string) {
+async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = 20_000) {
   return $.process.run(['gh', ...argv], {
     cwd,
-    timeoutMs: 20_000,
+    timeoutMs,
     env: token ? { GH_TOKEN: token } : undefined,
   })
 }
@@ -308,6 +311,7 @@ const refOf = (pr: TrackedPr): PrRef => ({ url: pr.url, repo: pr.repo, number: p
 async function apply($: EngineInterface, shared: Shared) {
   const at = await $.clock.now()
   const list = (await read($, prs)).map(full)
+  const moved: string[] = []
   const next = list.map(current => {
     const entry = shared.prs[current.url]
     if (entry === undefined || (current.checkedAt !== null && entry.at <= current.checkedAt)) return current
@@ -323,12 +327,17 @@ async function apply($: EngineInterface, shared: Shared) {
     }
     if (current.checkedAt !== null && current.pill !== pr.pill && pr.error === null) {
       $.ui.toast(`${TOAST_ICON[pr.tone] ?? '•'} PR #${pr.number} · ${pr.headline}`)
+      moved.push(pr.url)
     }
 
     return pr
   })
   await update($, prs, () => next)
   await update($, now, () => at)
+  // What a Fix with Claude press said belongs to the failure it was about.
+  if (moved.length > 0) {
+    await update($, fixing, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || ask.busy !== undefined)))
+  }
   await refreshStatus($)
   await syncAnimation($)
 }
@@ -345,6 +354,12 @@ async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {
 
     return ask === null ? rest : { ...rest, [url]: ask }
   })
+}
+
+// One question at a time across the pane, so y and n answer the one on screen.
+async function oneQuestion($: EngineInterface) {
+  await update($, merging, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
+  await update($, fixing, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
 }
 
 const BUSY: Record<MergeRun['action'], string> = {
@@ -374,6 +389,96 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   }
   await setAsk($, pr.url, ask)
   await fetchNow($, [refOf(pr)])
+}
+
+async function setFix($: EngineInterface, url: string, ask: FixAsk | null) {
+  await update($, fixing, all => {
+    const { [url]: _, ...rest } = all
+
+    return ask === null ? rest : { ...rest, [url]: ask }
+  })
+}
+
+// Collects what failed on a card, as the gh account the poller found sees the repo: the
+// failing checks as GitHub has them now, and the failed steps' logs of the first few Actions
+// jobs. A part that won't come is said on the card; the rest still goes, names and links.
+async function collectFailure($: EngineInterface, pr: TrackedPr) {
+  await setFix($, pr.url, { busy: 'Collecting logs…' })
+  try {
+    const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
+    let failures: Failure[]
+    let problem: string | null = null
+    try {
+      const res = await gh($, ['api', 'graphql', '-f', `query=${checksQuery(refOf(pr))}`], token)
+      const reply = parseChecks(res.stdout, res.stderr, refOf(pr))
+      if ('error' in reply) throw new Error(reply.error)
+      failures = failingChecks(reply.checks, pr.repo)
+    } catch (err) {
+      // The names the card shows, and the PR's checks page, are still worth handing over.
+      problem = `Couldn't read the checks: ${err instanceof Error ? err.message : 'gh api graphql failed'}`
+      failures = pr.checks.failing.map(name => ({ name, workflow: null, conclusion: 'failed', url: null, summary: null, jobId: null }))
+    }
+    if (failures.length === 0) {
+      await setFix($, pr.url, { error: 'No check is failing on the latest runs now' })
+      await fetchNow($, [refOf(pr)])
+
+      return
+    }
+    const wanted = new Set(toFetch(failures))
+    const handoffs = await Promise.all(
+      failures.map(async (failure): Promise<Handoff> => {
+        if (!wanted.has(failure) || failure.jobId === null) return { failure }
+        try {
+          const argv = ['run', 'view', '--job', String(failure.jobId), '--log-failed', '-R', pr.repo]
+          const res = await gh($, argv, token, undefined, 60_000)
+
+          return res.exitCode === 0 ? { failure, log: res.stdout } : { failure, error: logError(res.stderr || res.stdout) }
+        } catch {
+          return { failure, error: 'gh run view did not finish' }
+        }
+      }),
+    )
+    // Dismissed while the logs came: its card, and so its draft, are gone.
+    if ((await read($, fixing))[pr.url]?.busy === undefined) return
+    const error = [problem, logProblems(handoffs)].filter(Boolean).join('; ') || undefined
+    await handOver($, pr, fixPrompt(pr, handoffs), error)
+  } catch {
+    await setFix($, pr.url, { error: "Couldn't hand the failure over" })
+  }
+}
+
+// A draft in the prompt box, to read and send with Enter: nothing reaches Claude unseen. Where
+// the box won't take one (none on this surface, or a hook kept it out), the card asks instead,
+// and only Confirm sends it. A dialog holding the keys just goes away, so that one waits.
+async function handOver($: EngineInterface, pr: TrackedPr, text: string, error: string | undefined) {
+  const box = await $.prompt.read()
+  // Over an earlier draft of this hand-off, or an empty box; after anything the person typed.
+  const heading = fixHeading(pr)
+  const at = box.text.trim() === '' || box.text.startsWith(heading) ? 0 : box.text.indexOf(`\n\n${heading}`)
+  const filled =
+    at === -1
+      ? await $.prompt.fill({ text: `\n\n${text}`, mode: 'append' })
+      : await $.prompt.fill({ text: at === 0 ? text : `${box.text.slice(0, at)}\n\n${text}`, mode: 'replace' })
+  if (filled.isFilled) {
+    await setFix($, pr.url, { done: 'Drafted in the prompt box: read it, then press Enter', error })
+  } else if (filled.refusal === 'dialog') {
+    await setFix($, pr.url, { error: 'A dialog holds the prompt box; close it and press again' })
+  } else {
+    await oneQuestion($)
+    await setFix($, pr.url, { asking: text, error })
+  }
+}
+
+async function sendFix($: EngineInterface, pr: TrackedPr, text: string) {
+  await setFix($, pr.url, { done: 'Sent to Claude' })
+  // Not awaited: the prompt runs as a turn of its own once the session is idle. A hook that
+  // keeps it out, or a call that fails, takes back the "sent".
+  void $.prompt.submit({ text, asUser: true }).then(
+    async res => {
+      if (res.drop !== undefined) await setFix($, pr.url, { error: `Not sent: ${res.drop}` })
+    },
+    async () => setFix($, pr.url, { error: "Couldn't send it to Claude" }).catch(() => undefined),
+  ).catch(() => undefined)
 }
 
 async function refreshStatus($: EngineInterface) {
@@ -447,6 +552,7 @@ async function dismiss($: EngineInterface, url: string) {
   await update($, prs, list => list.filter(pr => pr.url !== url))
   await update($, dropped, list => (list.includes(url) ? list : [...list, url]))
   await setAsk($, url, null)
+  await setFix($, url, null)
   barWidth.delete(url)
   await syncAnimation($)
   if ((await read($, prs)).length === 0) await $.ui.close({ id: PANE })
@@ -619,6 +725,7 @@ export const register: Register = (on, options) => {
     const at = await read($, now)
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
+    const fixes = await read($, fixing)
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -723,8 +830,7 @@ export const register: Register = (on, options) => {
               label={action === 'merge' ? MERGE_LABEL[method] : `Auto-merge · ${method}`}
               variant="primary"
               onPress={async () => {
-                // One question at a time, so y and n answer the one on screen.
-                await update($, merging, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
+                await oneQuestion($)
                 await setAsk($, pr.url, { method, asking: action })
               }}
             />
@@ -737,6 +843,47 @@ export const register: Register = (on, options) => {
                 onPress={() => setAsk($, pr.url, { method: nextMethod(methods, method) })}
               />
             )}
+          </Box>
+        </Box>
+      )
+    }
+
+    // On a card whose CI failed: hand the failure to Claude, and what came of the last press.
+    const fixRow = (pr: TrackedPr) => {
+      if (pr.checks.failed === 0) return null
+      const ask = fixes[pr.url] ?? {}
+      const error = ask.error !== undefined && (
+        <Text color="error" wrap="wrap">
+          {`✗ ${ask.error}`}
+        </Text>
+      )
+      if (ask.busy !== undefined) return <Text color="suggestion">{`◌ ${ask.busy}`}</Text>
+      const text = ask.asking
+      if (text !== undefined) {
+        return (
+          <Box flexDirection="column">
+            {error}
+            <Text bold wrap="wrap">
+              {`Send CI failure of #${pr.number} to Claude?`}
+            </Text>
+            <Box gap={2}>
+              <Button key={`fix-confirm:${pr.url}`} label="Confirm" hotkey="y" plain onPress={() => sendFix($, pr, text)} />
+              <Button key={`fix-cancel:${pr.url}`} label="Cancel" hotkey="n" plain dimColor onPress={() => setFix($, pr.url, null)} />
+            </Box>
+          </Box>
+        )
+      }
+
+      return (
+        <Box flexDirection="column">
+          {error}
+          {ask.done !== undefined && (
+            <Text color="success" wrap="wrap">
+              {`✓ ${ask.done}`}
+            </Text>
+          )}
+          <Box>
+            <Button key={`fix:${pr.url}`} label="Fix with Claude" onPress={() => collectFailure($, pr)} />
           </Box>
         </Box>
       )
@@ -862,6 +1009,7 @@ export const register: Register = (on, options) => {
               ⚠ {pr.error}
             </Text>
           )}
+          {pr.state === 'OPEN' && fixRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
 
           <Box justifyContent="space-between">

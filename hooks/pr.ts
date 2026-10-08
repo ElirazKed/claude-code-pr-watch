@@ -113,7 +113,7 @@ export function cwdOf(command: string): string | undefined {
   return command.match(/^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&/)?.[1]?.replace(/^["']|["']$/g, '')
 }
 
-type CheckItem = {
+export type CheckItem = {
   __typename?: string
   name?: string
   context?: string
@@ -123,7 +123,17 @@ type CheckItem = {
   workflow?: string
   startedAt?: string | null
   createdAt?: string | null
+  // Asked for only when a failure is handed to Claude (fix.ts), not by the poller. A GitHub
+  // Actions check run's databaseId is its job's id.
+  databaseId?: number | null
+  detailsUrl?: string | null
+  title?: string | null
+  summary?: string | null
+  targetUrl?: string | null
+  description?: string | null
 }
+
+export const isStatusContext = (item: CheckItem) => item.__typename === 'StatusContext' || item.state !== undefined
 
 // GitHub keeps every run of a check on the head commit: each pull_request event (a label,
 // an edit, a re-run) starts another, and the rollup lists them all. The PR page shows the
@@ -131,7 +141,7 @@ type CheckItem = {
 export function latestRuns(items: readonly CheckItem[]): CheckItem[] {
   const latest = new Map<string, { item: CheckItem; at: number; order: number }>()
   items.forEach((item, order) => {
-    const isContext = item.__typename === 'StatusContext' || item.state !== undefined
+    const isContext = isStatusContext(item)
     const key = isContext ? `status:${item.context ?? ''}` : `run:${item.workflow ?? ''}/${item.name ?? ''}`
     // A run not started yet (queued, waiting) is the newest of its check.
     const stamp = isContext ? item.createdAt : item.startedAt
@@ -149,22 +159,20 @@ export function emptyChecks(): Checks {
   return { passed: 0, failed: 0, pending: 0, total: 0, failing: [], running: [], queued: 0 }
 }
 
+export function verdictOf(item: CheckItem): 'passed' | 'pending' | 'failed' {
+  if (isStatusContext(item)) {
+    return item.state === 'SUCCESS' ? 'passed' : item.state === 'PENDING' || item.state === 'EXPECTED' ? 'pending' : 'failed'
+  }
+
+  return item.status !== 'COMPLETED' ? 'pending' : PASSED.has(item.conclusion ?? '') ? 'passed' : 'failed'
+}
+
 export function summarizeChecks(items: readonly CheckItem[] | null | undefined): Checks {
   const checks = emptyChecks()
   for (const item of latestRuns(items ?? [])) {
     checks.total += 1
-    const isContext = item.__typename === 'StatusContext' || item.state !== undefined
-    const verdict = isContext
-      ? item.state === 'SUCCESS'
-        ? 'passed'
-        : item.state === 'PENDING' || item.state === 'EXPECTED'
-          ? 'pending'
-          : 'failed'
-      : item.status !== 'COMPLETED'
-        ? 'pending'
-        : PASSED.has(item.conclusion ?? '')
-          ? 'passed'
-          : 'failed'
+    const isContext = isStatusContext(item)
+    const verdict = verdictOf(item)
     checks[verdict] += 1
     const name = item.name ?? item.context ?? 'check'
     if (verdict === 'failed') checks.failing.push(name)

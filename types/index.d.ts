@@ -59,6 +59,15 @@ export type MergeAsk = {
   error?: string
 }
 
+// A card's Fix with Claude row: logs being collected, the message held for a yes where no
+// prompt box can take it as a draft, what came of it, or what went wrong.
+export type FixAsk = {
+  busy?: string
+  asking?: string
+  done?: string
+  error?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'pr-watch': {
@@ -70,6 +79,8 @@ declare module 'claude-code' {
       merging: Record<string, MergeAsk>
       // Methods GitHub refused this session, by repo.
       refused: Record<string, MergeMethod[]>
+      // By PR url.
+      fixing: Record<string, FixAsk>
     }
   }
 }
