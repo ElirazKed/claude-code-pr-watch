@@ -36,6 +36,6 @@ export type TrackedPr = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'pr-watch': { prs: TrackedPr[]; now: number; suggested: string[] }
+    'pr-watch': { prs: TrackedPr[]; now: number; suggested: string[]; dropped: string[] }
   }
 }

@@ -6,17 +6,15 @@ import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from
 import {
   STEPS,
   ago,
-  created,
   cwdOf,
   derive,
   findPrUrls,
   isActive,
-  isGhOnePrCommand,
   metaOf,
   placeholder,
-  refFromGhCommand,
+  shellCode,
   stepIndex,
-  suggestable,
+  touched,
 } from './pr'
 import { buildQuery, chunks, parseReply } from './batch'
 import type { RateLimit } from './batch'
@@ -29,6 +27,8 @@ const OPEN = { id: PANE, title: TITLE, columns: 50, rows: 14 } as const
 const prs = atom({ plugin: 'pr-watch', key: 'prs' } as const, [])
 const now = atom({ plugin: 'pr-watch', key: 'now' } as const, 0)
 const suggested = atom({ plugin: 'pr-watch', key: 'suggested' } as const, [])
+// PRs the person stopped watching: Claude touching them again doesn't bring them back.
+const dropped = atom({ plugin: 'pr-watch', key: 'dropped' } as const, [])
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -333,10 +333,12 @@ async function refreshStatus($: EngineInterface) {
 }
 
 // `isExplicit`: the person named the PR, so it is watched whatever its state. Otherwise (a PR
-// Claude opened) only an open PR is: GitHub is asked first, so a merged or closed one never
-// gets a card; the person can still watch it by name.
+// Claude acted on) only an open PR the person hasn't stopped watching is: GitHub is asked
+// first, so a merged or closed one never gets a card; the person can still watch it by name.
 async function track($: EngineInterface, refs: PrRef[], isExplicit = false) {
   const known = new Set((await read($, prs)).map(pr => pr.url))
+  if (isExplicit) await update($, dropped, list => list.filter(url => !refs.some(ref => ref.url === url)))
+  else for (const url of await read($, dropped)) known.add(url)
   const fresh = refs.filter(ref => !known.has(ref.url))
   if (fresh.length === 0) return
   if (isExplicit) {
@@ -393,6 +395,7 @@ async function syncAnimation($: EngineInterface) {
 
 async function dismiss($: EngineInterface, url: string) {
   await update($, prs, list => list.filter(pr => pr.url !== url))
+  await update($, dropped, list => (list.includes(url) ? list : [...list, url]))
   barWidth.delete(url)
   await syncAnimation($)
   if ((await read($, prs)).length === 0) await $.ui.close({ id: PANE })
@@ -504,31 +507,22 @@ export const register: Register = on => {
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
 
-    // A PR Claude opened is watched without asking.
-    const input = e as unknown as Record<string, unknown>
-    const made = created(String(e.tool), input, ran.text ?? '')
-    if (made.length > 0) {
-      await track($, made)
-
-      return ran
+    // A PR Claude acted on is watched without asking; one it only read is offered.
+    const touch = touched(String(e.tool), e as unknown as Record<string, unknown>, ran.text ?? '')
+    let { acted, read: seen } = touch
+    if (touch.resolve !== null && e.tool === 'Bash' && !ran.isError) {
+      // `git push`, `gh pr checks`: ask gh which PR that was, from the same directory.
+      const num = shellCode(e.command).match(/\bgh\s+pr\s+[\w-]+\s+#?(\d+)\b/)?.[1]
+      const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], null, cwdOf(e.command))
+      const refs = res.exitCode === 0 ? findPrUrls(res.stdout) : []
+      if (touch.resolve === 'acted') acted = refs
+      else seen = refs
     }
+    if (acted.length > 0) await track($, acted)
 
-    // Any other PR Claude touched (read for research, checked, merged): have Claude offer to
-    // watch it, once per PR.
-    let touched = suggestable(String(e.tool), input, ran.text ?? '')
-    if (touched.length === 0 && e.tool === 'Bash' && isGhOnePrCommand(e.command) && !ran.isError) {
-      const fromFlags = refFromGhCommand(e.command)
-      if (fromFlags !== null) touched = [fromFlags]
-      else {
-        // `gh pr checks 12`, `gh pr merge`: ask gh which PR that was, from the same directory.
-        const num = e.command.match(/\bgh\s+pr\s+[\w-]+\s+#?(\d+)\b/)?.[1]
-        const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], null, cwdOf(e.command))
-        if (res.exitCode === 0) touched = findPrUrls(res.stdout)
-      }
-    }
-    const watched = new Set((await read($, prs)).map(pr => pr.url))
-    const asked = new Set(await read($, suggested))
-    const fresh = touched.filter(ref => !watched.has(ref.url) && !asked.has(ref.url))
+    const watched = new Set([...(await read($, prs)).map(pr => pr.url), ...acted.map(ref => ref.url)])
+    const asked = new Set([...(await read($, suggested)), ...(await read($, dropped))])
+    const fresh = seen.filter(ref => !watched.has(ref.url) && !asked.has(ref.url))
     if (fresh.length === 0) return ran
     await update($, suggested, list => [...list, ...fresh.map(ref => ref.url)])
     const named = fresh.map(ref => `${ref.repo}#${ref.number} (${ref.url})`).join(', ')
@@ -537,9 +531,10 @@ export const register: Register = on => {
       ...ran,
       context: [
         ...(ran.context ?? []),
-        `pr-watch: the user's live PR pane is not watching ${named}. When you next reply, ask the user in one short line ` +
-          `whether to add it to the PR pane; if they agree, call ${WATCH_TOOL} with its URL. Ask once: if they decline or ` +
-          `ignore it, do not bring it up again.`,
+        `pr-watch: you read ${named}, which the user's live PR pane is not watching. Only if it looks like the user's ` +
+          `own work in this session (a PR they are shepherding, not background reading or research), ask in one short ` +
+          `line whether to add it to the PR pane, and call ${WATCH_TOOL} with its URL if they agree. Otherwise say nothing ` +
+          `about it. Either way, do not bring it up again.`,
       ],
     }
   }).catch(($, e, next) => next(e))

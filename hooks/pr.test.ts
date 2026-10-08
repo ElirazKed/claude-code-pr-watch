@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { created, cwdOf, derive, findPrUrls, isGhOnePrCommand, refFromGhCommand, stepIndex, suggestable } from './pr'
+import { cwdOf, derive, findPrUrls, refFromGhCommand, shellCode, stepIndex, touched } from './pr'
 import type { GhPr } from './pr'
 
 const base: GhPr = {
@@ -188,56 +188,78 @@ describe('lifecycle', () => {
   })
 })
 
-describe('suggesting PRs Claude touched', () => {
+describe('PRs Claude only read: offered', () => {
   const url = 'https://github.com/acme/app/pull/9'
+  const read = (tool: string, input: Record<string, unknown>, output = '') => touched(tool, input, output)
 
   test('a PR link Claude fetched', async () => {
-    expect(suggestable('WebFetch', { url, prompt: 'status?' }, '').map(r => r.url)).toEqual([url])
+    expect(read('WebFetch', { url, prompt: 'status?' }).read.map(r => r.url)).toEqual([url])
   })
 
-  test('a GitHub MCP pull request call by owner/repo/number', async () => {
-    const refs = suggestable('mcp__github__get_pull_request', { owner: 'acme', repo: 'app', pull_number: 9 }, '')
-    expect(refs.map(r => r.url)).toEqual([url])
+  test('a GitHub MCP read by owner/repo/number', async () => {
+    const t = read('mcp__github__get_pull_request', { owner: 'acme', repo: 'app', pull_number: 9 })
+    expect([t.read.map(r => r.url), t.acted]).toEqual([[url], []])
   })
 
-  test('the PR a git push updated', async () => {
-    expect(suggestable('Bash', { command: 'git push' }, `remote: ${url}`).map(r => r.url)).toEqual([url])
+  test('gh pr view / diff, gh api GETs', async () => {
+    expect(read('Bash', { command: `gh pr view ${url}` }).read.map(r => r.url)).toEqual([url])
+    expect(read('Bash', { command: 'gh pr diff 9 -R acme/app' }).read.map(r => r.url)).toEqual([url])
+    expect(read('Bash', { command: 'gh api repos/acme/app/pulls/9' }).read.map(r => r.url)).toEqual([url])
+    expect(read('Bash', { command: 'gh pr view --json title' }).resolve).toBe('read')
+  })
+
+  test('gh pr list resolves nothing, and its --limit is not a PR number', async () => {
+    expect(read('Bash', { command: 'gh pr list --limit 30 -R acme/app' })).toEqual({ acted: [], read: [], resolve: null })
   })
 
   test('not PR links that merely sit in a file Claude read', async () => {
-    expect(suggestable('Read', { file_path: '/repo/CHANGELOG.md' }, `fixed in ${url}`)).toEqual([])
-    expect(suggestable('Bash', { command: 'cat CHANGELOG.md' }, `fixed in ${url}`)).toEqual([])
-  })
-
-  test('not a gh or git push that is only a word inside the command', async () => {
-    expect(suggestable('Bash', { command: "cat <<'EOF'\nsee gh docs, then git push\nEOF" }, `fixed in ${url}`)).toEqual([])
-    expect(suggestable('Bash', { command: 'cd /repo && gh api repos/acme/app' }, url).map(r => r.url)).toEqual([url])
+    expect(read('Read', { file_path: '/repo/CHANGELOG.md' }, `fixed in ${url}`).read).toEqual([])
+    expect(read('Bash', { command: 'cat CHANGELOG.md' }, `fixed in ${url}`).read).toEqual([])
   })
 })
 
-describe('PRs Claude opened', () => {
+describe('PRs Claude acted on: watched', () => {
   const url = 'https://github.com/acme/app/pull/9'
+  const acted = (input: Record<string, unknown>, output = '', tool = 'Bash') => touched(tool, input, output)
 
-  test('gh pr create, alone or after cd', async () => {
-    expect(created('Bash', { command: 'gh pr create --fill' }, `${url}\n`).map(r => r.url)).toEqual([url])
-    expect(created('Bash', { command: 'cd /repo && gh pr create -t x -b y' }, url).map(r => r.url)).toEqual([url])
+  test('gh pr create behind an env prefix and a heredoc PR body (as Claude really runs it)', async () => {
+    const command =
+      "S=/tmp/s && cat > $S/body.md <<'EOF'\nFollows https://github.com/acme/app/pull/4; run gh pr view later\nEOF\n" +
+      'GH_TOKEN=$(gh auth token --user me) gh pr create --repo acme/app --title "feat: x" --body-file $S/body.md'
+    expect(acted({ command }, `${url}\n`)).toEqual({ acted: [{ url, repo: 'acme/app', number: 9 }], read: [], resolve: null })
   })
 
-  test('a create-pull-request MCP tool', async () => {
-    expect(created('mcp__github__create_pull_request', { owner: 'acme', repo: 'app' }, `{"html_url":"${url}"}`).length).toBe(1)
+  test('git push with -c options, then gh pr create', async () => {
+    const command =
+      'T=$(gh auth token) && git -c credential.helper= -c credential.helper="!f() { echo password=$T; }; f" push -q -u origin feat/x 2>&1 | tail -2 && GH_TOKEN=$T gh pr create --fill'
+    const out = `remote:      https://github.com/acme/app/pull/new/feat/x\n${url}`
+    expect(acted({ command }, out).acted.map(r => r.url)).toEqual([url])
   })
 
-  test('not a PR Claude only read, listed or checked', async () => {
-    for (const command of [`gh pr view ${url}`, 'gh pr list', 'gh pr checks 9', "git commit -m 'run gh pr create later'"]) {
-      expect(created('Bash', { command }, url)).toEqual([])
+  test('a plain git push asks gh which PR the branch has', async () => {
+    expect(acted({ command: 'cd ~/src/app && git push' })).toEqual({ acted: [], read: [], resolve: 'acted' })
+  })
+
+  test('merge, comment, review, checks', async () => {
+    expect(acted({ command: `gh pr merge ${url} --squash` }).acted.map(r => r.url)).toEqual([url])
+    expect(acted({ command: 'gh pr comment 9 -R acme/app -b "LGTM, see gh pr create docs"' }).acted.map(r => r.url)).toEqual([url])
+    expect(acted({ command: 'gh pr checks --watch' }).resolve).toBe('acted')
+    expect(acted({ command: 'gh api -X PATCH repos/acme/app/pulls/9 -f title=x' }).acted.map(r => r.url)).toEqual([url])
+  })
+
+  test('GitHub MCP writes; a new PR is the first link in the reply', async () => {
+    const reply = `{"html_url":"${url}","body":"follows https://github.com/acme/app/pull/4"}`
+    expect(acted({ owner: 'acme', repo: 'app', title: 'x' }, reply, 'mcp__github__create_pull_request').acted.map(r => r.url)).toEqual([url])
+    expect(acted({ owner: 'acme', repo: 'app', pullNumber: 9 }, '', 'mcp__github__merge_pull_request').acted.map(r => r.url)).toEqual([url])
+  })
+
+  test('not a gh pr create, merge or git push that is only text in a heredoc or a message', async () => {
+    for (const command of ["git commit -m 'then gh pr create and git push'", "cat <<'EOF'\ngh pr merge 9\ngit push\nEOF"]) {
+      expect(acted({ command }, url)).toEqual({ acted: [], read: [], resolve: null })
     }
-    expect(created('mcp__github__get_pull_request', { owner: 'acme', repo: 'app', pull_number: 9 }, url)).toEqual([])
   })
 
-  test('gh resolves a number-less command to one PR only for single-PR subcommands', async () => {
-    expect(isGhOnePrCommand('gh pr checks')).toBe(true)
-    expect(isGhOnePrCommand('cd /repo && gh pr view --json title')).toBe(true)
-    expect(isGhOnePrCommand('gh pr list --limit 30')).toBe(false)
-    expect(isGhOnePrCommand('gh pr status')).toBe(false)
+  test('shellCode keeps the code around a heredoc', async () => {
+    expect(shellCode("cat > f <<'EOF' && echo hi\nbody\nEOF\ngh pr create")).toBe("cat > f   && echo hi\ngh pr create")
   })
 })

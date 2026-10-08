@@ -17,7 +17,7 @@ export function findPrUrls(text: string): PrRef[] {
 
 // `gh pr view 12 -R owner/repo` style references that carry no URL.
 export function refFromGhCommand(command: string): PrRef | null {
-  const sub = command.match(/\bgh\s+pr\s+\w+\s+(?:[^|;&]*?\s)?#?(\d+)\b/)
+  const sub = command.match(/\bgh\s+pr\s+[\w-]+\s+(?:[^|;&]*?\s)?#?(\d+)\b/)
   const repo = command.match(/(?:-R|--repo)[\s=]+([\w.-]+\/[\w.-]+)/)
   const name = repo?.[1]
   if (sub === null || name === undefined) return null
@@ -28,48 +28,84 @@ export function refFromGhCommand(command: string): PrRef | null {
 
 const toolName = (tool: string) => tool.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '')
 
-// `gh`/`git` as a command (start of the line, or after ; & | or a paren), not a word in an
-// argument, a heredoc or a commit message.
-const asCommand = (pattern: string) => new RegExp(String.raw`(?:^|[;&|(])\s*${pattern}`, 'm')
-const GH_PR_CREATE = asCommand(String.raw`gh\s+pr\s+create\b`)
-const GH_OR_PUSH = asCommand(String.raw`(?:gh\s+|git\s+push\b)`)
-const GH_ONE_PR = asCommand(String.raw`gh\s+pr\s+(?:view|checks|diff|merge|ready|edit|comment|review|close|reopen|checkout|update-branch)\b`)
-
-// PRs Claude opened (`gh pr create`, a create-pull-request MCP tool): the only ones watched
-// without asking. The new PR's link is in the output.
-export function created(tool: string, input: Record<string, unknown>, output: string): PrRef[] {
-  const command = typeof input.command === 'string' ? input.command : ''
-  const isCreate =
-    tool === 'Bash' ? GH_PR_CREATE.test(command) : /create_?pull_?request|create_?prs?$/i.test(toolName(tool))
-
-  return isCreate ? findPrUrls(output) : []
+// A command's shell code: heredoc bodies and quoted strings blanked, so a `gh pr create` in a
+// PR body or a commit message doesn't count, while `GH_TOKEN=$(…) gh pr create` and
+// `git -c k="…" push` do.
+export function shellCode(command: string): string {
+  return command
+    .replace(/<<-?\s*(['"]?)(\w+)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, (_m, _q, _tag, rest: string) => ` ${rest}`)
+    .replace(/'[^']*'|"(?:\\[\s\S]|[^"\\])*"/g, '""')
 }
 
-// PRs a tool call touched that Claude did not open, to offer: a PR link in what Claude sent
-// (WebFetch, gh api, curl, MCP args), a GitHub-MCP pull request call, or a PR link in the
-// output of git push / gh / a pull-request tool. Capped: a changelog full of links is not
-// "dealing with" those PRs.
-export function suggestable(tool: string, input: Record<string, unknown>, output: string): PrRef[] {
-  const found = findPrUrls(JSON.stringify(input))
-  const isPrTool = /pull|(^|_)prs?(_|$)/i.test(toolName(tool))
-  if (isPrTool) {
-    const repo = [input.owner, input.repo].every(v => typeof v === 'string') ? `${input.owner}/${input.repo}` : null
-    const num = Number(input.pull_number ?? input.pullNumber ?? input.number ?? NaN)
-    if (repo !== null && Number.isInteger(num) && num > 0) {
-      found.push({ url: `https://github.com/${repo}/pull/${num}`, repo, number: num })
-    }
+// `gh pr` subcommands that act on a PR. `checks` counts: following a PR's CI is shepherding it.
+const ACTS = new Set(['create', 'merge', 'ready', 'edit', 'comment', 'review', 'close', 'reopen', 'checkout', 'update-branch', 'checks'])
+// Single-PR read subcommands gh resolves to the current branch's PR when given no number.
+const READS_ONE = new Set(['view', 'diff'])
+const GIT_PUSH = /\bgit\b[^;&|\n]*?\spush\b/
+const GH_API_WRITE = /\bgh\s+api\b[^;&|\n]*?(?:(?:-X|--method)[\s=]*(?:POST|PATCH|PUT|DELETE)\b|\s(?:-f|-F|--field|--raw-field|--input)\s)/i
+const API_PULL = /\brepos\/([\w.-]+\/[\w.-]+)\/pulls\/(\d+)/g
+
+export type Touched = {
+  // PRs Claude acted on (opened, pushed to, commented, reviewed, merged, followed CI): watched.
+  acted: PrRef[]
+  // PRs Claude only read: offered, if they look like the person's own work.
+  read: PrRef[]
+  // The command named no PR (`git push`, `gh pr checks`), so gh must say which one it meant.
+  resolve: 'acted' | 'read' | null
+}
+
+// GitHub MCP tools that change a PR start with one of these (`merge_pull_request`,
+// `request_copilot_review`) or end in `_write`; `get_`, `list_`, `search_`, `_read` only read.
+const WRITE_VERBS = new Set(['create', 'update', 'merge', 'add', 'submit', 'request', 'push', 'enable', 'resolve', 'close', 'reopen', 'mark', 'dismiss'])
+
+const NONE: Touched = { acted: [], read: [], resolve: null }
+
+const uniq = (refs: PrRef[]) => [...new Map(refs.map(ref => [ref.url, ref])).values()]
+
+// A changelog full of links is not "dealing with" those PRs.
+const capped = (refs: PrRef[]) => (refs.length > 3 ? refs.slice(0, 1) : refs)
+
+export function touched(tool: string, input: Record<string, unknown>, output: string): Touched {
+  if (tool === 'Bash') return touchedByCommand(typeof input.command === 'string' ? input.command : '', output)
+  const name = toolName(tool)
+  const isPrTool = /pull|(^|_)prs?(_|$)/i.test(name)
+  if (!isPrTool) return { ...NONE, read: capped(findPrUrls(JSON.stringify(input))) }
+
+  const refs = findPrUrls(JSON.stringify(input))
+  const repo = [input.owner, input.repo].every(v => typeof v === 'string') ? `${input.owner}/${input.repo}` : null
+  const num = Number(input.pull_number ?? input.pullNumber ?? input.number ?? NaN)
+  if (repo !== null && Number.isInteger(num) && num > 0) refs.push({ url: `https://github.com/${repo}/pull/${num}`, repo, number: num })
+  const words = name.toLowerCase().split(/[_-]/)
+  const isWrite = WRITE_VERBS.has(words[0] ?? '') || words.includes('write')
+  if (!isWrite) {
+    return { ...NONE, read: capped(uniq([...refs, ...findPrUrls(output)])) }
   }
-  const command = typeof input.command === 'string' ? input.command : ''
-  if (isPrTool || GH_OR_PUSH.test(command)) found.push(...findPrUrls(output))
-  const unique = [...new Map(found.map(ref => [ref.url, ref])).values()]
+  // A new PR's own link comes first in the reply; its body may quote others.
+  const made = refs.length === 0 ? findPrUrls(output).slice(0, 1) : []
 
-  return unique.length > 3 ? unique.slice(0, 1) : unique
+  return { ...NONE, acted: uniq([...refs, ...made]) }
 }
 
-// A `gh pr` subcommand about one PR, which gh resolves to the current branch's PR when no
-// number is given (`gh pr checks`). Not list, status or create.
-export function isGhOnePrCommand(command: string): boolean {
-  return GH_ONE_PR.test(command)
+function touchedByCommand(command: string, output: string): Touched {
+  const code = shellCode(command)
+  const subs = [...code.matchAll(/\bgh\s+pr\s+([\w-]+)/g)].map(m => m[1] ?? '')
+  const apiRefs = [...code.matchAll(API_PULL)].map(([, repo = '', n]) => ({ url: `https://github.com/${repo}/pull/${Number(n)}`, repo, number: Number(n) }))
+  // `gh pr checks 12 -R o/r`; not `gh pr list --limit 30 -R o/r`.
+  const isOnePr = subs.some(sub => sub !== 'create' && (ACTS.has(sub) || READS_ONE.has(sub)))
+  const fromFlags = isOnePr ? refFromGhCommand(code) : null
+  const named = uniq([...findPrUrls(code), ...apiRefs, ...(fromFlags ? [fromFlags] : [])])
+  const isPush = GIT_PUSH.test(code)
+  if (subs.some(sub => ACTS.has(sub)) || isPush || GH_API_WRITE.test(code)) {
+    // `gh pr create` prints the new PR; `gh pr comment` the comment's link on its PR.
+    const acted = uniq([...named, ...findPrUrls(output)])
+    const resolve = acted.length === 0 && (isPush || isOnePr) ? 'acted' : null
+
+    return { acted, read: [], resolve }
+  }
+  if (!/\bgh\s/.test(code)) return NONE
+  const read = capped(uniq([...named, ...findPrUrls(output)]))
+
+  return { acted: [], read, resolve: read.length === 0 && subs.some(sub => READS_ONE.has(sub)) ? 'read' : null }
 }
 
 // The directory a `cd dir && gh pr ...` command ran in, if it says.

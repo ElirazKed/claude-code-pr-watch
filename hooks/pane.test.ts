@@ -63,7 +63,14 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 
 // Stands for gh, $HOME and the file system: answers batched queries from `gh`, keeps files in
 // memory (stamped with the mocked time, so mtimes are heartbeats), and records each gh argv.
-function fakeHost(on: On, clock: Clock, gh: Record<string, unknown>, files = new Map<string, { text: string; mtimeMs: number }>()) {
+// `branchPr`: what `gh pr view` answers for the current branch.
+function fakeHost(
+  on: On,
+  clock: Clock,
+  gh: Record<string, unknown>,
+  files = new Map<string, { text: string; mtimeMs: number }>(),
+  branchPr?: string,
+) {
   const queries: string[][] = []
   on('env.get', () => ({ value: '/home/me' }))
   on('fs.read', ($, e) => ({ value: files.get(e.path)?.text ?? '' }))
@@ -78,6 +85,7 @@ function fakeHost(on: On, clock: Clock, gh: Record<string, unknown>, files = new
       value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     })
     if (e.argv[1] === 'auth') return out(0, '  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\n')
+    if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     if (e.argv[1] !== 'api') return out(1, '')
     const query = String(e.argv[4] ?? '').slice('query='.length)
     const urls: string[] = []
@@ -309,5 +317,41 @@ test('a merged PR Claude opened is never added, however recently it merged', asy
   expect(opens).toBe(0)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ text: /#3/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a git push to a branch with an open PR watches that PR', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  fakeHost(on, clock, GH, undefined, RUNNING)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '' }, text: 'To github.com:acme/app.git\n   a1..b2  feat/retry -> feat/retry' }))
+
+  const pushed = await $.tool.call({ tool: 'Bash', command: 'cd ~/src/app && git push', description: 'push' } as never)
+  await clock.advance(100)
+
+  expect(pushed.context ?? []).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /#12/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a PR the person stopped watching stays stopped when Claude acts on it again', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  fakeHost(on, clock, GH)
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '' }, text: 'All checks were successful' }))
+  const checks = { tool: 'Bash', command: 'gh pr checks 12 -R acme/app', description: 'checks' } as never
+
+  await $.tool.call(checks)
+  await clock.advance(100)
+  const before = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await before.find({ text: /#12/ })).toBeDefined()
+  await before.unmount()
+  await $.command.run({ command: 'pr-watch', args: 'stop 12', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await $.tool.call(checks)
+  await clock.advance(100)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /#12/ })).toBeUndefined()
   await ui.unmount()
 })
