@@ -317,7 +317,7 @@ const refOf = (pr: TrackedPr): PrRef => ({ url: pr.url, repo: pr.repo, number: p
 
 // Folds the shared results into this session's cards: newer entries only, and a toast when
 // a card's state changes or a review lands. A new review's toast says it all: the state change
-// it caused doesn't toast as well.
+// it caused (a review or ready headline) doesn't toast as well; CI, conflicts and a merge still do.
 async function apply($: EngineInterface, shared: Shared) {
   const at = await $.clock.now()
   const list = (await read($, prs)).map(full)
@@ -328,7 +328,7 @@ async function apply($: EngineInterface, shared: Shared) {
     const entry = shared.prs[current.url]
     if (entry === undefined || (current.checkedAt !== null && entry.at <= current.checkedAt)) return current
     if (entry.pr === undefined) return { ...current, error: entry.error ?? null, checkedAt: current.checkedAt ?? entry.at }
-    const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others])
+    const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others], entry.pr.author?.login)
     const pr: TrackedPr = {
       ...current,
       title: entry.pr.title,
@@ -344,7 +344,8 @@ async function apply($: EngineInterface, shared: Shared) {
     const said = reviewToasts(fresh, pr.number)
     for (const text of said) $.ui.toast(text)
     if (current.checkedAt !== null && current.pill !== pr.pill && pr.error === null) {
-      if (said.length === 0) $.ui.toast(`${TOAST_ICON[pr.tone] ?? '•'} PR #${pr.number} · ${pr.headline}`)
+      const isReviewCaused = said.length > 0 && (pr.stage === 'review' || (pr.stage === 'ready' && pr.tone !== 'error'))
+      if (!isReviewCaused) $.ui.toast(`${TOAST_ICON[pr.tone] ?? '•'} PR #${pr.number} · ${pr.headline}`)
       moved.push(pr.url)
     }
 

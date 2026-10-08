@@ -1038,4 +1038,21 @@ test("a review that lands between rounds toasts once; the ones there at first si
   expect(await ui.find({ type: 'Text', text: '3 unresolved threads (1 outdated)' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '✗ bob · ✓ alice · 💬 nadav · 💬 codebot · +2 more' })).toBeDefined()
   await ui.unmount()
+
+  // The author's own thread replies toast nothing; a merge in the same round as a review (an
+  // approval auto-merged) still toasts.
+  const last = gh[REVIEWED] as Record<string, unknown>
+  gh[REVIEWED] = {
+    ...last,
+    state: 'MERGED',
+    mergedAt: '2026-10-07T12:04:00Z',
+    reviewDecision: 'APPROVED',
+    reviews: [
+      ...(last.reviews as Said[]),
+      { login: 'octocat', state: 'COMMENTED', at: '2026-10-07T12:03:00Z' },
+      { login: 'dana', state: 'APPROVED', at: '2026-10-07T12:03:30Z' },
+    ],
+  }
+  await clock.advance(70_000)
+  expect(toasts.slice(2)).toEqual(['✓ dana approved #41', '🎉 PR #41 · Merged'])
 })

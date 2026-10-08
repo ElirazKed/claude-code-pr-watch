@@ -121,12 +121,13 @@ export function verdictLine(reviews: Pick<Reviews, 'reviewers' | 'more'>, column
 export type ReviewEvent = { who: string; verdict: Reviewed; at: number }
 
 // The reviews submitted since `seen` (the newest submission time already looked at), by anyone
-// but the person (any of their gh logins). On a PR's first look (`seen` null) none is new:
+// but the person (any of their gh logins) or the PR's author (their thread replies are reviews
+// too, and reviewsOf leaves them out). On a PR's first look (`seen` null) none is new:
 // they were there before the card. Returns the new mark, which only moves forward, so a review
 // that drops out of the reply and comes back (a request made and withdrawn) isn't new again.
-export function newReviews(pr: ReviewFacts, seen: number | null, mine: readonly string[]): { fresh: ReviewEvent[]; seen: number | null } {
+export function newReviews(pr: ReviewFacts, seen: number | null, mine: readonly string[], author?: string): { fresh: ReviewEvent[]; seen: number | null } {
   if (pr.latestReviews == null) return { fresh: [], seen }
-  const own = new Set(mine.filter(Boolean).map(login => login.toLowerCase()))
+  const own = new Set([...mine, author ?? ''].filter(Boolean).map(login => login.toLowerCase()))
   const all = new Map<string, ReviewEvent & { login: string }>()
   for (const review of [...pr.latestReviews.nodes, ...(pr.latestOpinionatedReviews?.nodes ?? [])]) {
     const at = Date.parse(review.submittedAt ?? '')
