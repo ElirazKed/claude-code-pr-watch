@@ -1,25 +1,31 @@
 // One GraphQL query for many PRs: an aliased field per PR, so a tick costs one call whatever
 // the count, plus the rate limit it left. `gh pr view` fields, shaped back the way it gives them.
-import type { GhPr, PrRef } from './pr'
+import type { GhPr, PrRef, RepoMerge } from './pr'
 
-// GitHub caps a query's node count; 100 checks for each of 40 PRs stays far inside it.
+// GitHub caps a query's node count; 100 checks for each of 40 PRs stays far inside it. The
+// repo's merge settings ride on each PR's own repository field: plain scalars, which cost
+// nothing in rate-limit points or nodes.
 export const BATCH_SIZE = 40
 
 const FRAGMENT = `fragment pr on PullRequest {
   number title url state isDraft reviewDecision mergeStateStatus mergeable mergedAt closedAt
-  additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt }
+  additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt mergeMethod }
+  viewerCanEnableAutoMerge viewerCanDisableAutoMerge
   commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
     ... on CheckRun { name status conclusion startedAt checkSuite { workflowRun { workflow { name } } } }
     ... on StatusContext { context state createdAt }
   } } } } } }
+}
+fragment repo on Repository {
+  squashMergeAllowed rebaseMergeAllowed mergeCommitAllowed autoMergeAllowed viewerDefaultMergeMethod viewerPermission
 }`
 
 export function buildQuery(refs: readonly PrRef[]): string {
   const fields = refs.map((ref, i) => {
     const [owner = '', name = ''] = ref.repo.split('/')
 
-    return `p${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) { ...pr } }`
+    return `p${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) { ...pr } ...repo }`
   })
 
   return `query {\n  rateLimit { remaining resetAt }\n  ${fields.join('\n  ')}\n}\n${FRAGMENT}`
@@ -39,6 +45,8 @@ export type BatchResult = {
 type GqlPr = Omit<GhPr, 'statusCheckRollup'> & {
   commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: GqlCheck[] } } | null } }[] }
 }
+
+type GqlRepo = RepoMerge & { pullRequest: GqlPr | null }
 
 type GqlReply = {
   data?: Record<string, unknown> | null
@@ -79,7 +87,7 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
   }
   result.rate = (data.rateLimit as RateLimit | undefined) ?? null
   refs.forEach((ref, i) => {
-    const pr = (data[`p${i}`] as { pullRequest: GqlPr | null } | null | undefined)?.pullRequest
+    const { pullRequest: pr, ...repository } = (data[`p${i}`] as GqlRepo | null | undefined) ?? { pullRequest: null }
     if (pr == null) {
       result.missing.push(ref)
 
@@ -87,7 +95,7 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
     }
     const { commits, ...rest } = pr
     const nodes = commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []
-    result.found.set(ref.url, { ...rest, statusCheckRollup: nodes.map(flattenCheck) })
+    result.found.set(ref.url, { ...rest, repository, statusCheckRollup: nodes.map(flattenCheck) })
   })
 
   return result

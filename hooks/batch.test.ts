@@ -8,7 +8,7 @@ const B = { url: 'https://github.com/secret/app/pull/1', repo: 'secret/app', num
 describe('batched query', () => {
   test('one aliased field per PR, and the rate limit', async () => {
     const query = buildQuery([A, B])
-    expect(query).toContain('p0: repository(owner: "acme", name: "app") { pullRequest(number: 7) { ...pr } }')
+    expect(query).toContain('p0: repository(owner: "acme", name: "app") { pullRequest(number: 7) { ...pr } ...repo }')
     expect(query).toContain('p1: repository(owner: "secret", name: "app")')
     expect(query).toContain('rateLimit { remaining resetAt }')
   })
@@ -19,6 +19,8 @@ describe('batched query', () => {
       data: {
         rateLimit: { remaining: 4961, resetAt: '2026-10-07T11:01:16Z' },
         p0: {
+          squashMergeAllowed: true,
+          viewerPermission: 'WRITE',
           pullRequest: {
             number: 7,
             state: 'OPEN',
@@ -32,6 +34,7 @@ describe('batched query', () => {
     const reply = parseReply(stdout, 'gh: Could not resolve…', [A, B])
     expect(reply.error).toBe(null)
     expect(reply.found.get(A.url)?.statusCheckRollup).toEqual([{ __typename: 'CheckRun', name: 'build', status: 'IN_PROGRESS' }])
+    expect(reply.found.get(A.url)?.repository).toEqual({ squashMergeAllowed: true, viewerPermission: 'WRITE' })
     expect(reply.missing).toEqual([B])
     expect(reply.rate?.remaining).toBe(4961)
   })

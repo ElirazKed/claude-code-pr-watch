@@ -1,16 +1,22 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { TrackedPr } from '../types'
+import type { MergeAsk, TrackedPr } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
+  MERGE_LABEL,
   STEPS,
   ago,
   cwdOf,
   derive,
   findPrUrls,
   isActive,
+  mergeArgv,
+  mergeError,
+  mergeQuestion,
   metaOf,
+  nextMethod,
+  pickMethod,
   placeholder,
   shellCode,
   stepIndex,
@@ -18,7 +24,7 @@ import {
 } from './pr'
 import { buildQuery, chunks, parseReply } from './batch'
 import type { RateLimit } from './batch'
-import type { GhPr, PrRef } from './pr'
+import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
 const TITLE = 'Pull requests'
@@ -29,6 +35,9 @@ const now = atom({ plugin: 'pr-watch', key: 'now' } as const, 0)
 const suggested = atom({ plugin: 'pr-watch', key: 'suggested' } as const, [])
 // PRs the person stopped watching: Claude touching them again doesn't bring them back.
 const dropped = atom({ plugin: 'pr-watch', key: 'dropped' } as const, [])
+const merging = atom({ plugin: 'pr-watch', key: 'merging' } as const, {})
+// Methods GitHub refused for a repo: not offered again this session.
+const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -330,6 +339,43 @@ async function fetchNow($: EngineInterface, refs: PrRef[]) {
   await apply($, await publish($, refs, await $.clock.now()))
 }
 
+async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {
+  await update($, merging, all => {
+    const { [url]: _, ...rest } = all
+
+    return ask === null ? rest : { ...rest, [url]: ask }
+  })
+}
+
+const BUSY: Record<MergeRun['action'], string> = {
+  merge: 'Merging…',
+  auto: 'Turning on auto-merge…',
+  'cancel-auto': 'Cancelling auto-merge…',
+}
+
+// Runs gh pr merge as the account the poller found sees the repo (its token, never kept),
+// then asks GitHub again at once so the card shows what happened.
+async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
+  const method = run.action === 'cancel-auto' ? undefined : run.method
+  await setAsk($, pr.url, { method, busy: BUSY[run.action] })
+  let ask: MergeAsk = { method }
+  try {
+    const login = (await readShared($)).accounts[ownerOf(pr)] ?? ''
+    const res = await gh($, mergeArgv(pr.url, run), await tokenFor($, login))
+    if (res.exitCode !== 0) {
+      const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
+      ask = { method: isMethodRefused ? undefined : method, error: message }
+      if (isMethodRefused && method !== undefined) {
+        await update($, refused, all => ({ ...all, [pr.repo]: [...new Set([...(all[pr.repo] ?? []), method])] }))
+      }
+    }
+  } catch {
+    ask = { method, error: 'gh pr merge did not finish' }
+  }
+  await setAsk($, pr.url, ask)
+  await fetchNow($, [refOf(pr)])
+}
+
 async function refreshStatus($: EngineInterface) {
   const list = await read($, prs)
   const focus = list.find(isActive) ?? list[list.length - 1]
@@ -400,6 +446,7 @@ async function syncAnimation($: EngineInterface) {
 async function dismiss($: EngineInterface, url: string) {
   await update($, prs, list => list.filter(pr => pr.url !== url))
   await update($, dropped, list => (list.includes(url) ? list : [...list, url]))
+  await setAsk($, url, null)
   barWidth.delete(url)
   await syncAnimation($)
   if ((await read($, prs)).length === 0) await $.ui.close({ id: PANE })
@@ -570,6 +617,8 @@ export const register: Register = (on, options) => {
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
     const list = (await read($, prs)).map(full)
     const at = await read($, now)
+    const asks = await read($, merging)
+    const refusedBy = await read($, refused)
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -616,6 +665,78 @@ export const register: Register = (on, options) => {
             <Text bold>Nothing to watch yet</Text>
             <Text dimColor>PRs appear when Claude runs gh pr …</Text>
             <Text dimColor>or with /pr-watch &lt;url&gt;</Text>
+          </Box>
+        </Box>
+      )
+    }
+
+    // Merge, or auto-merge, behind a question; or auto-merge's state with a way to turn it off.
+    const mergeRow = (pr: TrackedPr) => {
+      const ask = asks[pr.url] ?? {}
+      const methods = pr.merge.methods.filter(m => !(refusedBy[pr.repo] ?? []).includes(m))
+      const method = pickMethod(methods, ask.method)
+      const error = ask.error !== undefined && (
+        <Text color="error" wrap="wrap">
+          {`✗ ${ask.error}`}
+        </Text>
+      )
+      if (ask.busy !== undefined) return <Text color="suggestion">{`◌ ${ask.busy}`}</Text>
+      if (pr.merge.isAuto) {
+        return (
+          <Box flexDirection="column">
+            {error}
+            <Box justifyContent="space-between">
+              <Text color="suggestion">{`⇢ Auto-merge on${pr.merge.autoMethod === null ? '' : ` · ${pr.merge.autoMethod}`}`}</Text>
+              {pr.merge.canCancelAuto && (
+                <Button
+                  key={`cancel-auto:${pr.url}`}
+                  label="Cancel auto-merge"
+                  onPress={() => runMerge($, pr, { action: 'cancel-auto' })}
+                />
+              )}
+            </Box>
+          </Box>
+        )
+      }
+      const action = pr.merge.canMerge ? 'merge' : pr.merge.canAuto ? 'auto' : null
+      if (method === null || action === null) return error || null
+      if (ask.asking === action) {
+        return (
+          <Box flexDirection="column">
+            <Text bold wrap="wrap">
+              {mergeQuestion(method, pr, action === 'auto')}
+            </Text>
+            <Box gap={2}>
+              <Button key={`confirm:${pr.url}`} label="Confirm" hotkey="y" plain onPress={() => runMerge($, pr, { action, method })} />
+              <Button key={`cancel:${pr.url}`} label="Cancel" hotkey="n" plain dimColor onPress={() => setAsk($, pr.url, { method })} />
+            </Box>
+          </Box>
+        )
+      }
+
+      return (
+        <Box flexDirection="column">
+          {error}
+          <Box gap={2}>
+            <Button
+              key={`${action}:${pr.url}`}
+              label={action === 'merge' ? MERGE_LABEL[method] : `Auto-merge · ${method}`}
+              variant="primary"
+              onPress={async () => {
+                // One question at a time, so y and n answer the one on screen.
+                await update($, merging, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
+                await setAsk($, pr.url, { method, asking: action })
+              }}
+            />
+            {methods.length > 1 && (
+              <Button
+                key={`method:${pr.url}`}
+                label={`⇄ ${nextMethod(methods, method)}`}
+                plain
+                dimColor
+                onPress={() => setAsk($, pr.url, { method: nextMethod(methods, method) })}
+              />
+            )}
           </Box>
         </Box>
       )
@@ -741,6 +862,7 @@ export const register: Register = (on, options) => {
               ⚠ {pr.error}
             </Text>
           )}
+          {pr.state === 'OPEN' && mergeRow(pr)}
 
           <Box justifyContent="space-between">
             <Text>

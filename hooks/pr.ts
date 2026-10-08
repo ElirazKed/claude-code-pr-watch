@@ -1,4 +1,4 @@
-import type { Checks, Stage, Tone, TrackedPr } from '../types'
+import type { Checks, MergeMethod, Mergeable, Stage, Tone, TrackedPr } from '../types'
 
 const PR_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 
@@ -199,7 +199,11 @@ export type GhPr = {
   mergeStateStatus: string | null
   // MERGEABLE, CONFLICTING or UNKNOWN: the direct signal, when DIRTY is still being computed.
   mergeable?: string | null
-  autoMergeRequest: unknown
+  autoMergeRequest: { enabledAt?: string | null; mergeMethod?: string | null } | null
+  viewerCanEnableAutoMerge?: boolean
+  viewerCanDisableAutoMerge?: boolean
+  // Its repository's merge settings, asked for in the same query.
+  repository?: RepoMerge
   statusCheckRollup: CheckItem[] | null
   mergedAt: string | null
   closedAt?: string | null
@@ -210,6 +214,16 @@ export type GhPr = {
   author: { login: string } | null
 }
 
+export type RepoMerge = {
+  squashMergeAllowed?: boolean
+  rebaseMergeAllowed?: boolean
+  mergeCommitAllowed?: boolean
+  autoMergeAllowed?: boolean
+  viewerDefaultMergeMethod?: string | null
+  // READ, TRIAGE, WRITE, MAINTAIN or ADMIN: merging takes WRITE.
+  viewerPermission?: string | null
+}
+
 export function metaOf(pr: GhPr) {
   return {
     branch: pr.headRefName,
@@ -218,7 +232,92 @@ export function metaOf(pr: GhPr) {
     deletions: pr.deletions,
     author: pr.author?.login ?? '',
     mergedAt: pr.mergedAt,
+    merge: mergeableOf(pr),
   }
+}
+
+const METHODS: readonly MergeMethod[] = ['squash', 'rebase', 'merge']
+const ALLOWS = { squash: 'squashMergeAllowed', rebase: 'rebaseMergeAllowed', merge: 'mergeCommitAllowed' } as const
+const MAY_MERGE = new Set(['WRITE', 'MAINTAIN', 'ADMIN'])
+// GitHub merges these now: HAS_HOOKS and UNSTABLE (an optional check failing) only warn.
+const MERGES_NOW = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE'])
+
+const asMethod = (value: string | null | undefined): MergeMethod | null => METHODS.find(m => m === value?.toLowerCase()) ?? null
+
+// The methods the repo allows, the viewer's default first while the repo still allows it.
+export function methodsOf(repo: RepoMerge | undefined): MergeMethod[] {
+  const allowed = METHODS.filter(m => repo?.[ALLOWS[m]] === true)
+  const preferred = asMethod(repo?.viewerDefaultMergeMethod)
+
+  return preferred !== null && allowed.includes(preferred) ? [preferred, ...allowed.filter(m => m !== preferred)] : allowed
+}
+
+const isConflicted = (pr: GhPr) => pr.mergeStateStatus === 'DIRTY' || pr.mergeable === 'CONFLICTING'
+
+export function noMerge(): Mergeable {
+  return { methods: [], canMerge: false, canAuto: false, isAuto: false, autoMethod: null, canCancelAuto: false }
+}
+
+export function mergeableOf(pr: GhPr): Mergeable {
+  if (pr.state !== 'OPEN') return noMerge()
+  const methods = methodsOf(pr.repository)
+  const isAuto = pr.autoMergeRequest != null
+  const isEligible = !pr.isDraft && !isConflicted(pr) && !isAuto && methods.length > 0
+  const canMerge = isEligible && MAY_MERGE.has(pr.repository?.viewerPermission ?? '') && MERGES_NOW.has(pr.mergeStateStatus ?? '')
+  // Held back by checks or review, not by a stale branch.
+  const isWaiting =
+    pr.mergeStateStatus === 'BLOCKED' || (pr.mergeStateStatus !== 'BEHIND' && summarizeChecks(pr.statusCheckRollup).pending > 0)
+
+  return {
+    methods,
+    canMerge,
+    canAuto: isEligible && !canMerge && isWaiting && pr.repository?.autoMergeAllowed === true && pr.viewerCanEnableAutoMerge === true,
+    isAuto,
+    autoMethod: asMethod(pr.autoMergeRequest?.mergeMethod),
+    canCancelAuto: isAuto && pr.viewerCanDisableAutoMerge === true,
+  }
+}
+
+// The method a card offers: the one the person switched to, while it is still on offer.
+export function pickMethod(methods: readonly MergeMethod[], chosen: MergeMethod | undefined): MergeMethod | null {
+  return chosen !== undefined && methods.includes(chosen) ? chosen : (methods[0] ?? null)
+}
+
+export function nextMethod(methods: readonly MergeMethod[], current: MergeMethod): MergeMethod {
+  return methods[(methods.indexOf(current) + 1) % methods.length] ?? current
+}
+
+export const MERGE_LABEL: Record<MergeMethod, string> = { squash: 'Squash & merge', rebase: 'Rebase & merge', merge: 'Merge' }
+const MERGE_VERB: Record<MergeMethod, string> = { squash: 'Squash-merge', rebase: 'Rebase-merge', merge: 'Merge' }
+
+// "Squash-merge #12 into main?": what Confirm will do.
+export function mergeQuestion(method: MergeMethod, pr: { number: number; base: string }, isAuto: boolean): string {
+  const into = `${MERGE_VERB[method]} #${pr.number} into ${pr.base || 'its base'}`
+
+  return isAuto ? `${into} once checks and review pass?` : `${into}?`
+}
+
+export type MergeRun = { action: 'merge' | 'auto'; method: MergeMethod } | { action: 'cancel-auto' }
+
+export function mergeArgv(url: string, run: MergeRun): string[] {
+  if (run.action === 'cancel-auto') return ['pr', 'merge', url, '--disable-auto']
+
+  return ['pr', 'merge', url, ...(run.action === 'auto' ? ['--auto'] : []), `--${run.method}`]
+}
+
+// A refusal of the method itself (the repo's settings, a ruleset), not of this PR's state.
+const METHOD_REFUSED = /merge method|(?:squash|rebase|merge commit)[\w ]*\bnot (?:allowed|enabled|permitted)|must not contain merge commits/i
+
+// What gh said, in plain words: without its ✗, the "GraphQL:" prefix, the mutation's name,
+// or the hints about gh's own flags.
+export function mergeError(stderr: string): { message: string; isMethodRefused: boolean } {
+  const lines = stderr
+    .split('\n')
+    .map(line => line.trim().replace(/^[X✗!]\s+/, '').replace(/^GraphQL:\s*/, '').replace(/\s*\(\w+\)$/, ''))
+    .filter(line => line !== '' && !/^To (?:have|use|merge)\b/.test(line))
+  const message = lines.join(' ') || 'gh pr merge failed'
+
+  return { message, isMethodRefused: METHOD_REFUSED.test(message) }
 }
 
 export function ago(ms: number): string {
@@ -256,16 +355,15 @@ export function derive(pr: GhPr): Derived {
   if (pr.state === 'CLOSED') return at('closed', 'subtle', '✕ CLOSED', 'Closed without merging')
   const names = checks.failing.slice(0, 2).join(', ')
   const failing = `${names}${checks.failing.length > 2 ? ` +${checks.failing.length - 2}` : ''}`
-  // A conflict blocks the merge whatever CI says, and checks on a conflicted head are often
-  // stale (GitHub cannot build the merge commit), so it outranks CI and review. CI stays in
-  // the line, and on the stepper, as the second thing to know.
-  const isConflicted = pr.mergeStateStatus === 'DIRTY' || pr.mergeable === 'CONFLICTING'
   if (pr.isDraft) {
-    const draft = isConflicted ? 'Draft · merge conflicts' : 'Draft'
+    const draft = isConflicted(pr) ? 'Draft · merge conflicts' : 'Draft'
 
     return at('draft', 'subtle', '✎ DRAFT', checks.pending > 0 ? `${draft} · ${ci}` : draft, checks.pending > 0)
   }
-  if (isConflicted) {
+  // A conflict blocks the merge whatever CI says, and checks on a conflicted head are often
+  // stale (GitHub cannot build the merge commit), so it outranks CI and review. CI stays in
+  // the line, and on the stepper, as the second thing to know.
+  if (isConflicted(pr)) {
     const stage = checks.failed > 0 || checks.pending > 0 ? 'checks' : 'ready'
     const status =
       checks.failed > 0 ? ` · failing: ${failing}` : checks.pending > 0 ? ` · ${activity(checks)}` : ''
@@ -316,6 +414,7 @@ export function placeholder(ref: PrRef): TrackedPr {
     mergedAt: null,
     checkedAt: null,
     error: null,
+    merge: noMerge(),
   }
 }
 
