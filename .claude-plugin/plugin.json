@@ -7,6 +7,7 @@
     "name": "eliraz-refael"
   },
   "repository": "https://github.com/ElirazKed/claude-code-pr-watch",
+  "license": "MIT",
   "keywords": ["github", "pull-requests", "ci", "mod", "pane"],
   "userConfig": {
     "poll_active_seconds": {
