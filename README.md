@@ -2,6 +2,10 @@
 
 A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that keeps a live pane of the GitHub pull requests a session touches: CI, review, conflicts, merge. You see when the PR Claude opened goes green, gets a review or hits a conflict, without asking.
 
+![The pr-watch pane docked beside a Claude Code session, showing this repo's PR #1 just merged](docs/screenshot.png)
+
+*The pane in a real session, docked beside the conversation: this repo's first PR, a minute after it merged. While CI runs, a card looks like this:*
+
 ```
 ╭──────────────────────────────────────────────╮
 │  ● CI RUNNING                       acme/app │
