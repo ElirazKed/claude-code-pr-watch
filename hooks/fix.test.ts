@@ -67,6 +67,24 @@ describe('picking the failing checks', () => {
     expect(checksQuery(ref)).toContain('databaseId detailsUrl')
     expect(parseChecks(JSON.stringify({ data: { p0: null } }), '', ref)).toEqual({ error: "Not found, or this gh account can't see it" })
   })
+
+  test("the checks query asks summaries of failed runs only, and joins them to their checks", async () => {
+    const ref = { url: PR.url, repo: 'acme/app', number: 13 }
+    const query = checksQuery(ref)
+    // Every check's light fields; title and summary only by the failed-runs filter.
+    expect(query).toMatch(/\.\.\. on CheckRun \{ name status conclusion startedAt databaseId detailsUrl checkSuite/)
+    expect(query.match(/\bsummary\b/g)).toHaveLength(1)
+    expect(query).toContain('filterBy: { checkType: LATEST, conclusions: [ACTION_REQUIRED, CANCELLED, FAILURE, STALE, STARTUP_FAILURE, TIMED_OUT] }')
+
+    const passing = { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS', databaseId: 902 }
+    const failing = { __typename: 'CheckRun', name: 'build', status: 'COMPLETED', conclusion: 'FAILURE', databaseId: 901 }
+    const commit = {
+      statusCheckRollup: { contexts: { nodes: [failing, passing] } },
+      checkSuites: { nodes: [{ checkRuns: { nodes: [] } }, { checkRuns: { nodes: [{ databaseId: 901, title: '3 tests failed', summary: 'upload.test.ts' }] } }] },
+    }
+    const stdout = JSON.stringify({ data: { p0: { pullRequest: { number: 13, commits: { nodes: [{ commit }] } } } } })
+    expect(parseChecks(stdout, '', ref)).toEqual({ checks: [{ ...failing, title: '3 tests failed', summary: 'upload.test.ts' }, passing] })
+  })
 })
 
 describe('trimming a log', () => {
@@ -139,6 +157,27 @@ describe('the message for Claude', () => {
     expect(text).toContain('- CI / build · failure · https://github.com/acme/app/actions/runs/1/job/901')
     expect(text).toContain('build: no log (GitHub no longer keeps this log).')
     expect(logProblems(handoffs)).toBe('No log for build: GitHub no longer keeps this log')
+  })
+
+  test("two workflows' same-named jobs get headings of their own", async () => {
+    const [ci, release] = failingChecks(
+      [job('build', 901, 'FAILURE', '2026-10-07T11:00:00Z'), { ...job('build', 905, 'FAILURE', '2026-10-07T11:00:00Z'), workflow: 'Release' }],
+      'acme/app',
+    )
+    const text = fixPrompt(PR, [
+      { failure: ci!, log: ghLog(['Error: ci']) },
+      { failure: release!, log: ghLog(['Error: release']) },
+    ])
+
+    expect(text).toContain('CI / build log (all 1 lines')
+    expect(text).toContain('Release / build log (all 1 lines')
+  })
+
+  test("leading blank lines don't make an uncut log read as trimmed", async () => {
+    const text = fixPrompt(PR, [{ failure: build, log: ghLog(['', '  ', 'Error: boom']) }])
+
+    expect(text).toContain('build log (all 1 lines, failed step "Run tests"):')
+    expect(text).not.toContain('trimmed')
   })
 
   test('a log with a fence in it gets a longer fence', async () => {

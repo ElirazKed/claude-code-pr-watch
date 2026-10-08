@@ -4,15 +4,16 @@ import type { CheckItem, GhPr, PrRef, RepoMerge } from './pr'
 
 // GitHub caps a query's node count; 100 checks for each of 40 PRs stays far inside it. The
 // repo's merge settings ride on each PR's own repository field: plain scalars, which cost
-// nothing in rate-limit points or nodes.
+// nothing in rate-limit points or nodes. (Whether the repo allows auto-merge needs no field:
+// GitHub's viewerCanEnableAutoMerge is false where it doesn't.)
 export const BATCH_SIZE = 40
 
-// The head commit's checks, with whatever more a caller asks of each kind.
-const checksOf = (run = '', status = '') => `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+// The head commit's checks, with whatever more a caller asks of each kind, and of the commit.
+const checksOf = (run = '', status = '', commit = '') => `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
     __typename
     ... on CheckRun { name status conclusion startedAt ${run}checkSuite { workflowRun { workflow { name } } } }
     ... on StatusContext { context state createdAt${status} }
-  } } } } } }`
+  } } }${commit} } } }`
 
 const FRAGMENT = `fragment pr on PullRequest {
   number title url state isDraft reviewDecision mergeStateStatus mergeable mergedAt closedAt
@@ -21,7 +22,7 @@ const FRAGMENT = `fragment pr on PullRequest {
   ${checksOf()}
 }
 fragment repo on Repository {
-  squashMergeAllowed rebaseMergeAllowed mergeCommitAllowed autoMergeAllowed viewerDefaultMergeMethod viewerPermission
+  squashMergeAllowed rebaseMergeAllowed mergeCommitAllowed viewerDefaultMergeMethod viewerPermission
 }`
 
 export function buildQuery(refs: readonly PrRef[]): string {
@@ -45,8 +46,18 @@ export type BatchResult = {
   error: string | null
 }
 
+// A failed check run's title and summary, asked apart from the rest (checksQuery).
+type GqlAbout = { databaseId?: number | null; title?: string | null; summary?: string | null }
+
 type GqlPr = Omit<GhPr, 'statusCheckRollup'> & {
-  commits: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: GqlCheck[] } } | null } }[] }
+  commits: {
+    nodes: {
+      commit: {
+        statusCheckRollup: { contexts: { nodes: GqlCheck[] } } | null
+        checkSuites?: { nodes: ({ checkRuns: { nodes: GqlAbout[] } | null } | null)[] } | null
+      }
+    }[]
+  }
 }
 
 type GqlRepo = RepoMerge & { pullRequest: GqlPr | null }
@@ -61,12 +72,15 @@ type GqlCheck = NonNullable<GhPr['statusCheckRollup']>[number] & {
 }
 
 // A check run's workflow name, lifted out of its suite, so two workflows' same-named jobs
-// stay apart when runs are folded to the latest of each.
-function flattenCheck(node: GqlCheck) {
+// stay apart when runs are folded to the latest of each; and its title and summary, where
+// they were asked apart.
+function flattenCheck(node: GqlCheck, about: ReadonlyMap<number, GqlAbout>) {
   const { checkSuite, ...check } = node
   const workflow = checkSuite?.workflowRun?.workflow?.name
+  const text = typeof check.databaseId === 'number' ? about.get(check.databaseId) : undefined
+  const named = workflow === undefined ? check : { ...check, workflow }
 
-  return workflow === undefined ? check : { ...check, workflow }
+  return text === undefined ? named : { ...named, title: text.title ?? null, summary: text.summary ?? null }
 }
 
 const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
@@ -97,8 +111,11 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
       return
     }
     const { commits, ...rest } = pr
-    const nodes = commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []
-    result.found.set(ref.url, { ...rest, repository, statusCheckRollup: nodes.map(flattenCheck) })
+    const commit = commits.nodes[0]?.commit
+    const nodes = commit?.statusCheckRollup?.contexts.nodes ?? []
+    const runs = (commit?.checkSuites?.nodes ?? []).flatMap(suite => suite?.checkRuns?.nodes ?? [])
+    const about = new Map(runs.flatMap(run => (typeof run.databaseId === 'number' ? [[run.databaseId, run] as const] : [])))
+    result.found.set(ref.url, { ...rest, repository, statusCheckRollup: nodes.map(node => flattenCheck(node, about)) })
   })
 
   return result
@@ -111,15 +128,25 @@ export function chunks<T>(items: readonly T[], size = BATCH_SIZE): T[][] {
   return out
 }
 
+// The conclusions a check run fails with (pr.ts's verdictOf: all but SUCCESS, NEUTRAL, SKIPPED).
+const FAILED = 'ACTION_REQUIRED, CANCELLED, FAILURE, STALE, STARTUP_FAILURE, TIMED_OUT'
+// The failed runs' titles and summaries, by the commit's check suites: a summary may run to
+// 65 KB, so a passing run's is never asked. Joined to its check by databaseId.
+const FAILED_RUNS = `
+    checkSuites(last: 50) { nodes { checkRuns(first: 20, filterBy: { checkType: LATEST, conclusions: [${FAILED}] }) {
+      nodes { databaseId title summary }
+    } } }`
+
 // One PR's checks with what handing a failure to Claude needs: a GitHub Actions run's job id
-// (its databaseId) and the links and summaries the rest have. Asked only on that press, so
-// the poller's query stays as lean as it was; the same alias shape keeps one parser.
+// (its databaseId), the links and status descriptions (short: GitHub caps them at 140
+// characters), and the failed runs' summaries. One call, still one point. Asked only on that
+// press, so the poller's query stays as lean as it was; the same alias shape keeps one parser.
 export function checksQuery(ref: PrRef): string {
   const [owner = '', name = ''] = ref.repo.split('/')
 
   return `query {
   p0: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) {
-    ${checksOf('databaseId detailsUrl title summary ', ' description targetUrl')}
+    ${checksOf('databaseId detailsUrl ', ' description targetUrl', FAILED_RUNS)}
   } }
 }`
 }

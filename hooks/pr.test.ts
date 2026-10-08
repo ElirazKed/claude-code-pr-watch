@@ -4,11 +4,14 @@ import {
   cwdOf,
   derive,
   findPrUrls,
+  isBusy,
   mergeArgv,
   mergeError,
+  mergeOf,
   mergeQuestion,
   mergeableOf,
   methodsOf,
+  noMerge,
   pickMethod,
   refFromGhCommand,
   shellCode,
@@ -279,7 +282,7 @@ describe('PRs Claude acted on: watched', () => {
 })
 
 describe('merging', () => {
-  const repo = { squashMergeAllowed: true, rebaseMergeAllowed: true, mergeCommitAllowed: true, autoMergeAllowed: true, viewerPermission: 'WRITE' }
+  const repo = { squashMergeAllowed: true, rebaseMergeAllowed: true, mergeCommitAllowed: true, viewerPermission: 'WRITE' }
   const open: GhPr = { ...base, repository: { ...repo, viewerDefaultMergeMethod: 'SQUASH' }, viewerCanEnableAutoMerge: true }
 
   test("the viewer's default method comes first while the repo allows it", async () => {
@@ -302,11 +305,11 @@ describe('merging', () => {
     expect(mergeableOf({ ...open, mergeStateStatus: 'BLOCKED' }).canMerge).toBe(false)
   })
 
-  test('blocked or waiting on checks: auto-merge, if the repo allows it', async () => {
+  test('blocked or waiting on checks: auto-merge, if GitHub lets the viewer turn it on', async () => {
     const blocked: GhPr = { ...open, mergeStateStatus: 'BLOCKED' }
     expect(mergeableOf(blocked).canAuto).toBe(true)
     expect(mergeableOf({ ...open, mergeStateStatus: 'UNKNOWN', statusCheckRollup: [run('build', 'IN_PROGRESS')] }).canAuto).toBe(true)
-    expect(mergeableOf({ ...blocked, repository: { ...repo, autoMergeAllowed: false } }).canAuto).toBe(false)
+    // What GitHub says where the repo doesn't allow auto-merge, too.
     expect(mergeableOf({ ...blocked, viewerCanEnableAutoMerge: false }).canAuto).toBe(false)
     expect(mergeableOf({ ...open, mergeStateStatus: 'BEHIND' }).canAuto).toBe(false)
   })
@@ -348,5 +351,58 @@ describe('merging', () => {
         'To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n',
     )
     expect(state).toEqual({ message: 'Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.', isMethodRefused: false })
+  })
+
+  test("every wording GitHub refuses a method with counts as refusing it", async () => {
+    for (const said of [
+      'GraphQL: Merge method rebase merging is not allowed on this repository (enablePullRequestAutoMerge)',
+      'GraphQL: Squash merges are not allowed on this repository. (mergePullRequest)',
+      'Rebase merges are not allowed on this repository.',
+      'Merge commits are not allowed on this repository.',
+      'Rebase is not an allowed merge method',
+      'Repository rule violations found\n\nThis branch must not contain merge commits.',
+    ]) {
+      expect(mergeError(said).isMethodRefused).toBe(true)
+    }
+  })
+
+  test('an error that only mentions a merge method, or merging, refuses nothing', async () => {
+    for (const said of [
+      'GraphQL: Pull request is in clean status, but the merge method squash could not be applied (mergePullRequest)',
+      'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+      'X Pull request acme/app#7 is not mergeable: 2 of 3 required status checks are expected.',
+      'GraphQL: Merging is blocked: the merge queue is required (mergePullRequest)',
+    ]) {
+      expect(mergeError(said).isMethodRefused).toBe(false)
+    }
+  })
+
+  test("only the mutation's name is dropped from the end: a branch or check in brackets stays", async () => {
+    expect(mergeError('GraphQL: Required status check "test" is failing (build) (mergePullRequest)').message).toBe(
+      'Required status check "test" is failing (build)',
+    )
+    expect(mergeError('X Could not merge: protected branch rules apply (main)').message).toBe('Could not merge: protected branch rules apply (main)')
+    expect(mergeError('GraphQL: Pull request Auto merge is not allowed for this repository (enablePullRequestAutoMerge)').message).toBe(
+      'Pull request Auto merge is not allowed for this repository',
+    )
+  })
+
+  test('busy only for as long as a run can take; a mark with no start time is no mark', async () => {
+    const at = Date.parse('2026-10-07T12:00:00Z')
+    expect(isBusy({ at }, at + 1_000)).toBe(true)
+    expect(isBusy({ at }, at + 89_000)).toBe(true)
+    expect(isBusy({ at }, at + 91_000)).toBe(false)
+    expect(isBusy(undefined, at)).toBe(false)
+    // What an older version of this mod kept: the wording, no time.
+    expect(isBusy('Merging…' as never, at)).toBe(false)
+  })
+
+  test("an entry with no merge facts (an older version's round) keeps the card's", async () => {
+    const kept = mergeableOf(open)
+    const { repository: _r, viewerCanEnableAutoMerge: _e, ...older } = open
+    expect(mergeOf(older, kept)).toEqual(kept)
+    expect(mergeOf(open, noMerge())).toEqual(kept)
+    // Merged or closed is known whatever the version.
+    expect(mergeOf({ ...older, state: 'MERGED' }, kept)).toEqual(noMerge())
   })
 })

@@ -1,4 +1,4 @@
-import type { Checks, MergeMethod, Mergeable, Stage, Tone, TrackedPr } from '../types'
+import type { Busy, Checks, MergeMethod, Mergeable, Stage, Tone, TrackedPr } from '../types'
 
 const PR_URL = /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g
 
@@ -226,7 +226,6 @@ export type RepoMerge = {
   squashMergeAllowed?: boolean
   rebaseMergeAllowed?: boolean
   mergeCommitAllowed?: boolean
-  autoMergeAllowed?: boolean
   viewerDefaultMergeMethod?: string | null
   // READ, TRIAGE, WRITE, MAINTAIN or ADMIN: merging takes WRITE.
   viewerPermission?: string | null
@@ -266,6 +265,12 @@ export function noMerge(): Mergeable {
   return { methods: [], canMerge: false, canAuto: false, isAuto: false, autoMethod: null, canCancelAuto: false }
 }
 
+// An entry written by an older version of this mod (one that won the poll lease) has no merge
+// facts: the card keeps what it last knew of them rather than lose its merge row for a round.
+export function mergeOf(pr: GhPr, kept: Mergeable): Mergeable {
+  return pr.state === 'OPEN' && pr.repository === undefined ? kept : mergeableOf(pr)
+}
+
 export function mergeableOf(pr: GhPr): Mergeable {
   if (pr.state !== 'OPEN') return noMerge()
   const methods = methodsOf(pr.repository)
@@ -279,7 +284,8 @@ export function mergeableOf(pr: GhPr): Mergeable {
   return {
     methods,
     canMerge,
-    canAuto: isEligible && !canMerge && isWaiting && pr.repository?.autoMergeAllowed === true && pr.viewerCanEnableAutoMerge === true,
+    // False already where the repo doesn't allow auto-merge.
+    canAuto: isEligible && !canMerge && isWaiting && pr.viewerCanEnableAutoMerge === true,
     isAuto,
     autoMethod: asMethod(pr.autoMergeRequest?.mergeMethod),
     canCancelAuto: isAuto && pr.viewerCanDisableAutoMerge === true,
@@ -313,19 +319,40 @@ export function mergeArgv(url: string, run: MergeRun): string[] {
   return ['pr', 'merge', url, ...(run.action === 'auto' ? ['--auto'] : []), `--${run.method}`]
 }
 
-// A refusal of the method itself (the repo's settings, a ruleset), not of this PR's state.
-const METHOD_REFUSED = /merge method|(?:squash|rebase|merge commit)[\w ]*\bnot (?:allowed|enabled|permitted)|must not contain merge commits/i
+// A refusal of the method itself, not of this PR's state, in GitHub's words: the repo's
+// settings ("Merge method squash merging is not allowed on this repository", "Squash merges
+// are not allowed on this repository.", "Merge commits are not allowed…"), a ruleset's
+// ("Rebase is not an allowed merge method"), or linear history's.
+const METHOD_REFUSED = new RegExp(
+  [
+    String.raw`\bmerge method \w+ (?:merging )?is not allowed`,
+    String.raw`\b(?:squash|rebase) merg(?:es|ing) (?:are|is) not allowed`,
+    String.raw`\bmerge commits are not allowed`,
+    String.raw`\bis not an allowed merge method`,
+    String.raw`\bmust not contain merge commits`,
+  ].join('|'),
+  'i',
+)
 
-// What gh said, in plain words: without its ✗, the "GraphQL:" prefix, the mutation's name,
-// or the hints about gh's own flags.
+// What gh said, in plain words: without its ✗, the "GraphQL:" prefix, the mutation's name
+// (camelCase, `(mergePullRequest)`; a branch or check named in brackets stays), or the hints
+// about gh's own flags.
 export function mergeError(stderr: string): { message: string; isMethodRefused: boolean } {
   const lines = stderr
     .split('\n')
-    .map(line => line.trim().replace(/^[X✗!]\s+/, '').replace(/^GraphQL:\s*/, '').replace(/\s*\(\w+\)$/, ''))
+    .map(line => line.trim().replace(/^[X✗!]\s+/, '').replace(/^GraphQL:\s*/, '').replace(/\s*\([a-z]+[A-Z]\w*\)$/, ''))
     .filter(line => line !== '' && !/^To (?:have|use|merge)\b/.test(line))
   const message = lines.join(' ') || 'gh pr merge failed'
 
   return { message, isMethodRefused: METHOD_REFUSED.test(message) }
+}
+
+// gh runs well inside this (its own timeouts stop it sooner): a busy mark older than this was
+// left by a module reload mid-run, so the row shows its buttons again.
+export const BUSY_MS = 90_000
+
+export function isBusy(busy: Busy | undefined, now: number): busy is Busy {
+  return typeof busy?.at === 'number' && now - busy.at < BUSY_MS
 }
 
 export function ago(ms: number): string {
