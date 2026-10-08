@@ -69,6 +69,7 @@ export function cleanLog(raw: string): { steps: string[]; lines: string[] } {
     lines.push(clip(text.replace(/^##\[group\]/, ''), LINE_CHARS))
   }
   while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
+  while (lines.length > 0 && lines[0]?.trim() === '') lines.shift()
 
   return { steps: [...steps], lines }
 }
@@ -111,6 +112,12 @@ const fence = (text: string) => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/
 
 type PrFacts = Pick<TrackedPr, 'repo' | 'number' | 'title' | 'url' | 'branch' | 'base'>
 
+// The draft's first words, by which a press finds an earlier draft of its own in the prompt box.
+export const fixHeading = (pr: Pick<PrFacts, 'repo' | 'number'>) => `CI failed on ${pr.repo}#${pr.number}:`
+
+// A check as the PR page names it, its workflow first when that says more.
+const labelOf = (f: Failure) => (f.workflow === null || f.workflow === f.name ? f.name : `${f.workflow} / ${f.name}`)
+
 // The message for Claude: the PR, what failed, the logs' tails, and the ask. It never asks
 // for a push or a merge; that stays the person's call.
 export function fixPrompt(pr: PrFacts, handoffs: readonly Handoff[]): string {
@@ -118,18 +125,14 @@ export function fixPrompt(pr: PrFacts, handoffs: readonly Handoff[]): string {
   const budget = Math.floor(LOG_CHARS / Math.max(1, logs.length))
   const branch = pr.branch || 'its head branch'
   const out = [
-    `CI failed on ${pr.repo}#${pr.number}: ${pr.title || 'untitled'}`,
+    `${fixHeading(pr)} ${pr.title || 'untitled'}`,
     `${pr.url} · ${branch} → ${pr.base || 'its base'} · checks: ${pr.url}/checks`,
     '',
     'Failing checks (the latest run of each):',
-    ...handoffs.map(({ failure: f }) => {
-      const name = f.workflow === null || f.workflow === f.name ? f.name : `${f.workflow} / ${f.name}`
-
-      return `- ${[name, f.conclusion, f.summary, f.url].filter(Boolean).join(' · ')}`
-    }),
+    ...handoffs.map(({ failure: f }) => `- ${[labelOf(f), f.conclusion, f.summary, f.url].filter(Boolean).join(' · ')}`),
   ]
   for (const h of handoffs) {
-    const name = h.failure.name
+    const name = labelOf(h.failure)
     if (h.error !== undefined) out.push('', `${name}: no log (${h.error}).`)
     if (h.log === undefined) continue
     const log = trimLog(h.log, LOG_LINES, budget)

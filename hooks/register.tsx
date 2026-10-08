@@ -24,7 +24,7 @@ import {
 } from './pr'
 import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batch'
 import type { RateLimit } from './batch'
-import { failingChecks, fixPrompt, logError, logProblems, toFetch } from './fix'
+import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
@@ -438,6 +438,8 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
         }
       }),
     )
+    // Dismissed while the logs came: its card, and so its draft, are gone.
+    if ((await read($, fixing))[pr.url]?.busy === undefined) return
     const error = [problem, logProblems(handoffs)].filter(Boolean).join('; ') || undefined
     await handOver($, pr, fixPrompt(pr, handoffs), error)
   } catch {
@@ -451,8 +453,12 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
 async function handOver($: EngineInterface, pr: TrackedPr, text: string, error: string | undefined) {
   const box = await $.prompt.read()
   // Over an earlier draft of this hand-off, or an empty box; after anything the person typed.
-  const isOver = box.text.trim() === '' || box.text.startsWith(`CI failed on ${pr.repo}#${pr.number}:`)
-  const filled = await $.prompt.fill({ text: isOver ? text : `\n\n${text}`, mode: isOver ? 'replace' : 'append' })
+  const heading = fixHeading(pr)
+  const at = box.text.trim() === '' || box.text.startsWith(heading) ? 0 : box.text.indexOf(`\n\n${heading}`)
+  const filled =
+    at === -1
+      ? await $.prompt.fill({ text: `\n\n${text}`, mode: 'append' })
+      : await $.prompt.fill({ text: at === 0 ? text : `${box.text.slice(0, at)}\n\n${text}`, mode: 'replace' })
   if (filled.isFilled) {
     await setFix($, pr.url, { done: 'Drafted in the prompt box: read it, then press Enter', error })
   } else if (filled.refusal === 'dialog') {
@@ -464,9 +470,15 @@ async function handOver($: EngineInterface, pr: TrackedPr, text: string, error: 
 }
 
 async function sendFix($: EngineInterface, pr: TrackedPr, text: string) {
-  // Not awaited: the prompt runs as a turn of its own once the session is idle.
-  void $.prompt.submit({ text, asUser: true }).catch(() => undefined)
   await setFix($, pr.url, { done: 'Sent to Claude' })
+  // Not awaited: the prompt runs as a turn of its own once the session is idle. A hook that
+  // keeps it out, or a call that fails, takes back the "sent".
+  void $.prompt.submit({ text, asUser: true }).then(
+    async res => {
+      if (res.drop !== undefined) await setFix($, pr.url, { error: `Not sent: ${res.drop}` })
+    },
+    async () => setFix($, pr.url, { error: "Couldn't send it to Claude" }).catch(() => undefined),
+  ).catch(() => undefined)
 }
 
 async function refreshStatus($: EngineInterface) {

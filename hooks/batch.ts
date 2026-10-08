@@ -7,15 +7,18 @@ import type { CheckItem, GhPr, PrRef, RepoMerge } from './pr'
 // nothing in rate-limit points or nodes.
 export const BATCH_SIZE = 40
 
+// The head commit's checks, with whatever more a caller asks of each kind.
+const checksOf = (run = '', status = '') => `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+    __typename
+    ... on CheckRun { name status conclusion startedAt ${run}checkSuite { workflowRun { workflow { name } } } }
+    ... on StatusContext { context state createdAt${status} }
+  } } } } } }`
+
 const FRAGMENT = `fragment pr on PullRequest {
   number title url state isDraft reviewDecision mergeStateStatus mergeable mergedAt closedAt
   additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt mergeMethod }
   viewerCanEnableAutoMerge viewerCanDisableAutoMerge
-  commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-    __typename
-    ... on CheckRun { name status conclusion startedAt checkSuite { workflowRun { workflow { name } } } }
-    ... on StatusContext { context state createdAt }
-  } } } } } }
+  ${checksOf()}
 }
 fragment repo on Repository {
   squashMergeAllowed rebaseMergeAllowed mergeCommitAllowed autoMergeAllowed viewerDefaultMergeMethod viewerPermission
@@ -116,11 +119,7 @@ export function checksQuery(ref: PrRef): string {
 
   return `query {
   p0: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) {
-    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-      __typename
-      ... on CheckRun { name status conclusion startedAt databaseId detailsUrl title summary checkSuite { workflowRun { workflow { name } } } }
-      ... on StatusContext { context state createdAt description targetUrl }
-    } } } } } }
+    ${checksOf('databaseId detailsUrl title summary ', ' description targetUrl')}
   } }
 }`
 }
