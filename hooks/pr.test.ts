@@ -1,6 +1,20 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cwdOf, derive, findPrUrls, refFromGhCommand, shellCode, stepIndex, touched } from './pr'
+import {
+  cwdOf,
+  derive,
+  findPrUrls,
+  mergeArgv,
+  mergeError,
+  mergeQuestion,
+  mergeableOf,
+  methodsOf,
+  pickMethod,
+  refFromGhCommand,
+  shellCode,
+  stepIndex,
+  touched,
+} from './pr'
 import type { GhPr } from './pr'
 
 const base: GhPr = {
@@ -261,5 +275,78 @@ describe('PRs Claude acted on: watched', () => {
 
   test('shellCode keeps the code around a heredoc', async () => {
     expect(shellCode("cat > f <<'EOF' && echo hi\nbody\nEOF\ngh pr create")).toBe("cat > f   && echo hi\ngh pr create")
+  })
+})
+
+describe('merging', () => {
+  const repo = { squashMergeAllowed: true, rebaseMergeAllowed: true, mergeCommitAllowed: true, autoMergeAllowed: true, viewerPermission: 'WRITE' }
+  const open: GhPr = { ...base, repository: { ...repo, viewerDefaultMergeMethod: 'SQUASH' }, viewerCanEnableAutoMerge: true }
+
+  test("the viewer's default method comes first while the repo allows it", async () => {
+    expect(methodsOf({ ...repo, viewerDefaultMergeMethod: 'REBASE' })).toEqual(['rebase', 'squash', 'merge'])
+  })
+
+  test('a default the repo no longer allows falls back to squash, rebase, merge', async () => {
+    expect(methodsOf({ ...repo, mergeCommitAllowed: false, viewerDefaultMergeMethod: 'MERGE' })).toEqual(['squash', 'rebase'])
+  })
+
+  test('a rebase-only repo offers rebase', async () => {
+    const only = { rebaseMergeAllowed: true, squashMergeAllowed: false, mergeCommitAllowed: false, viewerDefaultMergeMethod: 'MERGE' }
+    expect(methodsOf(only)).toEqual(['rebase'])
+    expect(pickMethod(methodsOf(only), 'squash')).toBe('rebase')
+  })
+
+  test('clean, unstable or with hooks: merge now, if the viewer may write', async () => {
+    for (const status of ['CLEAN', 'HAS_HOOKS', 'UNSTABLE']) expect(mergeableOf({ ...open, mergeStateStatus: status }).canMerge).toBe(true)
+    expect(mergeableOf({ ...open, repository: { ...repo, viewerPermission: 'READ' } }).canMerge).toBe(false)
+    expect(mergeableOf({ ...open, mergeStateStatus: 'BLOCKED' }).canMerge).toBe(false)
+  })
+
+  test('blocked or waiting on checks: auto-merge, if the repo allows it', async () => {
+    const blocked: GhPr = { ...open, mergeStateStatus: 'BLOCKED' }
+    expect(mergeableOf(blocked).canAuto).toBe(true)
+    expect(mergeableOf({ ...open, mergeStateStatus: 'UNKNOWN', statusCheckRollup: [run('build', 'IN_PROGRESS')] }).canAuto).toBe(true)
+    expect(mergeableOf({ ...blocked, repository: { ...repo, autoMergeAllowed: false } }).canAuto).toBe(false)
+    expect(mergeableOf({ ...blocked, viewerCanEnableAutoMerge: false }).canAuto).toBe(false)
+    expect(mergeableOf({ ...open, mergeStateStatus: 'BEHIND' }).canAuto).toBe(false)
+  })
+
+  test('drafts, conflicts and finished PRs offer nothing', async () => {
+    for (const pr of [
+      { ...open, isDraft: true },
+      { ...open, mergeStateStatus: 'DIRTY' },
+      { ...open, mergeStateStatus: 'BLOCKED', mergeable: 'CONFLICTING' },
+      { ...open, state: 'MERGED' as const },
+    ]) {
+      const m = mergeableOf(pr)
+      expect([m.canMerge, m.canAuto]).toEqual([false, false])
+    }
+  })
+
+  test('auto-merge on: its method, and whether the viewer may turn it off', async () => {
+    const m = mergeableOf({ ...open, autoMergeRequest: { mergeMethod: 'REBASE' }, viewerCanDisableAutoMerge: true })
+    expect([m.isAuto, m.autoMethod, m.canCancelAuto, m.canMerge]).toEqual([true, 'rebase', true, false])
+  })
+
+  test('gh pr merge argv', async () => {
+    const url = 'https://github.com/acme/app/pull/7'
+    expect(mergeArgv(url, { action: 'merge', method: 'rebase' })).toEqual(['pr', 'merge', url, '--rebase'])
+    expect(mergeArgv(url, { action: 'auto', method: 'squash' })).toEqual(['pr', 'merge', url, '--auto', '--squash'])
+    expect(mergeArgv(url, { action: 'cancel-auto' })).toEqual(['pr', 'merge', url, '--disable-auto'])
+  })
+
+  test('the question names the method, the PR and its base', async () => {
+    expect(mergeQuestion('squash', { number: 12, base: 'main' }, false)).toBe('Squash-merge #12 into main?')
+    expect(mergeQuestion('merge', { number: 12, base: 'main' }, true)).toBe('Merge #12 into main once checks and review pass?')
+  })
+
+  test("gh's refusal in plain words, and whether it refused the method", async () => {
+    const method = mergeError('GraphQL: Merge method squash merging is not allowed on this repository (mergePullRequest)\n')
+    expect(method).toEqual({ message: 'Merge method squash merging is not allowed on this repository', isMethodRefused: true })
+    const state = mergeError(
+      'X Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.\n' +
+        'To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n',
+    )
+    expect(state).toEqual({ message: 'Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.', isMethodRefused: false })
   })
 })
