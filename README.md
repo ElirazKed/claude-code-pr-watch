@@ -42,7 +42,31 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 
 `/pr-watch` opens the pane, and `/pr-watch stop <number|url|all>` stops watching. Finished PRs stay until you dismiss them, `d` dismisses them all, and `r` refreshes.
 
-Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes, and the status line follows the focused PR.
+Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes or a review lands, and the status line follows the focused PR.
+
+## Reviews
+
+A card says who reviewed and what is left to address:
+
+```
+╭──────────────────────────────────────────────╮
+│  ↺ CHANGES REQUESTED                acme/app │
+│ #12 Retry uploads with exponential backoff   │
+│ feat/retry → main  +120 −14  @octocat        │
+│                                              │
+│ ✓ Open ━━━ ✓ CI ━━━ ↺ Review ┈┈┈ ○ Merge     │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3/3 │
+│ Changes requested                            │
+│ ✗ bob requested changes · ✓ alice approved   │
+│ 3 unresolved threads (1 outdated)            │
+│ open ↗ · checked just now                 ✕  │
+╰──────────────────────────────────────────────╯
+```
+
+- **Who reviewed:** each reviewer once, by what still counts. An approval (✓) or a change request (✗) stands until its reviewer changes it, as GitHub counts it; otherwise a review asked of them (◷ *carol requested*); otherwise their latest comment-only review (💬 *nadav commented*). Review apps count too, by a short name (`copilot-pull-request-reviewer` is *copilot*). When the line is too long for the card, the verbs are dropped first (*✓ alice · 💬 nadav*), and then the reviewers past what fits become *+2 more*.
+- **Threads:** how many review threads are unresolved, and how many of those are outdated (the code changed since). The poll asks about the newest 50 threads only, so past that the count is a floor (*50+*).
+- **Headline:** with threads open and no approval yet, the card says *3 comments to address* (**💬 COMMENTS**) instead of *Waiting for review*. With comment-only reviews and every thread resolved it says *Reviewed · waiting for approval*. Approved with threads open, it says *Approved · 2 unresolved threads*, or *Blocked · 2 unresolved threads* when GitHub holds the merge back, as it does in a repo that requires conversations resolved. Conflicts and CI still come first.
+- **Toasts:** each new review toasts once: *💬 nadav commented on #532*, *✓ alice approved #12*, *✗ bob requested changes on #12*. Reviews already there when the card first loads don't toast, and neither do your own (from any of your gh accounts). The card keeps the newest review it has seen, so a `/clear` or a reload doesn't toast them again.
 
 ## Merging
 
@@ -73,6 +97,7 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 - Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
 - When the shared results are due, one session takes a short lease and fetches every live session's PRs in one batched GraphQL query (40 per query). It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
+- A query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour) for up to 24 PRs and 2 for 25 to 40. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote.
 
 ### Poll intervals
 

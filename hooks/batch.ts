@@ -15,10 +15,22 @@ const checksOf = (run = '', status = '', commit = '') => `commits(last: 1) { nod
     ... on StatusContext { context state createdAt${status} }
   } } }${commit} } } }`
 
+// Who reviewed and the open threads (review.ts): small pages, logins and states, and of the
+// newest threads only whether they are resolved or outdated, never a comment's text. Each
+// connection costs a PR one more request in GitHub's reckoning (100 make a point), so a batch
+// of 40 costs 2 points, not 1; up to 24 still cost 1.
+const REVIEWS = `latestReviews(first: 10) { totalCount nodes { author { __typename login } state submittedAt } }
+  latestOpinionatedReviews(first: 10) { nodes { author { __typename login } state submittedAt } }
+  reviewRequests(first: 10) { totalCount nodes { requestedReviewer {
+    __typename ... on User { login } ... on Bot { login } ... on Mannequin { login } ... on Team { slug }
+  } } }
+  reviewThreads(last: 50) { totalCount nodes { isResolved isOutdated } }`
+
 const FRAGMENT = `fragment pr on PullRequest {
   number title url state isDraft reviewDecision mergeStateStatus mergeable mergedAt closedAt
   additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt mergeMethod }
   viewerCanEnableAutoMerge viewerCanDisableAutoMerge
+  ${REVIEWS}
   ${checksOf()}
 }
 fragment repo on Repository {
