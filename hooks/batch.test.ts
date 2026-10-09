@@ -64,5 +64,7 @@ describe('batched query', () => {
 
   test('splits into batches', async () => {
     expect(chunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]])
+    // 20 a query by default: 45 PRs make three queries, none of them slow enough to time out.
+    expect(chunks(Array.from({ length: 45 }, (_, i) => i)).map(part => part.length)).toEqual([20, 20, 5])
   })
 })

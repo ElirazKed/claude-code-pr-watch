@@ -95,9 +95,9 @@ A card whose CI failed (at least one check failing on its latest run, counted th
 Every session on the machine shares **one** poller, so 30 sessions watching 30 PRs cost about one GitHub call every 20–60 seconds, not 30.
 
 - Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
-- When the shared results are due, one session takes a short lease and fetches every live session's PRs in one batched GraphQL query (40 per query). It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
+- When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
-- A query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour) for up to 24 PRs and 2 for 25 to 40. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote.
+- Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote.
 
 ### Poll intervals
 
