@@ -122,7 +122,8 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // `branchPr`: what `gh pr view` answers for the current branch. `merge`: how `gh pr merge`
 // ends (now, or once a promise settles); by default it goes through, and `merges` records each
 // one's argv. `runLog`: what
-// `gh run view` prints, a failed job's log by default; `runs` records each argv.
+// `gh run view` prints, a failed job's log by default; `runs` records each argv. `asked` records
+// each GraphQL query's text, and a query for what threads say waits on `hold`, when set.
 function fakeHost(
   on: On,
   clock: Clock,
@@ -135,6 +136,8 @@ function fakeHost(
   const queries: string[][] = []
   const merges: string[][] = []
   const runs: string[][] = []
+  const asked: string[] = []
+  const gate: { hold: Promise<unknown> | null } = { hold: null }
   on('env.get', () => ({ value: '/home/me' }))
   on('fs.read', ($, e) => ({ value: files.get(e.path)?.text ?? '' }))
   on('fs.write', ($, e) => (files.set(e.path, { text: e.text, mtimeMs: clock.now() }), { value: undefined }))
@@ -165,6 +168,7 @@ function fakeHost(
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     if (e.argv[1] !== 'api') return out(1, '')
     const query = String(e.argv[4] ?? '').slice('query='.length)
+    asked.push(query)
     const urls: string[] = []
     const data: Record<string, unknown> = { rateLimit: { remaining: 4000, resetAt: '2026-10-07T13:00:00Z' } }
     for (const [, i, owner, name, num] of query.matchAll(ALIAS)) {
@@ -174,11 +178,12 @@ function fakeHost(
       data[`p${i}`] = fixture === undefined ? null : asGql(fixture, query)
     }
     queries.push(urls)
+    const reply = out(urls.every(url => url in gh) ? 0 : 1, JSON.stringify({ data }))
 
-    return out(urls.every(url => url in gh) ? 0 : 1, JSON.stringify({ data }))
+    return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs }
+  return { queries, files, merges, runs, asked, gate }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -734,7 +739,7 @@ type Submitted = { text: string } | { drop: string }
 // Watches `fixtures` and draws the pane, with a prompt box that takes drafts unless `fill`
 // says otherwise, and a session that takes prompts unless `submit` drops them; `fills` and
 // `sent` are what reached the box and the session, `box` what the box holds, and `type` puts
-// the person's own text in it.
+// the person's own text in it. `asked` and `gate` are the fake host's (fakeHost).
 async function fixCard(
   $: Parameters<TestBody>[0],
   on: On,
@@ -748,7 +753,7 @@ async function fixCard(
   const fills: string[] = []
   const sent: string[] = []
   let box = ''
-  const { runs } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
+  const { runs, asked, gate } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
   on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('prompt.fill', ($, e) => {
     fills.push(e.text)
@@ -766,7 +771,17 @@ async function fixCard(
   })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), clock, runs, fills, sent, box: () => box, type: (text: string) => (box = text) }
+  return {
+    ui: await $.ui.mount({ ...PANE, surface: 'terminal' }),
+    clock,
+    runs,
+    asked,
+    gate,
+    fills,
+    sent,
+    box: () => box,
+    type: (text: string) => (box = text),
+  }
 }
 
 test('a card whose CI failed offers Fix with Claude; a running or green one does not', async ($, on) => {
@@ -1055,4 +1070,148 @@ test("a review that lands between rounds toasts once; the ones there at first si
   }
   await clock.advance(70_000)
   expect(toasts.slice(2)).toEqual(['✓ dana approved #41', '🎉 PR #41 · Merged'])
+})
+
+// A review thread as the press's query has it: where it is, and what each comment said.
+const said = (path: string, line: number | null, comments: [string, string][], extra: Record<string, unknown> = {}) => ({
+  isResolved: false,
+  isOutdated: false,
+  path,
+  line,
+  startLine: null,
+  originalLine: line,
+  originalStartLine: null,
+  comments: {
+    totalCount: comments.length,
+    nodes: comments.map(([login, body], i) => ({ author: { login }, body, url: `${REVIEWED}#discussion_r${path.length}${line ?? 0}${i}` })),
+  },
+  ...extra,
+})
+// Threads with their words: two open (one outdated), one resolved; and #41 with them.
+const discussion = [
+  said('src/upload.ts', 42, [['nadav', 'Take the retry count from config.'], ['octocat', 'Will do.']], { startLine: 40 }),
+  said('src/upload.ts', null, [['nadav', 'Is this branch still needed?']], { isOutdated: true, originalLine: 7 }),
+  said('src/api.ts', 9, [['carol', 'Fixed already.']], { isResolved: true }),
+]
+const discussed = pr(REVIEWED, {
+  mergeStateStatus: 'BLOCKED',
+  statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')],
+  reviews: comments,
+  threads: discussion,
+})
+
+test('a card with unresolved threads offers Address with Claude; a resolved or unreviewed one does not', async ($, on) => {
+  const done = pr(READY, { statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')], reviews: comments, threads: [{ isResolved: true, isOutdated: false }] })
+  const { ui } = await fixCard($, on, { [REVIEWED]: discussed, [READY]: done, [BROKEN]: broken })
+  expect((await ui.find({ key: `address:${REVIEWED}` }))?.props.label).toBe('Address with Claude')
+  expect(await ui.find({ key: `fix:${REVIEWED}` })).toBeUndefined()
+  expect(await ui.find({ key: `address:${READY}` })).toBeUndefined()
+  expect(await ui.find({ key: `address:${BROKEN}` })).toBeUndefined()
+  expect((await ui.find({ key: `fix:${BROKEN}` }))?.props.label).toBe('Fix with Claude')
+  await ui.unmount()
+})
+
+test("Address with Claude reads that PR's threads on the press and drafts the open ones in the prompt box", async ($, on) => {
+  const { ui, asked, fills, sent } = await fixCard($, on, { [REVIEWED]: discussed, [RUNNING]: GH[RUNNING] })
+  // The poll asks whether threads are resolved, never what they say.
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.some(query => query.includes('body'))).toBe(false)
+  const before = asked.length
+  await ui.press({ key: `address:${REVIEWED}` })
+
+  const press = asked.slice(before)
+  expect(press).toHaveLength(1)
+  expect(press[0]).toContain('pullRequest(number: 41)')
+  expect(press[0]).toContain('comments(first: 10) { totalCount nodes { author { login } body url } }')
+  expect(press[0]?.match(/repository\(/g)).toHaveLength(1)
+  expect(fills).toHaveLength(1)
+  const draft = fills[0] ?? ''
+  expect(draft).toContain('Review comments to address on acme/app#41: Retry uploads with exponential backoff')
+  expect(draft).toContain('2 unresolved review threads, by file (1 outdated')
+  expect(draft).toMatch(/1\. src\/upload\.ts \(outdated; was line 7\) · https:\/\/github\.com\/acme\/app\/pull\/41#discussion_r\d+\n   @nadav: Is this branch still needed\?/)
+  expect(draft).toContain('src/upload.ts:40-42')
+  expect(draft).toContain('   @nadav: Take the retry count from config.\n   @octocat (PR author): Will do.')
+  expect(draft).not.toContain('Fixed already')
+  expect(draft).toContain("Don't reply to or resolve any thread on GitHub")
+  // A draft, not a message: nothing reaches Claude until the person presses Enter.
+  expect(sent).toEqual([])
+  expect(await ui.find({ text: /Drafted in the prompt box/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('while the threads come the card says so, and a second press reads and drafts nothing more', async ($, on) => {
+  const { ui, clock, asked, gate, fills } = await fixCard($, on, { [REVIEWED]: discussed })
+  const gh = held(undefined)
+  gate.hold = gh.promise
+  const first = ui.press({ key: `address:${REVIEWED}` })
+  const second = ui.press({ key: `address:${REVIEWED}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Reading review threads…' })).toBeDefined()
+  gh.release()
+  await Promise.all([first, second])
+
+  expect(asked.filter(query => query.includes('body'))).toHaveLength(1)
+  expect(fills).toHaveLength(1)
+  expect(await ui.find({ text: /Reading review threads/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a read left busy gives the button back once stale, and the cut-off one drafts nothing', async ($, on) => {
+  const { ui, clock, gate, fills } = await fixCard($, on, { [REVIEWED]: discussed })
+  const hung = held(undefined)
+  gate.hold = hung.promise
+  void ui.press({ key: `address:${REVIEWED}` })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Reading review threads…' })).toBeDefined()
+
+  await clock.advance(121_000)
+  gate.hold = null
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ text: /Reading review threads/ })).toBeUndefined()
+  await ui.press({ key: `address:${REVIEWED}` })
+  expect(fills).toHaveLength(1)
+  hung.release()
+  await clock.advance(10)
+  expect(fills).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('threads resolved since the last round: the card says so and drafts nothing', async ($, on) => {
+  const fixtures: Record<string, unknown> = { [REVIEWED]: discussed }
+  const { ui, fills } = await fixCard($, on, fixtures)
+  fixtures[REVIEWED] = { ...discussed, threads: [said('src/upload.ts', 42, [['nadav', 'x']], { isResolved: true })] }
+  await ui.press({ key: `address:${REVIEWED}` })
+
+  expect(fills).toEqual([])
+  expect(await ui.find({ text: '✗ No review thread is unresolved now' })).toBeUndefined()
+  // The press asked GitHub again, so the card has caught up: no threads, no button.
+  expect(await ui.find({ key: `address:${REVIEWED}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("where the prompt box won't take a draft, it asks first, and Confirm sends the review comments", async ($, on) => {
+  const { ui, sent } = await fixCard($, on, { [REVIEWED]: discussed }, undefined, () => ({ isFilled: false }))
+  await ui.press({ key: `address:${REVIEWED}` })
+  expect(await ui.find({ text: 'Send review comments of #41 to Claude?' })).toBeDefined()
+
+  await ui.press({ key: `address-confirm:${REVIEWED}` })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('Review comments to address on acme/app#41')
+  expect(await ui.find({ text: '✓ Sent to Claude' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a card with failed CI and open threads offers both, and each press keeps the other draft', async ($, on) => {
+  const both = { ...broken, reviews: comments, threads: discussion }
+  const { ui, box } = await fixCard($, on, { [BROKEN]: both })
+  expect(await ui.find({ key: `fix:${BROKEN}` })).toBeDefined()
+  expect(await ui.find({ key: `address:${BROKEN}` })).toBeDefined()
+
+  await ui.press({ key: `fix:${BROKEN}` })
+  await ui.press({ key: `address:${BROKEN}` })
+  await ui.press({ key: `fix:${BROKEN}` })
+  expect(box().startsWith('CI failed on acme/app#31')).toBe(true)
+  expect(box().split('CI failed on acme/app#31')).toHaveLength(2)
+  expect(box()).toContain('\n\nReview comments to address on acme/app#31')
+  await ui.unmount()
 })

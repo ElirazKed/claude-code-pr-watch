@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Busy, FixAsk, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
+import type { Busy, HandoffAsk, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
   MERGE_LABEL,
@@ -26,6 +26,7 @@ import {
 } from './pr'
 import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batch'
 import type { RateLimit } from './batch'
+import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, threadsQuery } from './address'
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
@@ -44,6 +45,7 @@ const merging = atom({ plugin: 'pr-watch', key: 'merging' } as const, {})
 // Methods GitHub refused for a repo: not offered again this session.
 const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
 const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
+const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -353,9 +355,11 @@ async function apply($: EngineInterface, shared: Shared) {
   })
   await update($, prs, () => next)
   await update($, now, () => at)
-  // What a Fix with Claude press said belongs to the failure it was about.
+  // What a hand-off press said belongs to the failure, or the threads, it was about.
   if (moved.length > 0) {
-    await update($, fixing, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || isBusy(ask.busy, at))))
+    for (const handoff of HANDOFFS) {
+      await updateRows($, handoff.id, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || isBusy(ask.busy, at))))
+    }
   }
   await refreshStatus($)
   await syncAnimation($)
@@ -378,7 +382,9 @@ async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {
 // One question at a time across the pane, so y and n answer the one on screen.
 async function oneQuestion($: EngineInterface) {
   await update($, merging, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
-  await update($, fixing, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
+  for (const handoff of HANDOFFS) {
+    await updateRows($, handoff.id, all => Object.fromEntries(Object.entries(all).map(([url, a]) => [url, { ...a, asking: undefined }])))
+  }
 }
 
 // Marks a card's merge row busy for a run, unless a run already holds it: false then, so a
@@ -425,8 +431,24 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   await fetchNow($, [refOf(pr)])
 }
 
-async function setFix($: EngineInterface, url: string, ask: FixAsk | null) {
-  await update($, fixing, all => {
+// Which hand-off a row is: Fix with Claude's (`fixing`) or Address with Claude's (`addressing`).
+// The two run apart, so a card can collect logs while its threads come.
+type Kind = 'fix' | 'address'
+type Rows = Record<string, HandoffAsk>
+
+// A hand-off row's state, each atom named where it is read or written, so the mod's state can
+// be listed.
+async function readRows($: EngineInterface, kind: Kind): Promise<Rows> {
+  return kind === 'fix' ? read($, fixing) : read($, addressing)
+}
+
+async function updateRows($: EngineInterface, kind: Kind, change: (all: Rows) => Rows) {
+  if (kind === 'fix') await update($, fixing, change)
+  else await update($, addressing, change)
+}
+
+async function setHandoff($: EngineInterface, kind: Kind, url: string, ask: HandoffAsk | null) {
+  await updateRows($, kind, all => {
     const { [url]: _, ...rest } = all
 
     return ask === null ? rest : { ...rest, [url]: ask }
@@ -434,14 +456,14 @@ async function setFix($: EngineInterface, url: string, ask: FixAsk | null) {
 }
 
 // A collection's outcome, only while the row is still its own (see runMerge).
-async function settleFix($: EngineInterface, url: string, at: number, ask: FixAsk) {
-  await update($, fixing, all => (all[url]?.busy?.at === at ? { ...all, [url]: ask } : all))
+async function settleHandoff($: EngineInterface, kind: Kind, url: string, at: number, ask: HandoffAsk) {
+  await updateRows($, kind, all => (all[url]?.busy?.at === at ? { ...all, [url]: ask } : all))
 }
 
-// claimMerge for the Fix with Claude row: a second press while the logs come starts nothing.
-async function claimFix($: EngineInterface, url: string, busy: Busy) {
+// claimMerge for a hand-off row: a second press while the logs or threads come starts nothing.
+async function claimHandoff($: EngineInterface, kind: Kind, url: string, busy: Busy) {
   let isClaimed = false
-  await update($, fixing, all => {
+  await updateRows($, kind, all => {
     isClaimed = !isBusy(all[url]?.busy, busy.at)
 
     return isClaimed ? { ...all, [url]: { busy } } : all
@@ -455,7 +477,7 @@ async function claimFix($: EngineInterface, url: string, busy: Busy) {
 // jobs. A part that won't come is said on the card; the rest still goes, names and links.
 async function collectFailure($: EngineInterface, pr: TrackedPr) {
   const busy = { at: await $.clock.now() }
-  if (!(await claimFix($, pr.url, busy))) return
+  if (!(await claimHandoff($, 'fix', pr.url, busy))) return
   try {
     const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
     let failures: Failure[]
@@ -471,7 +493,7 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
       failures = pr.checks.failing.map(name => ({ name, workflow: null, conclusion: 'failed', url: null, summary: null, jobId: null }))
     }
     if (failures.length === 0) {
-      await settleFix($, pr.url, busy.at, { error: 'No check is failing on the latest runs now' })
+      await settleHandoff($, 'fix', pr.url, busy.at, { error: 'No check is failing on the latest runs now' })
       await fetchNow($, [refOf(pr)])
 
       return
@@ -492,47 +514,89 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
     )
     // Dismissed while the logs came (its card, and so its draft, are gone), or pressed again
     // once this run looked stale: the later press drafts.
-    if ((await read($, fixing))[pr.url]?.busy?.at !== busy.at) return
+    if ((await readRows($, 'fix'))[pr.url]?.busy?.at !== busy.at) return
     const error = [problem, logProblems(handoffs)].filter(Boolean).join('; ') || undefined
-    await handOver($, pr, fixPrompt(pr, handoffs), error)
+    await handOver($, 'fix', pr, fixHeading(pr), fixPrompt(pr, handoffs), error)
   } catch {
-    await settleFix($, pr.url, busy.at, { error: "Couldn't hand the failure over" })
+    await settleHandoff($, 'fix', pr.url, busy.at, { error: "Couldn't hand the failure over" })
+  }
+}
+
+// Reads a card's review threads, what they say too, as the gh account the poller found sees
+// the repo: one query for this PR alone, on the press, so the poll never carries a comment.
+async function collectThreads($: EngineInterface, pr: TrackedPr) {
+  const busy = { at: await $.clock.now() }
+  if (!(await claimHandoff($, 'address', pr.url, busy))) return
+  try {
+    const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
+    const res = await gh($, ['api', 'graphql', '-f', `query=${threadsQuery(refOf(pr))}`], token)
+    const reply = parseThreads(res.stdout, res.stderr)
+    if ('error' in reply) {
+      await settleHandoff($, 'address', pr.url, busy.at, { error: `Couldn't read the review threads: ${reply.error}` })
+
+      return
+    }
+    if (openThreads(reply.threads).length === 0) {
+      await settleHandoff($, 'address', pr.url, busy.at, { error: 'No review thread is unresolved now' })
+      await fetchNow($, [refOf(pr)])
+
+      return
+    }
+    // Dismissed, or pressed again once stale, while the threads came (see collectFailure).
+    if ((await readRows($, 'address'))[pr.url]?.busy?.at !== busy.at) return
+    await handOver($, 'address', pr, addressHeading(pr), addressPrompt(pr, reply.threads, reply.total), undefined)
+  } catch {
+    await settleHandoff($, 'address', pr.url, busy.at, { error: "Couldn't hand the review comments over" })
   }
 }
 
 // A draft in the prompt box, to read and send with Enter: nothing reaches Claude unseen. Where
 // the box won't take one (none on this surface, or a hook kept it out), the card asks instead,
 // and only Confirm sends it. A dialog holding the keys just goes away, so that one waits.
-async function handOver($: EngineInterface, pr: TrackedPr, text: string, error: string | undefined) {
-  const box = await $.prompt.read()
-  // Over an earlier draft of this hand-off, or an empty box; after anything the person typed.
-  const heading = fixHeading(pr)
-  const at = box.text.trim() === '' || box.text.startsWith(heading) ? 0 : box.text.indexOf(`\n\n${heading}`)
-  const filled =
-    at === -1
-      ? await $.prompt.fill({ text: `\n\n${text}`, mode: 'append' })
-      : await $.prompt.fill({ text: at === 0 ? text : `${box.text.slice(0, at)}\n\n${text}`, mode: 'replace' })
+async function handOver($: EngineInterface, kind: Kind, pr: TrackedPr, heading: string, text: string, error: string | undefined) {
+  // Over an earlier draft of this hand-off (the other one's kept), or an empty box; after
+  // anything the person typed.
+  const filled = await $.prompt.fill(redraft((await $.prompt.read()).text, heading, text))
   if (filled.isFilled) {
-    await setFix($, pr.url, { done: 'Drafted in the prompt box: read it, then press Enter', error })
+    await setHandoff($, kind, pr.url, { done: 'Drafted in the prompt box: read it, then press Enter', error })
   } else if (filled.refusal === 'dialog') {
-    await setFix($, pr.url, { error: 'A dialog holds the prompt box; close it and press again' })
+    await setHandoff($, kind, pr.url, { error: 'A dialog holds the prompt box; close it and press again' })
   } else {
     await oneQuestion($)
-    await setFix($, pr.url, { asking: text, error })
+    await setHandoff($, kind, pr.url, { asking: text, error })
   }
 }
 
-async function sendFix($: EngineInterface, pr: TrackedPr, text: string) {
-  await setFix($, pr.url, { done: 'Sent to Claude' })
+async function sendHandoff($: EngineInterface, kind: Kind, pr: TrackedPr, text: string) {
+  await setHandoff($, kind, pr.url, { done: 'Sent to Claude' })
   // Not awaited: the prompt runs as a turn of its own once the session is idle. A hook that
   // keeps it out, or a call that fails, takes back the "sent".
   void $.prompt.submit({ text, asUser: true }).then(
     async res => {
-      if (res.drop !== undefined) await setFix($, pr.url, { error: `Not sent: ${res.drop}` })
+      if (res.drop !== undefined) await setHandoff($, kind, pr.url, { error: `Not sent: ${res.drop}` })
     },
-    async () => setFix($, pr.url, { error: "Couldn't send it to Claude" }).catch(() => undefined),
+    async () => setHandoff($, kind, pr.url, { error: "Couldn't send it to Claude" }).catch(() => undefined),
   ).catch(() => undefined)
 }
+
+// The hand-offs a card can offer: Fix with Claude where CI failed, Address with Claude where
+// review threads are open. `what` names the hand-off in the question asked instead of a draft.
+const HANDOFFS = [
+  {
+    id: 'fix',
+    label: 'Fix with Claude',
+    busy: 'Collecting logs…',
+    what: 'CI failure',
+    isOffered: (pr: TrackedPr) => pr.checks.failed > 0,
+  },
+  {
+    id: 'address',
+    label: 'Address with Claude',
+    busy: 'Reading review threads…',
+    what: 'review comments',
+    isOffered: (pr: TrackedPr) => (pr.reviews?.unresolved ?? 0) > 0,
+  },
+] as const
 
 async function refreshStatus($: EngineInterface) {
   const list = await read($, prs)
@@ -605,7 +669,8 @@ async function dismiss($: EngineInterface, url: string) {
   await update($, prs, list => list.filter(pr => pr.url !== url))
   await update($, dropped, list => (list.includes(url) ? list : [...list, url]))
   await setAsk($, url, null)
-  await setFix($, url, null)
+  await setHandoff($, 'fix', url, null)
+  await setHandoff($, 'address', url, null)
   barWidth.delete(url)
   await syncAnimation($)
   if ((await read($, prs)).length === 0) await $.ui.close({ id: PANE })
@@ -778,7 +843,7 @@ export const register: Register = (on, options) => {
     const at = await read($, now)
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
-    const fixes = await read($, fixing)
+    const handoffs = { fix: await readRows($, 'fix'), address: await readRows($, 'address') }
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -901,43 +966,59 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // On a card whose CI failed: hand the failure to Claude, and what came of the last press.
-    const fixRow = (pr: TrackedPr) => {
-      if (pr.checks.failed === 0) return null
-      const ask = fixes[pr.url] ?? {}
-      const error = ask.error !== undefined && (
-        <Text color="error" wrap="wrap">
-          {`✗ ${ask.error}`}
-        </Text>
-      )
-      if (isBusy(ask.busy, at)) return <Text color="suggestion">◌ Collecting logs…</Text>
-      const text = ask.asking
-      if (text !== undefined) {
-        return (
-          <Box flexDirection="column">
-            {error}
-            <Text bold wrap="wrap">
-              {`Send CI failure of #${pr.number} to Claude?`}
-            </Text>
-            <Box gap={2}>
-              <Button key={`fix-confirm:${pr.url}`} label="Confirm" hotkey="y" plain onPress={() => sendFix($, pr, text)} />
-              <Button key={`fix-cancel:${pr.url}`} label="Cancel" hotkey="n" plain dimColor onPress={() => setFix($, pr.url, null)} />
-            </Box>
-          </Box>
-        )
+    // The hand-offs a card offers, what came of each one's last press above, and their buttons
+    // side by side below; a question, where no prompt box took the draft, stands for its button.
+    const handoffRow = (pr: TrackedPr) => {
+      const offered = HANDOFFS.filter(handoff => handoff.isOffered(pr))
+      if (offered.length === 0) return null
+      const notes = []
+      const buttons = []
+      for (const handoff of offered) {
+        const ask = handoffs[handoff.id][pr.url] ?? {}
+        if (isBusy(ask.busy, at)) {
+          notes.push(<Text color="suggestion">{`◌ ${handoff.busy}`}</Text>)
+          continue
+        }
+        if (ask.error !== undefined) {
+          notes.push(
+            <Text color="error" wrap="wrap">
+              {`✗ ${ask.error}`}
+            </Text>,
+          )
+        }
+        const text = ask.asking
+        if (text !== undefined) {
+          notes.push(
+            <Box flexDirection="column">
+              <Text bold wrap="wrap">
+                {`Send ${handoff.what} of #${pr.number} to Claude?`}
+              </Text>
+              <Box gap={2}>
+                <Button key={`${handoff.id}-confirm:${pr.url}`} label="Confirm" hotkey="y" plain onPress={() => sendHandoff($, handoff.id, pr, text)} />
+                <Button key={`${handoff.id}-cancel:${pr.url}`} label="Cancel" hotkey="n" plain dimColor onPress={() => setHandoff($, handoff.id, pr.url, null)} />
+              </Box>
+            </Box>,
+          )
+          continue
+        }
+        if (ask.done !== undefined) {
+          notes.push(
+            <Text color="success" wrap="wrap">
+              {`✓ ${ask.done}`}
+            </Text>,
+          )
+        }
+        buttons.push(<Button key={`${handoff.id}:${pr.url}`} label={handoff.label} onPress={() => (handoff.id === 'fix' ? collectFailure($, pr) : collectThreads($, pr))} />)
       }
 
       return (
         <Box flexDirection="column">
-          {error}
-          {ask.done !== undefined && (
-            <Text color="success" wrap="wrap">
-              {`✓ ${ask.done}`}
-            </Text>
+          {notes}
+          {buttons.length > 0 && (
+            <Box columnGap={2} flexWrap="wrap">
+              {buttons}
+            </Box>
           )}
-          <Box>
-            <Button key={`fix:${pr.url}`} label="Fix with Claude" onPress={() => collectFailure($, pr)} />
-          </Box>
         </Box>
       )
     }
@@ -1099,7 +1180,7 @@ export const register: Register = (on, options) => {
               ⚠ {pr.error}
             </Text>
           )}
-          {pr.state === 'OPEN' && fixRow(pr)}
+          {pr.state === 'OPEN' && handoffRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
 
           <Box justifyContent="space-between">

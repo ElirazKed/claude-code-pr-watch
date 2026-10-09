@@ -25,7 +25,7 @@ export type Failure = {
 
 const words = (value: string | null | undefined) => (value ?? 'failed').toLowerCase().replace(/_/g, ' ')
 
-const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 
 // The checks failing on the latest run of each, counted the way the card counts them.
 export function failingChecks(items: readonly CheckItem[], repo: string): Failure[] {
