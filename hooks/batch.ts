@@ -2,11 +2,13 @@
 // the count, plus the rate limit it left. `gh pr view` fields, shaped back the way it gives them.
 import type { CheckItem, GhPr, PrRef, RepoMerge } from './pr'
 
-// GitHub caps a query's node count; 100 checks for each of 40 PRs stays far inside it. The
+// 20 PRs a query, run one after another: a query of 40 busy PRs can outlast GitHub's own
+// timeout (a 502 or 504) and lose the whole round, while two of 20 cost the same points and
+// each answers in a few seconds. 100 checks for each stays far inside the node cap. The
 // repo's merge settings ride on each PR's own repository field: plain scalars, which cost
 // nothing in rate-limit points or nodes. (Whether the repo allows auto-merge needs no field:
 // GitHub's viewerCanEnableAutoMerge is false where it doesn't.)
-export const BATCH_SIZE = 40
+export const BATCH_SIZE = 20
 
 // The head commit's checks, with whatever more a caller asks of each kind, and of the commit.
 const checksOf = (run = '', status = '', commit = '') => `commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
@@ -18,7 +20,7 @@ const checksOf = (run = '', status = '', commit = '') => `commits(last: 1) { nod
 // Who reviewed and the open threads (review.ts): small pages, logins and states, and of the
 // newest threads only whether they are resolved or outdated, never a comment's text. Each
 // connection costs a PR one more request in GitHub's reckoning (100 make a point), so a batch
-// of 40 costs 2 points, not 1; up to 24 still cost 1.
+// of 20 costs 1 point (up to 24 would).
 const REVIEWS = `latestReviews(first: 10) { totalCount nodes { author { __typename login } state submittedAt } }
   latestOpinionatedReviews(first: 10) { nodes { author { __typename login } state submittedAt } }
   reviewRequests(first: 10) { totalCount nodes { requestedReviewer {
