@@ -54,11 +54,34 @@ type Clock = ReturnType<typeof mock.clock>
 
 const FAILED = new Set(['ACTION_REQUIRED', 'CANCELLED', 'FAILURE', 'STALE', 'STARTUP_FAILURE', 'TIMED_OUT'])
 
+type Said = { login: string; state: string; at: string; isBot?: boolean }
+type Thread = { isResolved: boolean; isOutdated: boolean }
+
+// The review connections GitHub answers the poller with, from a fixture's `reviews` (every
+// review, oldest first), `requested` (logins with a request pending) and `threads`. As GitHub
+// does, the latest reviews leave out a reviewer with a request pending.
+function reviewsGql(fixture: Record<string, unknown>) {
+  const said = (fixture.reviews ?? []) as Said[]
+  const requested = (fixture.requested ?? []) as string[]
+  const threads = (fixture.threads ?? []) as Thread[]
+  const node = (r: Said) => ({ author: { __typename: r.isBot ? 'Bot' : 'User', login: r.login }, state: r.state, submittedAt: r.at })
+  const latest = [...new Map(said.map(r => [r.login, r])).values()].filter(r => !requested.includes(r.login)).map(node)
+  const opinionated = [...new Map(said.filter(r => r.state !== 'COMMENTED').map(r => [r.login, r])).values()].map(node)
+
+  return {
+    latestReviews: { totalCount: latest.length, nodes: latest },
+    latestOpinionatedReviews: { nodes: opinionated },
+    reviewRequests: { totalCount: requested.length, nodes: requested.map(login => ({ requestedReviewer: { __typename: 'User', login } })) },
+    reviewThreads: { totalCount: threads.length, nodes: threads },
+  }
+}
+
 // gh's GraphQL shape for a fixture: the repository alias with its merge settings, and the PR
 // in it, checks nested under the head commit. A check run's title and summary come only by
-// the commit's check suites, for failed runs, and only when `query` asks for them there.
+// the commit's check suites, for failed runs, and only when `query` asks for them there; the
+// reviews only when it asks for them (the poller's query).
 const asGql = (fixture: Record<string, unknown>, query = '') => {
-  const { statusCheckRollup, repository, ...rest } = fixture
+  const { statusCheckRollup, repository, reviews: _r, requested: _q, threads: _t, ...rest } = fixture
   const all = statusCheckRollup as Record<string, unknown>[]
   const nodes = all.map(({ title: _t, summary: _s, ...item }) => item)
   const failed = all
@@ -67,7 +90,9 @@ const asGql = (fixture: Record<string, unknown>, query = '') => {
   const suites = query.includes('checkSuites') ? { checkSuites: { nodes: [{ checkRuns: { nodes: failed } }] } } : {}
   const commits = { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes } }, ...suites } }] }
 
-  return { ...(repository as object | undefined), pullRequest: { ...rest, closedAt: null, commits } }
+  const reviews = query.includes('reviewThreads') ? reviewsGql(fixture) : {}
+
+  return { ...(repository as object | undefined), pullRequest: { ...rest, closedAt: null, commits, ...reviews } }
 }
 
 type MergeReply = { exitCode: number; stderr?: string }
@@ -916,4 +941,118 @@ test("a second press replaces its earlier draft and keeps the person's text befo
   expect(box().startsWith('Look at this one first.\n\nCI failed on acme/app#31')).toBe(true)
   expect(box().split('CI failed on acme/app#31')).toHaveLength(2)
   await ui.unmount()
+})
+
+const REVIEWED = 'https://github.com/acme/app/pull/41'
+const unresolved = (isOutdated = false) => ({ isResolved: false, isOutdated })
+// Two comment-only reviews (one by a review app), a review asked of carol, and threads: three
+// open (one on code since changed), one resolved. GitHub still says REVIEW_REQUIRED.
+const comments: Said[] = [
+  { login: 'nadav', state: 'COMMENTED', at: '2026-10-07T10:00:00Z' },
+  { login: 'codebot-review-assistant', state: 'COMMENTED', at: '2026-10-07T10:05:00Z', isBot: true },
+]
+const commented = pr(REVIEWED, {
+  mergeStateStatus: 'BLOCKED',
+  statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')],
+  reviews: comments,
+  requested: ['carol'],
+  threads: [unresolved(), unresolved(), unresolved(true), { isResolved: true, isOutdated: false }],
+})
+
+test('a card shows who reviewed and the threads still open, and the comments are the headline', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  fakeHost(on, clock, { [REVIEWED]: commented })
+  await $.command.run({ command: 'pr-watch', args: REVIEWED, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns: 50 } })
+    expect(await ui.find({ text: /💬 COMMENTS/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '3 comments to address · 1 outdated' })).toBeDefined()
+    expect(await ui.find({ text: /Waiting for review/ })).toBeUndefined()
+    // Docked at 50 columns the verbs don't fit: icons and names.
+    expect(await ui.find({ type: 'Text', text: '💬 nadav · 💬 codebot · ◷ carol' })).toBeDefined()
+    // The headline counts the threads, so no second line says it again.
+    expect(await ui.find({ text: /unresolved/ })).toBeUndefined()
+    await ui.unmount()
+  }
+  const wide = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 80 } })
+  expect(await wide.find({ type: 'Text', text: '💬 nadav commented · 💬 codebot commented · ◷ carol requested' })).toBeDefined()
+  await wide.unmount()
+})
+
+test("a PR with no reviews has no reviewers line, and a merged one shows none", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  fakeHost(on, clock, { [RUNNING]: GH[RUNNING], [MERGED]: { ...(GH[MERGED] as object), reviews: [{ login: 'alice', state: 'APPROVED', at: '2026-10-07T09:00:00Z' }] } })
+  await $.command.run({ command: 'pr-watch', args: `${RUNNING} ${MERGED}`, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /CI RUNNING/ })).toBeDefined()
+  expect(await ui.find({ text: /approved|requested|commented|unresolved/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a review that lands between rounds toasts once; the ones there at first sight, and the person's own, don't", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  const toasts: string[] = []
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  const gh: Record<string, unknown> = { [REVIEWED]: commented }
+  fakeHost(on, clock, gh)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: REVIEWED, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(10_500)
+  expect(toasts).toEqual([])
+
+  // The person replies (as `me`, gh's account here), then alice approves.
+  gh[REVIEWED] = {
+    ...commented,
+    reviews: [...comments, { login: 'me', state: 'COMMENTED', at: '2026-10-07T12:00:20Z' }, { login: 'alice', state: 'APPROVED', at: '2026-10-07T12:00:30Z' }],
+  }
+  await clock.advance(70_000)
+  expect(toasts).toEqual(['✓ alice approved #41'])
+
+  await clock.advance(70_000)
+  expect(toasts).toEqual(['✓ alice approved #41'])
+
+  // A review that moves the card says so once: no second toast for the state it caused.
+  const before = gh[REVIEWED] as Record<string, unknown>
+  gh[REVIEWED] = {
+    ...before,
+    reviewDecision: 'CHANGES_REQUESTED',
+    reviews: [...(before.reviews as Said[]), { login: 'bob', state: 'CHANGES_REQUESTED', at: '2026-10-07T12:02:00Z' }],
+  }
+  await clock.advance(70_000)
+  expect(toasts).toEqual(['✓ alice approved #41', '✗ bob requested changes on #41'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /CHANGES REQUESTED/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '3 unresolved threads (1 outdated)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '✗ bob · ✓ alice · 💬 nadav · 💬 codebot · +2 more' })).toBeDefined()
+  await ui.unmount()
+
+  // The author's own thread replies toast nothing; a merge in the same round as a review (an
+  // approval auto-merged) still toasts.
+  const last = gh[REVIEWED] as Record<string, unknown>
+  gh[REVIEWED] = {
+    ...last,
+    state: 'MERGED',
+    mergedAt: '2026-10-07T12:04:00Z',
+    reviewDecision: 'APPROVED',
+    reviews: [
+      ...(last.reviews as Said[]),
+      { login: 'octocat', state: 'COMMENTED', at: '2026-10-07T12:03:00Z' },
+      { login: 'dana', state: 'APPROVED', at: '2026-10-07T12:03:30Z' },
+    ],
+  }
+  await clock.advance(70_000)
+  expect(toasts.slice(2)).toEqual(['✓ dana approved #41', '🎉 PR #41 · Merged'])
 })

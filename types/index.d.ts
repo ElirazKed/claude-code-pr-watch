@@ -27,6 +27,24 @@ export type Mergeable = {
   canCancelAuto: boolean
 }
 
+// Where a reviewer stands: their approval or change request, a review asked of them, or a
+// comment-only review.
+export type Verdict = 'approved' | 'changes' | 'commented' | 'requested'
+
+export type Reviewer = { login: string; verdict: Verdict }
+
+// A PR's reviewers and open review threads, as GitHub said at the last check.
+export type Reviews = {
+  reviewers: Reviewer[]
+  // Reviewers and requests beyond the ones asked for.
+  more: number
+  unresolved: number
+  // Unresolved threads on code that has changed since.
+  outdated: number
+  // More threads than were asked for: `unresolved` counts the newest only.
+  isCapped: boolean
+}
+
 export type TrackedPr = {
   url: string
   repo: string
@@ -48,6 +66,11 @@ export type TrackedPr = {
   checkedAt: number | null
   error: string | null
   merge: Mergeable
+  // Null until a round with review facts lands.
+  reviews: Reviews | null
+  // The newest review submission looked at (ms), so only later ones toast; null before the
+  // first look.
+  reviewSeen: number | null
 }
 
 // A press's work under way, from when it started: a mark older than a run can take was left by

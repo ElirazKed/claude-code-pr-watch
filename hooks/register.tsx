@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Busy, FixAsk, MergeAsk, TrackedPr } from '../types'
+import type { Busy, FixAsk, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
   MERGE_LABEL,
@@ -28,6 +28,7 @@ import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batc
 import type { RateLimit } from './batch'
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
+import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -60,6 +61,12 @@ function full(pr: TrackedPr): TrackedPr {
 }
 
 const TOAST_ICON: Record<string, string> = { success: '✓', error: '✗', warning: '◷', merged: '🎉', suggestion: '⇢' }
+const VERDICT_COLOUR: Record<Verdict, 'success' | 'error' | 'suggestion' | undefined> = {
+  approved: 'success',
+  changes: 'error',
+  commented: 'suggestion',
+  requested: undefined,
+}
 
 // ---- One poller for the whole machine -------------------------------------------------
 // Every session lists the PRs it watches under ~/.cache/pr-watch/sessions/ (the file's mtime
@@ -309,27 +316,36 @@ async function tick($: EngineInterface, own: readonly PrRef[], at: number): Prom
 const refOf = (pr: TrackedPr): PrRef => ({ url: pr.url, repo: pr.repo, number: pr.number })
 
 // Folds the shared results into this session's cards: newer entries only, and a toast when
-// a card's state changes.
+// a card's state changes or a review lands. A new review's toast says it all: the state change
+// it caused (a review or ready headline) doesn't toast as well; CI, conflicts and a merge still do.
 async function apply($: EngineInterface, shared: Shared) {
   const at = await $.clock.now()
   const list = (await read($, prs)).map(full)
+  // The person's own reviews never toast, whichever of their gh accounts wrote them.
+  const { active, others } = await logins($)
   const moved: string[] = []
   const next = list.map(current => {
     const entry = shared.prs[current.url]
     if (entry === undefined || (current.checkedAt !== null && entry.at <= current.checkedAt)) return current
     if (entry.pr === undefined) return { ...current, error: entry.error ?? null, checkedAt: current.checkedAt ?? entry.at }
+    const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others], entry.pr.author?.login)
     const pr: TrackedPr = {
       ...current,
       title: entry.pr.title,
       state: entry.pr.state,
-      ...derive(entry.pr),
+      ...derive(entry.pr, current.reviews),
       ...metaOf(entry.pr),
       merge: mergeOf(entry.pr, current.merge),
+      reviews: reviewsOf(entry.pr) ?? current.reviews,
+      reviewSeen: seen,
       checkedAt: entry.at,
       error: entry.error ?? null,
     }
+    const said = reviewToasts(fresh, pr.number)
+    for (const text of said) $.ui.toast(text)
     if (current.checkedAt !== null && current.pill !== pr.pill && pr.error === null) {
-      $.ui.toast(`${TOAST_ICON[pr.tone] ?? '•'} PR #${pr.number} · ${pr.headline}`)
+      const isReviewCaused = said.length > 0 && (pr.stage === 'review' || (pr.stage === 'ready' && pr.tone !== 'error'))
+      if (!isReviewCaused) $.ui.toast(`${TOAST_ICON[pr.tone] ?? '•'} PR #${pr.number} · ${pr.headline}`)
       moved.push(pr.url)
     }
 
@@ -926,16 +942,51 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // Who reviewed, and the threads still open: "✓ alice approved · 💬 nadav commented" and
+    // "3 unresolved threads (1 outdated)", each only when there is something to say.
+    const reviewLines = (reviews: Reviews, threads: string) => {
+      const pieces = verdictLine(reviews, inner)
+
+      return (
+        <Box flexDirection="column">
+          {pieces.length > 0 && (
+            <Text wrap="truncate-end">
+              {pieces.map((piece, i) => {
+                // A pending request, or "+2 more": dim.
+                const colour = piece.verdict === null ? undefined : VERDICT_COLOUR[piece.verdict]
+
+                return (
+                  <Text>
+                    {i > 0 && <Text dimColor> · </Text>}
+                    <Text color={colour} dimColor={colour === undefined}>
+                      {piece.text}
+                    </Text>
+                  </Text>
+                )
+              })}
+            </Text>
+          )}
+          {threads !== '' && (
+            <Text color="warning" wrap="truncate-end">
+              {threads}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
     const card = (pr: TrackedPr) => {
       const step = stepIndex(pr.stage)
       const isMerged = pr.stage === 'merged'
       const doneColour = isMerged ? 'merged' : 'success'
       const icon = [...pr.pill][0] ?? '●'
-      // Labels take 25 cells and the glyphs/gaps 10; connectors share what is left.
-      const link = Math.min(6, Math.max(1, Math.floor((inner - 35) / 3)))
+      // Labels take 25 cells and the glyphs/gaps 10 (one more for a wide icon, 💬); connectors
+      // share what is left.
+      const link = Math.min(6, Math.max(1, Math.floor((inner - 34 - cells(icon)) / 3)))
       const label = `${pr.checks.passed}/${pr.checks.total}`
       const barW = Math.max(6, inner - label.length - 1)
       const hasBar = (pr.state === 'OPEN' && pr.checks.total > 0) || isMerged
+      const threads = pr.state === 'OPEN' && pr.reviews !== null ? threadsBeside(pr.headline, pr.reviews) : { line: '', note: '' }
 
       if (hasBar && !isMerged) barWidth.set(pr.url, barW)
 
@@ -1034,6 +1085,7 @@ export const register: Register = (on, options) => {
           <Text color={pr.tone} wrap="wrap">
             {pr.headline}
             {isMerged && pr.mergedAt !== null && <Text dimColor> · {ago(at - Date.parse(pr.mergedAt))}</Text>}
+            {threads.note !== '' && <Text dimColor> · {threads.note}</Text>}
           </Text>
           {pr.checks.failing.length > 2 &&
             pr.checks.failing.slice(2, 5).map(name => (
@@ -1041,6 +1093,7 @@ export const register: Register = (on, options) => {
                 {'  '}✗ {name}
               </Text>
             ))}
+          {pr.state === 'OPEN' && pr.reviews !== null && reviewLines(pr.reviews, threads.line)}
           {pr.error !== null && (
             <Text color="error" wrap="truncate-end">
               ⚠ {pr.error}

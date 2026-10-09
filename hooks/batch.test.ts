@@ -13,6 +13,23 @@ describe('batched query', () => {
     expect(query).toContain('rateLimit { remaining resetAt }')
   })
 
+  test('asks who reviewed and whether threads are resolved, never what anyone wrote', async () => {
+    const query = buildQuery([A])
+    for (const field of ['latestReviews(first: 10)', 'latestOpinionatedReviews(first: 10)', 'reviewRequests(first: 10)', 'reviewThreads(last: 50) { totalCount nodes { isResolved isOutdated } }']) {
+      expect(query).toContain(field)
+    }
+    expect(query).not.toMatch(/\b(body|bodyText|comments)\b/)
+  })
+
+  test('the review facts come through as GitHub sent them', async () => {
+    const reviewThreads = { totalCount: 1, nodes: [{ isResolved: false, isOutdated: true }] }
+    const latestReviews = { totalCount: 1, nodes: [{ author: { __typename: 'User', login: 'nadav' }, state: 'COMMENTED', submittedAt: '2026-10-07T10:00:00Z' }] }
+    const stdout = JSON.stringify({ data: { p0: { pullRequest: { number: 7, latestReviews, reviewThreads, commits: { nodes: [] } } } } })
+    const pr = parseReply(stdout, '', [A]).found.get(A.url)
+    expect(pr?.latestReviews).toEqual(latestReviews)
+    expect(pr?.reviewThreads).toEqual(reviewThreads)
+  })
+
   test('a partial reply: found PRs flattened like gh pr view, the rest missing', async () => {
     // What `gh api graphql` prints (exit 1) when one alias is NOT_FOUND.
     const stdout = JSON.stringify({

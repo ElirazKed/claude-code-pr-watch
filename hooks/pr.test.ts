@@ -205,6 +205,89 @@ describe('lifecycle', () => {
   })
 })
 
+describe('review', () => {
+  const at = '2026-10-07T10:00:00Z'
+  const said = (login: string, state: string) => ({ author: { __typename: 'User', login }, state, submittedAt: at })
+  const open = (n: number, outdated = 0) => [
+    ...Array.from({ length: n - outdated }, () => ({ isResolved: false, isOutdated: false })),
+    ...Array.from({ length: outdated }, () => ({ isResolved: false, isOutdated: true })),
+    { isResolved: true, isOutdated: false },
+  ]
+  // A PR as the poller sees it: its latest reviews, approvals and change requests, and threads.
+  const reviewed = (decision: string | null, latest: string[][], threads = open(0), extra: Partial<GhPr> = {}): GhPr => {
+    const nodes = latest.map(([login = '', state = '']) => said(login, state))
+
+    return {
+      ...base,
+      reviewDecision: decision,
+      statusCheckRollup: [run('build', 'COMPLETED', 'SUCCESS')],
+      latestReviews: { totalCount: nodes.length, nodes },
+      latestOpinionatedReviews: { nodes: nodes.filter(node => node.state !== 'COMMENTED') },
+      reviewRequests: { totalCount: 0, nodes: [] },
+      reviewThreads: { totalCount: threads.length, nodes: threads },
+      ...extra,
+    }
+  }
+
+  test('comment-only reviews with threads open: comments to address, not "waiting for review"', async () => {
+    const d = derive(reviewed('REVIEW_REQUIRED', [['nadav', 'COMMENTED'], ['codebot', 'COMMENTED']], open(3), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.pill).toBe('💬 COMMENTS')
+    expect(d.headline).toBe('3 comments to address')
+    expect(d.stage).toBe('review')
+    expect(d.tone).toBe('warning')
+  })
+
+  test('a repo that needs no approval, held back with threads open, says so too', async () => {
+    const d = derive(reviewed(null, [['nadav', 'COMMENTED']], open(1), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.pill).toBe('💬 COMMENTS')
+    expect(d.headline).toBe('1 comment to address')
+  })
+
+  test('comments with every thread resolved: looked at, still waiting for approval', async () => {
+    const d = derive(reviewed('REVIEW_REQUIRED', [['nadav', 'COMMENTED']], open(0), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.pill).toBe('◷ IN REVIEW')
+    expect(d.headline).toBe('Reviewed · waiting for approval')
+  })
+
+  test('no reviews yet: waiting for review', async () => {
+    const d = derive(reviewed('REVIEW_REQUIRED', [], open(0), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.headline).toBe('Waiting for review')
+  })
+
+  test('approved and clean with threads open: ready, and says how many', async () => {
+    const d = derive(reviewed('APPROVED', [['alice', 'APPROVED']], open(2, 1)))
+    expect(d.pill).toBe('✓ READY')
+    expect(d.headline).toBe('Approved · 2 unresolved threads')
+  })
+
+  test('approved but blocked with threads open (conversations must be resolved): the threads are named', async () => {
+    const d = derive(reviewed('APPROVED', [['alice', 'APPROVED']], open(2), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.pill).toBe('⏸ BLOCKED')
+    expect(d.headline).toBe('Blocked · 2 unresolved threads')
+    const auto = derive(reviewed('APPROVED', [['alice', 'APPROVED']], open(2), { mergeStateStatus: 'BLOCKED', autoMergeRequest: { mergeMethod: 'SQUASH' } }))
+    expect(auto.headline).toBe('Blocked · 2 unresolved threads · auto-merge on')
+  })
+
+  test('changes requested stays changes requested (the card counts the threads below)', async () => {
+    const d = derive(reviewed('CHANGES_REQUESTED', [['bob', 'CHANGES_REQUESTED']], open(1), { mergeStateStatus: 'BLOCKED' }))
+    expect(d.pill).toBe('↺ CHANGES REQUESTED')
+    expect(d.headline).toBe('Changes requested')
+  })
+
+  test('conflicts and CI still come first', async () => {
+    const threads = open(3)
+    expect(derive(reviewed('REVIEW_REQUIRED', [['nadav', 'COMMENTED']], threads, { mergeStateStatus: 'DIRTY' })).pill).toBe('⚠ CONFLICTS')
+    const failing = reviewed('REVIEW_REQUIRED', [['nadav', 'COMMENTED']], threads, { statusCheckRollup: [run('build', 'COMPLETED', 'FAILURE')] })
+    expect(derive(failing).pill).toBe('✗ CI FAILED')
+  })
+
+  test("an older version's entry (no review facts) keeps the card's last ones", async () => {
+    const kept = { reviewers: [{ login: 'nadav', verdict: 'commented' as const }], more: 0, unresolved: 3, outdated: 0, isCapped: false }
+    const d = derive({ ...base, reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED' }, kept)
+    expect(d.headline).toBe('3 comments to address')
+  })
+})
+
 describe('PRs Claude only read: offered', () => {
   const url = 'https://github.com/acme/app/pull/9'
   const read = (tool: string, input: Record<string, unknown>, output = '') => touched(tool, input, output)
