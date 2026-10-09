@@ -843,7 +843,8 @@ export const register: Register = (on, options) => {
     const at = await read($, now)
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
-    const handoffs = { fix: await readRows($, 'fix'), address: await readRows($, 'address') }
+    const [fixRows, addressRows] = await Promise.all([readRows($, 'fix'), readRows($, 'address')])
+    const handoffs = { fix: fixRows, address: addressRows }
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -976,12 +977,12 @@ export const register: Register = (on, options) => {
       for (const handoff of offered) {
         const ask = handoffs[handoff.id][pr.url] ?? {}
         if (isBusy(ask.busy, at)) {
-          notes.push(<Text color="suggestion">{`◌ ${handoff.busy}`}</Text>)
+          notes.push(<Text key={`${handoff.id}-busy:${pr.url}`} color="suggestion">{`◌ ${handoff.busy}`}</Text>)
           continue
         }
         if (ask.error !== undefined) {
           notes.push(
-            <Text color="error" wrap="wrap">
+            <Text key={`${handoff.id}-error:${pr.url}`} color="error" wrap="wrap">
               {`✗ ${ask.error}`}
             </Text>,
           )
@@ -989,7 +990,7 @@ export const register: Register = (on, options) => {
         const text = ask.asking
         if (text !== undefined) {
           notes.push(
-            <Box flexDirection="column">
+            <Box key={`${handoff.id}-ask:${pr.url}`} flexDirection="column">
               <Text bold wrap="wrap">
                 {`Send ${handoff.what} of #${pr.number} to Claude?`}
               </Text>
@@ -1003,11 +1004,12 @@ export const register: Register = (on, options) => {
         }
         if (ask.done !== undefined) {
           notes.push(
-            <Text color="success" wrap="wrap">
+            <Text key={`${handoff.id}-done:${pr.url}`} color="success" wrap="wrap">
               {`✓ ${ask.done}`}
             </Text>,
           )
         }
+        // Not a HANDOFFS field: the loader wants $ passed only where a collector is named.
         buttons.push(<Button key={`${handoff.id}:${pr.url}`} label={handoff.label} onPress={() => (handoff.id === 'fix' ? collectFailure($, pr) : collectThreads($, pr))} />)
       }
 

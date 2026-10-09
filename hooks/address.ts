@@ -113,7 +113,7 @@ function threadBlock(thread: GhThread, n: number, author: string): string {
   const head = `${n}. ${spot(thread)} · ${comments[0]?.url ?? 'no link'}`
   const said = comments.map(c => {
     const login = c.author?.login ?? 'ghost'
-    const who = login === author ? `@${login} (PR author)` : `@${login}`
+    const who = login.toLowerCase() === author.toLowerCase() ? `@${login} (PR author)` : `@${login}`
 
     return `   ${who}: ${cleanBody(c.body).replace(/\n(?!\n)/g, '\n     ')}`
   })
