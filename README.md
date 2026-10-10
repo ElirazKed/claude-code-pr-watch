@@ -90,6 +90,16 @@ A card whose CI failed (at least one check failing on its latest run, counted th
 - **While it collects:** the card says *Collecting logs…*, and a second press does nothing. If a reload cuts it off, the button comes back after 2 minutes.
 - **No prompt box:** where the box won't take a draft, the card asks instead, *Send CI failure of #12 to Claude?*, and only **Confirm** (`y`) sends it; **Cancel** (`n`) sends nothing.
 
+## Address with Claude
+
+A card with unresolved review threads has an **Address with Claude** button, beside **Fix with Claude** when CI failed too. It reads the threads and drafts them in your prompt box the same way: read the draft, change it if you like, and press Enter. Nothing reaches Claude until you do.
+
+- **What's in it:** the PR (repo, number, title, link, head branch → base), then each unresolved thread by file and line: where it is (`src/upload.ts:40-42`), its link, and the first comment and its replies, each by its author (the PR author's marked). Resolved threads are left out; an outdated one (the code changed since) stays in, marked, with the line it was left on. Then the ask: address each on this branch, changing the code where a comment is right and saying where Claude disagrees or a comment needs your call, or say first if the repo or branch isn't checked out here. It doesn't ask Claude to push or merge, and it tells Claude not to reply to or resolve a thread on GitHub, but to draft any reply in the session for you to read first.
+- **Threads:** one `gh api graphql` query for that PR alone, on the press: its newest 100 threads and the first 10 comments of each. The poll never asks what a thread says.
+- **Trimmed:** each comment loses the HTML comments review apps keep notes in and is clipped at 1,000 characters, each thread at 3,000, and all the threads together stay under about 12 KB. Threads that don't fit are counted, and the draft points to the PR's files tab.
+- **Which account, while it reads, no prompt box:** as for Fix with Claude. The card says *Reading review threads…*, a second press does nothing, and where the box won't take a draft it asks *Send review comments of #12 to Claude?* first.
+- **Both at once:** each button's draft replaces only its own earlier draft for that PR, so the other one, and what you typed before them, stay in the box.
+
 ## How it polls
 
 Every session on the machine shares **one** poller, so 30 sessions watching 30 PRs cost about one GitHub call every 20–60 seconds, not 30.
@@ -97,7 +107,7 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 - Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
 - When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
-- Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote.
+- Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote (Address with Claude asks that of one PR, on its press).
 
 ### Poll intervals
 

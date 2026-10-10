@@ -1,6 +1,6 @@
 {
   "name": "pr-watch",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
   "types": "./types/index.d.ts",
   "author": {
