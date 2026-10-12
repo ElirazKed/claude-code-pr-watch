@@ -70,6 +70,37 @@ describe('detecting PRs', () => {
     expect(ghPrRefs('gh pr view 9 && gh pr list -R acme/app')).toEqual([])
   })
 
+  test('reads the shell around a gh pr command', async () => {
+    const at12 = 'https://github.com/a/b/pull/12'
+    const url = (code: string) => refFromGhCommand(shellCode(code))?.url ?? null
+    // Line continuations, substitutions, subshells.
+    expect(url('gh pr view 12 \\\n  -R a/b')).toBe(at12)
+    expect(url('N=$(gh pr view 12 -R a/b --json number)')).toBe(at12)
+    expect(url('(cd x && gh pr view 12 -R a/b)')).toBe(at12)
+    expect(url('X=`gh pr view 12 -R a/b`')).toBe(at12)
+    // A redirection is skipped, not the end of the command.
+    expect(url('gh pr view 12 2>/dev/null -R a/b')).toBe(at12)
+    expect(url('gh pr view 12 2>&1 -R a/b')).toBe(at12)
+    expect(url('gh pr view 12 > out.json -R a/b')).toBe(at12)
+    // Flags are per subcommand: `-m` is a milestone on edit, `-c` a comment on close.
+    expect(url('gh pr edit -m 3 12 -R a/b')).toBe(at12)
+    expect(url('gh pr merge -m 12 -R a/b')).toBe(at12)
+    expect(url('gh pr close -c 3 12 -R a/b')).toBe(at12)
+    expect(url('gh pr review --comment 12 -b "ok" -R a/b')).toBe(at12)
+    expect(url('gh pr comment --edit-last 12 -R a/b')).toBe(at12)
+    // Short flags combine; `--` ends the flags; the host may lead the repo.
+    expect(url('gh pr merge -sd 12 -R a/b')).toBe(at12)
+    expect(url('gh pr checks -i20 12 -R a/b')).toBe(at12)
+    expect(url('gh pr view -R a/b -- 12')).toBe(at12)
+    expect(url('gh pr view 12 -R github.com/a/b')).toBe(at12)
+    expect(url('gh pr view 12 -R ghe.corp.example/a/b')).toBe(null)
+  })
+
+  test('a gh pr view inside a substitution is a named read, not the branch PR', async () => {
+    const t = touched('Bash', { command: 'N=$(gh pr view 12 -R a/b --json number)' }, '')
+    expect(t).toEqual({ acted: [], read: [{ url: 'https://github.com/a/b/pull/12', repo: 'a/b', number: 12 }], resolve: null })
+  })
+
   test('a read in one command and an act in another stay apart', async () => {
     const t = touched('Bash', { command: 'gh pr list -R acme/app; gh pr view 143 -R acme/api 2>&1 | head -1' }, '0')
     expect(t.read.map(r => r.url)).toEqual(['https://github.com/acme/api/pull/143'])

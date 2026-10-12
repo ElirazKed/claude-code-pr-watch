@@ -17,45 +17,93 @@ export function findPrUrls(text: string): PrRef[] {
   return [...found.values()]
 }
 
-// `gh pr` flags that take no value, so the word after one can be the PR. Any other flag is
-// taken to carry a value (`--interval 20`, `--jq .state`): a PR it hides is missed, never made up.
-const BARE_FLAGS = new Set([
-  '--watch', '--web', '-w', '--squash', '-s', '--rebase', '-r', '--merge', '-m', '--auto', '--delete-branch', '-d',
-  '--admin', '--disable-auto', '--draft', '--fill', '-f', '--fill-first', '--fill-verbose', '--comments', '-c',
-  '--required', '--fail-fast', '--approve', '-a', '--request-changes', '--undo', '--name-only', '--patch', '--yes',
-  '--force', '--editor', '-e', '--dry-run', '--detach', '--recurse-submodules',
-])
+// Per `gh pr` subcommand, the flags that take no value (gh 2.10x `--help`), so the word after
+// one can be the PR. Any other flag is taken to carry a value (`--interval 20`, `--jq .state`,
+// `gh pr edit -m 3`): a PR it hides is missed, never made up. One letter means different things
+// across subcommands (`-c` is bare on view and review but takes the comment on close), hence per sub.
+const BARE_FLAGS: Record<string, ReadonlySet<string>> = Object.fromEntries(
+  Object.entries({
+    view: ['-c', '--comments', '-w', '--web'],
+    diff: ['--allow-escape-sequences', '--name-only', '--patch', '-w', '--web'],
+    checks: ['--fail-fast', '--required', '--watch', '-w', '--web'],
+    merge: ['--admin', '--auto', '-d', '--delete-branch', '--disable-auto', '-m', '--merge', '-r', '--rebase', '-s', '--squash'],
+    ready: ['--undo'],
+    edit: ['--remove-milestone'],
+    comment: ['--create-if-none', '--delete-last', '--edit-last', '-e', '--editor', '-w', '--web', '--yes'],
+    review: ['-a', '--approve', '-c', '--comment', '-r', '--request-changes'],
+    close: ['-d', '--delete-branch'],
+    reopen: [],
+    checkout: ['--detach', '-f', '--force', '--recurse-submodules'],
+    'update-branch': ['--rebase'],
+  }).map(([sub, flags]) => [sub, new Set(['--help', ...flags])]),
+)
+const NO_FLAGS: ReadonlySet<string> = new Set(['--help'])
 
-// One command of a line (`a && b; c | d`), as words.
+// Whether a flag word swallows the next word as its value. `-sd` is `-s -d`; in `-si20` the
+// value is attached.
+function takesNext(word: string, bare: ReadonlySet<string>): boolean {
+  if (word.startsWith('--')) return !word.includes('=') && !bare.has(word)
+  const letters = word.slice(1)
+  const firstValued = [...letters].findIndex(letter => !bare.has(`-${letter}`))
+
+  return firstValued === letters.length - 1
+}
+
+// A redirection word (`2>&1`, `>out`, `&>log`, `<in`); a bare operator (`>`, `2>`) owns the next word.
+const REDIRECT = /^(?:\d*|&)[<>]/
+const isBareRedirect = (word: string) => /^(?:\d*|&)[<>]+&?$/.test(word)
+
+// The simple commands of a line (`a && b; c | d`, `$(b)`, `(cd x && b)`), as words. A `&` inside
+// a redirection (`2>&1`, `&>log`) does not end a command; a `\`-newline continues it.
 const commandsOf = (code: string) =>
   code
-    .split(/\|\||&&|[;|&\n]/)
+    .replace(/\\\n/g, ' ')
+    .split(/\|\||&&|[;|\n()`]|(?<![<>])&(?!>)/)
     .map(part => part.trim().split(/\s+/).filter(Boolean))
     .filter(words => words.length > 0)
+
+// Each `gh pr <sub>` of the shell code, with the words after the subcommand.
+export function ghPrCommands(code: string): { sub: string; args: string[] }[] {
+  return commandsOf(code).flatMap(words => {
+    const at = words.findIndex((word, i) => /(^|\/)gh$/.test(word) && words[i + 1] === 'pr')
+    const sub = at < 0 ? undefined : words[at + 2]
+
+    return sub === undefined ? [] : [{ sub, args: words.slice(at + 3) }]
+  })
+}
+
+// `-R owner/repo`, or `-R github.com/owner/repo`; another host's PR has no github.com link.
+const repoOf = (value: string | undefined) => value?.match(/^(?:github\.com\/)?([\w.-]+\/[\w.-]+)$/)?.[1] ?? null
 
 // `gh pr view 12 -R owner/repo` style references that carry no URL: each `gh pr <sub>` of the
 // line with its own number and its own -R, never another command's (`gh pr list -R a/b; gh pr
 // view 7 -R c/d` is c/d#7), and never a flag's value or a redirection (`--interval 20`, `2>&1`).
 export function ghPrRefs(code: string, subs: (sub: string) => boolean = () => true): PrRef[] {
   const refs: PrRef[] = []
-  for (const words of commandsOf(code)) {
-    const at = words.findIndex((word, i) => /(^|\/)gh$/.test(word) && words[i + 1] === 'pr')
-    const sub = at < 0 ? undefined : words[at + 2]
-    if (sub === undefined || !subs(sub)) continue
+  for (const { sub, args } of ghPrCommands(code)) {
+    if (!subs(sub)) continue
+    const bare = BARE_FLAGS[sub] ?? NO_FLAGS
     let number: number | null = null
     let repo: string | null = null
     let isPositionalSeen = false
-    const rest = words.slice(at + 3)
-    for (let i = 0; i < rest.length; i++) {
-      const word = rest[i] ?? ''
-      if (/^\d*[<>]/.test(word)) break
-      const flag = word.match(/^(-R|--repo)(?:=(.*))?$/)
-      if (flag !== null) {
-        repo = flag[2] ?? rest[++i] ?? null
+    let isFlagsDone = false
+    for (let i = 0; i < args.length; i++) {
+      const word = args[i] ?? ''
+      if (REDIRECT.test(word)) {
+        if (isBareRedirect(word)) i++
         continue
       }
-      if (word.startsWith('-')) {
-        if (!word.includes('=') && !BARE_FLAGS.has(word)) i++
+      if (!isFlagsDone && word === '--') {
+        isFlagsDone = true
+        continue
+      }
+      const flag = isFlagsDone ? null : word.match(/^(?:-R|--repo)(?:=(.*))?$/)
+      if (flag != null) {
+        repo = repoOf(flag[1] ?? args[++i])
+        continue
+      }
+      if (!isFlagsDone && word.startsWith('-') && word !== '-') {
+        if (takesNext(word, bare)) i++
         continue
       }
       if (isPositionalSeen) continue
@@ -63,9 +111,7 @@ export function ghPrRefs(code: string, subs: (sub: string) => boolean = () => tr
       const n = word.match(/^#?(\d+)$/)
       if (n !== null) number = Number(n[1])
     }
-    if (number !== null && repo !== null && /^[\w.-]+\/[\w.-]+$/.test(repo)) {
-      refs.push({ url: `https://github.com/${repo}/pull/${number}`, repo, number })
-    }
+    if (number !== null && repo !== null) refs.push({ url: `https://github.com/${repo}/pull/${number}`, repo, number })
   }
 
   return refs
@@ -135,7 +181,7 @@ export function touched(tool: string, input: Record<string, unknown>, output: st
 
 function touchedByCommand(command: string, output: string): Touched {
   const code = shellCode(command)
-  const subs = [...code.matchAll(/\bgh\s+pr\s+([\w-]+)/g)].map(m => m[1] ?? '')
+  const subs = ghPrCommands(code).map(c => c.sub)
   const apiRefs = [...code.matchAll(API_PULL)].map(([, repo = '', n]) => ({ url: `https://github.com/${repo}/pull/${Number(n)}`, repo, number: Number(n) }))
   // `gh pr checks 12 -R o/r`; not `gh pr list --limit 30 -R o/r`.
   const isOneSub = (sub: string) => sub !== 'create' && (ACTS.has(sub) || READS_ONE.has(sub))
