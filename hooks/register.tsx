@@ -388,19 +388,21 @@ async function apply($: EngineInterface, shared: Shared) {
       await updateRows($, handoff.id, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || isBusy(ask.busy, at))))
     }
   }
-  await sayNewer($, shared)
   await refreshStatus($)
   await syncAnimation($)
+  // Last, and never thrown: the update notice must not cost a PR result.
+  await sayNewer($, shared).catch(() => undefined)
 }
 
 // This copy's own version, from its plugin.json (the API names the plugin, not its version).
-// Kept once read; unreadable, it is read again next time, and until then nothing is said.
-let ownVersion: string | null = null
+// Kept once read (null: no plain version to compare); unreadable, it is read again next time,
+// and until then nothing is said.
+let ownVersion: string | null | undefined
 // The version this load toasted, should notice.json not take the write.
 let toldVersion: string | null = null
 
 async function readOwnVersion($: EngineInterface): Promise<string | null> {
-  if (ownVersion === null) {
+  if (ownVersion === undefined) {
     try {
       ownVersion = versionIn(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)))
     } catch {
@@ -426,8 +428,12 @@ async function sayNewer($: EngineInterface, shared: Shared) {
   toldVersion = next.version
   const path = `${await root($)}/notice.json`
   if ((await readJson<{ version?: string }>($, path))?.version === next.version) return
-  await writeJson($, path, { version: next.version })
-  $.ui.toast(noticeToast(next.version, next.how))
+  // Claim, wait, re-read (as takeLease does): sessions that read notice.json at once would
+  // otherwise all toast. Only the claim that stuck toasts.
+  await writeJson($, path, { version: next.version, owner: INSTANCE })
+  await $.clock.sleep(150)
+  const claim = await readJson<{ version?: string; owner?: string }>($, path)
+  if (claim?.version === next.version && claim.owner === INSTANCE) $.ui.toast(noticeToast(next.version, next.how))
 }
 
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
@@ -762,7 +768,7 @@ export const register: Register = (on, options) => {
   pace.fastMs = seconds(options.poll_active_seconds, 20_000)
   pace.slowMs = seconds(options.poll_idle_seconds, 60_000)
   isNoticeOn = options.update_notice !== false
-  ownVersion = null
+  ownVersion = undefined
   toldVersion = null
 
   // A change in /config applies from the next round, no reload needed.
@@ -961,8 +967,8 @@ export const register: Register = (on, options) => {
     // A newer pr-watch, under the footer's buttons: "↑ pr-watch 0.9.0 available · git pull in …".
     const notice = upgrade !== null && (
       <Box key="newer" flexDirection="column">
-        {noticeLines(upgrade.version, upgrade.how, width).map(line => (
-          <Text dimColor wrap="wrap">
+        {noticeLines(upgrade.version, upgrade.how, width).map((line, i) => (
+          <Text key={`newer:${i}`} dimColor wrap="wrap">
             {line}
           </Text>
         ))}

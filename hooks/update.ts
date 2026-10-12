@@ -59,18 +59,19 @@ export function howToUpdate(root: string, home: string | null, name: string): st
 
     return market === undefined ? `/plugin → Installed → ${name} → Update now` : `claude plugin update ${name}@${market}`
   }
-  const isHome = home !== null && home !== '' && (path === home || path.startsWith(`${home}/`))
+  const base = home?.replace(/\\/g, '/').replace(/\/+$/, '') ?? ''
+  const isHome = base !== '' && (path === base || path.startsWith(`${base}/`))
 
-  return `git pull in ${isHome ? `~${path.slice(home.length)}` : path}`
+  return `git pull in ${isHome ? `~${path.slice(base.length)}` : path}`
 }
 
 const headOf = (version: string) => `↑ pr-watch ${version} available`
 
+export const noticeToast = (version: string, how: string) => `${headOf(version)} · ${how}`
+
 // The footer's note: one line where it fits, else what's out above how to get it.
 export function noticeLines(version: string, how: string, columns: number): string[] {
-  const line = `${headOf(version)} · ${how}`
+  const line = noticeToast(version, how)
 
   return cells(line) <= columns ? [line] : [headOf(version), how]
 }
-
-export const noticeToast = (version: string, how: string) => `${headOf(version)} · ${how}`

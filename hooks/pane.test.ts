@@ -614,7 +614,7 @@ test('a newer pr-watch shows under the footer and toasts once per version', asyn
   // Round after round, and for every other session (notice.json keeps the one toasted): once.
   await clock.advance(60_000)
   expect(told(toasts)).toHaveLength(1)
-  expect(JSON.parse(files.get(NOTICE)?.text ?? '{}')).toEqual({ version: '0.9.0' })
+  expect(JSON.parse(files.get(NOTICE)?.text ?? '{}')).toMatchObject({ version: '0.9.0' })
 
   // A later version toasts again, once.
   gh.pw = onGitHub('0.9.1')
