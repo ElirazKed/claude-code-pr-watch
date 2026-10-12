@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { buildQuery, chunks, parseReply } from './batch'
+import { LATEST_FIELD } from './update'
 
 const A = { url: 'https://github.com/acme/app/pull/7', repo: 'acme/app', number: 7 }
 const B = { url: 'https://github.com/secret/app/pull/1', repo: 'secret/app', number: 1 }
@@ -60,6 +61,39 @@ describe('batched query', () => {
     const reply = parseReply('', 'error connecting to api.github.com\n', [A])
     expect(reply.error).toBe('error connecting to api.github.com')
     expect(reply.missing).toEqual([])
+  })
+
+  test("pr-watch's newest version is asked only when wanted, and once", async () => {
+    expect(buildQuery([A, B])).not.toContain('pw:')
+    const query = buildQuery([A, B], true)
+    expect(query).toContain(LATEST_FIELD)
+    expect(query.split('pw: repository(').length).toBe(2)
+    expect(LATEST_FIELD).toContain('object(expression: "HEAD:.claude-plugin/plugin.json") { ... on Blob { text } }')
+  })
+
+  test('the newest version comes from the pw field', async () => {
+    const pw = { object: { text: JSON.stringify({ name: 'pr-watch', version: '0.9.0' }) } }
+    const stdout = JSON.stringify({ data: { pw, p0: { pullRequest: { number: 7, commits: { nodes: [] } } } } })
+    const reply = parseReply(stdout, '', [A])
+    expect(reply.latest).toBe('0.9.0')
+    expect(reply.found.has(A.url)).toBe(true)
+  })
+
+  test("a pw GitHub can't answer leaves the PRs as they were", async () => {
+    // What `gh api graphql` prints (exit 1) when the repo is renamed, gone or private.
+    const stdout = JSON.stringify({
+      data: { pw: null, p0: { pullRequest: { number: 7, state: 'OPEN', commits: { nodes: [] } } } },
+      errors: [{ type: 'NOT_FOUND', path: ['pw'], message: "Could not resolve to a Repository with the name 'ElirazKed/claude-code-pr-watch'." }],
+    })
+    const reply = parseReply(stdout, 'gh: Could not resolve…', [A])
+    expect(reply.error).toBe(null)
+    expect(reply.latest).toBe(null)
+    expect(reply.found.get(A.url)?.state).toBe('OPEN')
+    expect(reply.missing).toEqual([])
+    // Nor does a manifest that won't parse.
+    const garbled = JSON.stringify({ data: { pw: { object: { text: '{' } }, p0: { pullRequest: { number: 7, commits: { nodes: [] } } } } })
+    expect(parseReply(garbled, '', [A]).latest).toBe(null)
+    expect(parseReply(garbled, '', [A]).found.has(A.url)).toBe(true)
   })
 
   test('splits into batches', async () => {
