@@ -65,7 +65,8 @@ export function howToUpdate(root: string, home: string | null, name: string): st
   return `git pull in ${isHome ? `~${path.slice(base.length)}` : path}`
 }
 
-const headOf = (version: string) => `↑ pr-watch ${version} available`
+// "↑ pr-watch 0.9.0 available": what's out, without how to get it (the band's short form).
+export const headOf = (version: string) => `↑ pr-watch ${version} available`
 
 export const noticeToast = (version: string, how: string) => `${headOf(version)} · ${how}`
 

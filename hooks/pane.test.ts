@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
+import type { RenderElement } from 'claude-code'
 
 const RUNNING = 'https://github.com/acme/app/pull/12'
 const FAILING = 'https://github.com/acme/app/pull/13'
@@ -1457,5 +1458,233 @@ test('a card with failed CI and open threads offers both, and each press keeps t
   expect(box().startsWith('CI failed on acme/app#31')).toBe(true)
   expect(box().split('CI failed on acme/app#31')).toHaveLength(2)
   expect(box()).toContain('\n\nReview comments to address on acme/app#31')
+  await ui.unmount()
+})
+
+// ---- The band layout ----------------------------------------------------------------------
+
+const BAND = {
+  plugin: 'pr-watch',
+  component: 'AbovePrompt' as const,
+  props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 75, scroll: { offset: 0, bodyRows: 19 }, view: {} },
+  viewport: { columns: 80, rows: 40, isFullscreen: true },
+}
+// What the engine draws in the band of its own: nothing, but a survey.
+const NOTHING = { type: 'engine', ref: 0 } as const
+const IN_BAND = { options: { layout: 'band' } }
+const bandAt = (props: Partial<(typeof BAND)['props']>) => ({ ...BAND, props: { ...BAND.props, ...props } })
+
+type Drawn = { type: string; props?: Record<string, unknown>; children?: unknown[] }
+
+// The band as the terminal lays it out, line by line: a column Box stacks its children, any
+// other Box joins them across (its gap in spaces), a plain Button is "o: Open pane", a Raster
+// (the spinner) one '⠋'. What the engine draws itself is no line.
+function lines(node: unknown): string[] {
+  if (typeof node === 'string') return [node]
+  const el = node as Drawn
+  if (el.type === 'engine') return []
+  if (el.type === 'Button') return [`${el.props?.hotkey ? `${el.props.hotkey}: ` : ''}${el.props?.label}`]
+  if (el.type === 'Raster') return ['⠋']
+  const kids = (el.children ?? []).map(lines).filter(kid => kid.length > 0)
+  if (el.type === 'Box' && el.props?.flexDirection === 'column') return kids.flat()
+
+  return [kids.map(kid => kid.join('')).join(el.type === 'Box' ? ' '.repeat(Number(el.props?.gap ?? 0)) : '')]
+}
+
+type BandHost = { fixtures?: Record<string, unknown>; beneath?: RenderElement; fill?: () => { isFilled: boolean } }
+
+// A session watching `urls` (by the watch tool) on `fixtures`, over a band the engine leaves
+// empty unless another plugin draws `beneath`, and a prompt box that takes drafts while `fill`
+// says so; `opens` is each pane open since, with whether it asked for the keys, and `fills` the
+// drafts.
+async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly string[], { fixtures = GH, beneath, fill = () => ({ isFilled: true }) }: BandHost = {}) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  const opens: { id: string; focus?: true }[] = []
+  const fills: string[] = []
+  const blits: { requestId: string; key: string }[] = []
+  on('ui.render', { component: 'AbovePrompt' }, () => beneath ?? NOTHING)
+  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', ($, e) => (fills.push(e.text), fill()))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('ui.open', ($, e) => (opens.push({ id: e.id, focus: e.focus }), { value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', ($, e) => (blits.push({ requestId: e.requestId, key: e.key }), { value: {} }))
+  const host = fakeHost(on, clock, fixtures)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  if (urls.length > 0) await $.tool.call({ tool: 'mcp__pr-watch__watch', urls } as never)
+  await clock.advance(100)
+
+  return { ...host, clock, opens, fills, blits }
+}
+
+test('the band: a line per PR, most urgent first, then its buttons', IN_BAND, async ($, on) => {
+  const { blits, clock } = await bandSession($, on, [RUNNING, FAILING, MERGED])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', requestId: 'band' })
+  const drawn = lines(await ui.drawn())
+  expect(drawn).toEqual([
+    '✗ #13 Retry uploads with exponential backoff · 1 check failing',
+    '⠋ #12 Retry uploads with exponential backoff · CI running · 1/3',
+    '✓ #7 Retry uploads with exponential backoff · merged',
+    'o: Open pane  r: Refresh  f: Fix #13 with Claude',
+  ])
+  // The same spinner as the card, blitted in the band.
+  expect(await ui.find({ key: `band-spin:${RUNNING}` })).toBeDefined()
+  blits.length = 0
+  await clock.advance(200)
+  expect(blits).toContainEqual({ requestId: 'band', key: `band-spin:${RUNNING}` })
+  expect((await ui.find({ key: 'band-open' }))?.props).toMatchObject({ label: 'Open pane', hotkey: 'o', plain: true })
+  expect((await ui.find({ key: 'band-refresh' }))?.props).toMatchObject({ label: 'Refresh', hotkey: 'r' })
+  // No digit hotkeys: a bare digit in an empty prompt would press them.
+  for (const button of await ui.findAll({ type: 'Button' })) expect(String(button.props.hotkey)).toMatch(/^[a-z]$/)
+  await ui.unmount()
+
+  // No Raster on a desktop: the card's text spinner.
+  const desk = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(lines(await desk.drawn())[1]).toBe('◌ #12 Retry uploads with exponential backoff · CI running · 1/3')
+  await desk.unmount()
+})
+
+test('a narrow band cuts titles to fit and never wraps a line', IN_BAND, async ($, on) => {
+  await bandSession($, on, [RUNNING, FAILING, MERGED])
+  for (const bodyColumns of [30, 44, 60]) {
+    const ui = await $.ui.mount({ ...bandAt({ bodyColumns }), surface: 'terminal' })
+    const drawn = lines(await ui.drawn())
+    for (const line of drawn.slice(0, 3)) expect([...line].length).toBeLessThanOrEqual(bodyColumns)
+    expect(drawn[0]).toMatch(/^✗ #13 .*1 check failing$/)
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...bandAt({ bodyColumns: 44 }), surface: 'terminal' })
+  expect(lines(await ui.drawn())[0]).toBe('✗ #13 Retry uploads with… · 1 check failing')
+  await ui.unmount()
+})
+
+test('more PRs than rows: the most urgent, and "+N more" on the action line; five rows at most', IN_BAND, async ($, on) => {
+  const many = Array.from({ length: 6 }, (_, i) => `https://github.com/acme/app/pull/${100 + i}`)
+  const fixtures = { ...GH, ...Object.fromEntries(many.map(url => [url, pr(url, {})])) }
+  await bandSession($, on, [...many, FAILING], { fixtures })
+
+  const roomy = await $.ui.mount({ ...bandAt({ maxRows: 30 }), surface: 'terminal' })
+  const drawn = lines(await roomy.drawn())
+  expect(drawn).toHaveLength(5)
+  expect(drawn[0]).toMatch(/^✗ #13 /)
+  expect(drawn[1]).toMatch(/^◷ #100 .* · waiting for review$/)
+  expect(drawn[4]).toBe('+3 more  o: Open pane  r: Refresh  f: Fix #13 with Claude')
+  await roomy.unmount()
+
+  // What the bottom slot spares, when less.
+  const tight = await $.ui.mount({ ...bandAt({ maxRows: 3 }), surface: 'terminal' })
+  expect(lines(await tight.drawn())).toHaveLength(3)
+  expect(lines(await tight.drawn())[2]).toMatch(/^\+5 more {2}o: Open pane/)
+  await tight.unmount()
+})
+
+test('nothing watched, a survey up, or the pane layout: the band is left alone', async ($, on) => {
+  await bandSession($, on, [])
+  const empty = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await empty.drawn()).type).toBe('engine')
+  await empty.unmount()
+
+  // The default layout: watched PRs, and still nothing in the band.
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [FAILING] } as never)
+  const pane = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await pane.drawn()).type).toBe('engine')
+  await pane.unmount()
+})
+
+test('a survey holds the band: pr-watch yields', IN_BAND, async ($, on) => {
+  await bandSession($, on, [FAILING])
+  const ui = await $.ui.mount({ ...bandAt({ hasSurvey: true }), surface: 'terminal' })
+  expect((await ui.drawn()).type).toBe('engine')
+  await ui.redraw({ ...BAND.props, hasSurvey: false })
+  expect(lines(await ui.drawn())[0]).toMatch(/^✗ #13 /)
+  await ui.unmount()
+})
+
+test('in the band layout new PRs never open the pane; /pr-watch and Open pane do', IN_BAND, async ($, on) => {
+  const { opens } = await bandSession($, on, [FAILING])
+  await $.prompt.submit({ text: `look at ${RUNNING}` } as never)
+  expect(opens).toEqual([])
+
+  await $.command.run({ command: 'pr-watch', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  expect(opens).toEqual([{ id: 'pr-watch', focus: undefined }])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'band-open' })
+  expect(opens[1]).toEqual({ id: 'pr-watch', focus: true })
+  await ui.unmount()
+})
+
+test('Refresh in the band asks GitHub now', IN_BAND, async ($, on) => {
+  const { queries } = await bandSession($, on, [FAILING, RUNNING])
+  queries.length = 0
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await ui.press({ key: 'band-refresh' })
+  expect(queries.flat().sort()).toEqual([FAILING, RUNNING].sort())
+  await ui.unmount()
+})
+
+test("beside another plugin's lines, pr-watch keeps them under its own and takes two rows", IN_BAND, async ($, on) => {
+  await bandSession($, on, [RUNNING, FAILING, MERGED], { beneath: { type: 'Text', children: ['deploy: green'] } })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(lines(await ui.drawn())).toEqual([
+    '✗ #13 Retry uploads with exponential backoff · 1 check failing',
+    '+2 more  o: Open pane  r: Refresh  f: Fix #13 with Claude',
+    'deploy: green',
+  ])
+  await ui.unmount()
+})
+
+test('switching the layout in /config applies at once, both ways', async ($, on) => {
+  on('config.set', ($, e) => ({ value: e.value }))
+  const { opens } = await bandSession($, on, [FAILING])
+  // The pane layout opened the pane for the new PR, and draws nothing in the band.
+  expect(opens).toHaveLength(1)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.drawn()).type).toBe('engine')
+
+  await $.config.set({ key: 'pr-watch.layout', value: 'band' } as never)
+  expect(lines(await ui.drawn())[0]).toMatch(/^✗ #13 /)
+  // The open pane is left be, and a new PR doesn't open it again.
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [RUNNING] } as never)
+  expect(opens).toHaveLength(1)
+
+  await $.config.set({ key: 'pr-watch.layout', value: 'pane' } as never)
+  expect((await ui.drawn()).type).toBe('engine')
+  // Back on the pane, it opens as a session start would open it.
+  expect(opens).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a newer pr-watch shows on the band\'s action line, short where the line is short', IN_BAND, async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, () => NOTHING)
+  const { clock } = await newerSession($, on, { ...GH, pw: onGitHub('0.9.0') }, [RUNNING], [])
+  await clock.advance(10_500)
+  const wide = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(lines(await wide.drawn()).at(-1)).toBe('o: Open pane  r: Refresh  ↑ pr-watch 0.9.0 available')
+  await wide.unmount()
+  const narrow = await $.ui.mount({ ...bandAt({ bodyColumns: 40 }), surface: 'terminal' })
+  expect(lines(await narrow.drawn()).at(-1)).toBe('o: Open pane  r: Refresh  ↑ 0.9.0')
+  await narrow.unmount()
+})
+
+test("Fix with Claude in the band drafts the most urgent PR's failure; where it can't, the pane opens on it", IN_BAND, async ($, on) => {
+  let isFilling = true
+  const { fills, opens } = await bandSession($, on, [RUNNING, BROKEN], { fixtures: { [BROKEN]: broken, [RUNNING]: GH[RUNNING] }, fill: () => ({ isFilled: isFilling }) })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(lines(await ui.drawn()).at(-1)).toBe('o: Open pane  r: Refresh  f: Fix #31 with Claude')
+  await ui.press({ key: 'band-handoff' })
+  expect(fills).toHaveLength(1)
+  expect(fills[0]).toContain('CI failed on acme/app#31')
+  expect(opens).toEqual([])
+
+  // No prompt box to take the draft: the question is the card's, so the pane opens with the keys.
+  isFilling = false
+  await ui.press({ key: 'band-handoff' })
+  expect(opens).toEqual([{ id: 'pr-watch', focus: true }])
   await ui.unmount()
 })

@@ -373,6 +373,28 @@ export function ago(ms: number): string {
   return `${Math.floor(s / 86_400)}d ago`
 }
 
+// What a card's pill says, by the state derive() found: band.ts ranks and words them too.
+export const PILL = {
+  merged: '✓ MERGED',
+  closed: '✕ CLOSED',
+  draft: '✎ DRAFT',
+  conflicts: '⚠ CONFLICTS',
+  ciFailing: '✗ CI FAILING',
+  ciFailed: '✗ CI FAILED',
+  ciRunning: '● CI RUNNING',
+  changes: '↺ CHANGES REQUESTED',
+  comments: '💬 COMMENTS',
+  inReview: '◷ IN REVIEW',
+  behind: '↓ BEHIND',
+  blocked: '⏸ BLOCKED',
+  checking: '◌ CHECKING',
+  autoMerging: '⇢ AUTO-MERGING',
+  ready: '✓ READY',
+  loading: '◌ LOADING',
+} as const
+
+export type PillKind = keyof typeof PILL
+
 export type Derived = {
   stage: Stage
   headline: string
@@ -396,14 +418,14 @@ export function derive(pr: GhPr, kept: Reviews | null = null): Derived {
     checks,
   })
 
-  if (pr.state === 'MERGED') return at('merged', 'merged', '✓ MERGED', 'Merged')
-  if (pr.state === 'CLOSED') return at('closed', 'subtle', '✕ CLOSED', 'Closed without merging')
+  if (pr.state === 'MERGED') return at('merged', 'merged', PILL.merged, 'Merged')
+  if (pr.state === 'CLOSED') return at('closed', 'subtle', PILL.closed, 'Closed without merging')
   const names = checks.failing.slice(0, 2).join(', ')
   const failing = `${names}${checks.failing.length > 2 ? ` +${checks.failing.length - 2}` : ''}`
   if (pr.isDraft) {
     const draft = isConflicted(pr) ? 'Draft · merge conflicts' : 'Draft'
 
-    return at('draft', 'subtle', '✎ DRAFT', checks.pending > 0 ? `${draft} · ${ci}` : draft, checks.pending > 0)
+    return at('draft', 'subtle', PILL.draft, checks.pending > 0 ? `${draft} · ${ci}` : draft, checks.pending > 0)
   }
   // A conflict blocks the merge whatever CI says, and checks on a conflicted head are often
   // stale (GitHub cannot build the merge commit), so it outranks CI and review. CI stays in
@@ -413,48 +435,48 @@ export function derive(pr: GhPr, kept: Reviews | null = null): Derived {
     const status =
       checks.failed > 0 ? ` · failing: ${failing}` : checks.pending > 0 ? ` · ${activity(checks)}` : ''
 
-    return at(stage, 'error', '⚠ CONFLICTS', `Merge conflicts with base${status}`, checks.pending > 0)
+    return at(stage, 'error', PILL.conflicts, `Merge conflicts with base${status}`, checks.pending > 0)
   }
   if (checks.failed > 0) {
     // Still running checks keep the card live: the spinner, the shimmer and the fast poll.
     return checks.pending > 0
-      ? at('checks', 'error', '✗ CI FAILING', `Failing: ${failing} · ${checks.pending} still running`, true)
-      : at('checks', 'error', '✗ CI FAILED', `Failing: ${failing}`)
+      ? at('checks', 'error', PILL.ciFailing, `Failing: ${failing} · ${checks.pending} still running`, true)
+      : at('checks', 'error', PILL.ciFailed, `Failing: ${failing}`)
   }
-  if (checks.pending > 0) return at('checks', 'warning', '● CI RUNNING', ci, true)
+  if (checks.pending > 0) return at('checks', 'warning', PILL.ciRunning, ci, true)
   const reviews = reviewsOf(pr) ?? kept
   // "2 unresolved threads", or nothing: open conversations, which a repo may require resolved.
   const threads = reviews === null ? '' : unresolved(reviews)
   const also = threads === '' ? '' : ` · ${threads}`
-  if (pr.reviewDecision === 'CHANGES_REQUESTED') return at('review', 'error', '↺ CHANGES REQUESTED', 'Changes requested')
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') return at('review', 'error', PILL.changes, 'Changes requested')
   // Comments waiting for the author, where nobody has approved yet: a PR still in review, or
   // one held back (BLOCKED) in a repo that needs no approval.
   const isWaitingOnAuthor = pr.reviewDecision === 'REVIEW_REQUIRED' || (pr.reviewDecision !== 'APPROVED' && pr.mergeStateStatus === 'BLOCKED')
-  if (reviews !== null && threads !== '' && isWaitingOnAuthor) return at('review', 'warning', '💬 COMMENTS', toAddress(reviews))
+  if (reviews !== null && threads !== '' && isWaitingOnAuthor) return at('review', 'warning', PILL.comments, toAddress(reviews))
   if (pr.reviewDecision === 'REVIEW_REQUIRED') {
     const isLookedAt = reviews?.reviewers.some(r => r.verdict !== 'requested') ?? false
 
-    return at('review', 'warning', '◷ IN REVIEW', isLookedAt ? 'Reviewed · waiting for approval' : 'Waiting for review')
+    return at('review', 'warning', PILL.inReview, isLookedAt ? 'Reviewed · waiting for approval' : 'Waiting for review')
   }
 
   const isAuto = Boolean(pr.autoMergeRequest)
   switch (pr.mergeStateStatus) {
     case 'BEHIND':
-      return at('ready', 'warning', '↓ BEHIND', isAuto ? 'Behind base · auto-merge on' : 'Branch is behind base')
+      return at('ready', 'warning', PILL.behind, isAuto ? 'Behind base · auto-merge on' : 'Branch is behind base')
     case 'BLOCKED': {
       // Approved, held back, threads open: the likely cause where the repo requires
       // conversations resolved (GitHub says which rule only to admins).
       const why = threads !== '' ? `Blocked${also}` : isAuto ? 'Blocked' : 'Blocked by branch rules'
 
-      return at('ready', 'warning', '⏸ BLOCKED', isAuto ? `${why} · auto-merge on` : why)
+      return at('ready', 'warning', PILL.blocked, isAuto ? `${why} · auto-merge on` : why)
     }
     case 'UNKNOWN':
-      return at('ready', 'subtle', '◌ CHECKING', 'Computing mergeability…', true)
+      return at('ready', 'subtle', PILL.checking, 'Computing mergeability…', true)
     default: {
-      if (isAuto) return at('ready', 'suggestion', '⇢ AUTO-MERGING', 'Merging as soon as GitHub allows', true)
+      if (isAuto) return at('ready', 'suggestion', PILL.autoMerging, 'Merging as soon as GitHub allows', true)
       const ready = pr.reviewDecision === 'APPROVED' ? 'Approved' : 'Ready to merge'
 
-      return at('ready', 'success', '✓ READY', threads === '' ? 'Ready to merge' : `${ready}${also}`)
+      return at('ready', 'success', PILL.ready, threads === '' ? 'Ready to merge' : `${ready}${also}`)
     }
   }
 }
@@ -466,7 +488,7 @@ export function placeholder(ref: PrRef): TrackedPr {
     state: 'UNKNOWN',
     stage: 'unknown',
     headline: 'Fetching from GitHub…',
-    pill: '◌ LOADING',
+    pill: PILL.loading,
     tone: 'subtle',
     isMoving: true,
     checks: emptyChecks(),

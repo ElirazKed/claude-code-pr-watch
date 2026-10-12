@@ -1,6 +1,6 @@
 {
   "name": "pr-watch",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
   "types": "./types/index.d.ts",
   "author": {
@@ -31,6 +31,13 @@
       "title": "Say when a newer pr-watch is out",
       "description": "Every 2 hours at most, the PR poll also reads pr-watch's version on GitHub (no extra request), and the pane's footer says when a newer one is out, with one toast per version. Off: never asked, never said.",
       "default": true
+    },
+    "layout": {
+      "type": "string",
+      "title": "Where the PRs show",
+      "description": "pane: the PR pane, opened as PRs come (docked beside the transcript in a wide fullscreen terminal, else above the prompt). band: a few short lines above the prompt instead, most urgent first; the pane opens only when asked (Open pane, /pr-watch).",
+      "options": ["pane", "band"],
+      "default": "pane"
     }
   }
 }
