@@ -15,7 +15,7 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
 │ ✓ Open ━━━━━━ ⠹ CI ┈┈┈┈┈┈ ○ Review ┈┈ ○ Merge │
 │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/3  │
 │ Running build · 1 queued · 1/3 passed        │
-│ open ↗ · checked just now                 ✕  │
+│ open #12 ↗ · checked just now             ✕  │
 ╰──────────────────────────────────────────────╯
 ```
 
@@ -61,7 +61,7 @@ A card says who reviewed and what is left to address:
 │ Changes requested                            │
 │ ✗ bob requested changes · ✓ alice approved   │
 │ 3 unresolved threads (1 outdated)            │
-│ open ↗ · checked just now                 ✕  │
+│ open #12 ↗ · checked just now             ✕  │
 ╰──────────────────────────────────────────────╯
 ```
 

@@ -213,6 +213,10 @@ test('cards show every lifecycle state, animate CI, and dismiss when merged', as
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: 'refresh' })
+    // Each card links to its own PR, under its own label (a Link carries no key).
+    const links = await ui.findAll({ type: 'Link' })
+    expect(new Set(links.map(link => link.props.href)).size).toBe(3)
+    expect(new Set(links.map(link => link.props.label)).size).toBe(3)
 
     expect(await ui.find({ text: /CI RUNNING/ })).toBeDefined()
     expect(await ui.find({ text: /CI FAILED/ })).toBeDefined()
@@ -240,6 +244,23 @@ test('cards show every lifecycle state, animate CI, and dismiss when merged', as
   await ui.press({ key: `dismiss:${MERGED}` })
   expect(await ui.find({ text: /✓ MERGED/ })).toBeUndefined()
   expect(await ui.find({ text: /CI RUNNING/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('cards for the same number in two repos keep their links apart', async ($, on) => {
+  const TWIN = 'https://github.com/acme/api/pull/12'
+  const clock = mock.clock(on)
+  fakeHost(on, clock, { [RUNNING]: GH[RUNNING], [TWIN]: pr(TWIN, {}) })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  await $.command.run({ command: 'pr-watch', args: `${RUNNING} ${TWIN}`, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  const labels = (await ui.findAll({ type: 'Link' })).map(link => link.props.label).sort()
+  expect(labels).toEqual(['open acme/api#12 ↗', 'open acme/app#12 ↗'])
   await ui.unmount()
 })
 

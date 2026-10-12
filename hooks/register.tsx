@@ -1284,7 +1284,12 @@ export const register: Register = (on, options) => {
 
           <Box justifyContent="space-between">
             <Text>
-              <Link href={pr.url} label="open ↗" />
+              {/* Its own label: with "open ↗" on every card, a click on any of them opened the last.
+                  The repo too when another card shares the number (acme/app#7, acme/api#7). */}
+              <Link
+                href={pr.url}
+                label={`open ${list.some(o => o.url !== pr.url && o.number === pr.number) ? pr.repo : ''}#${pr.number} ↗`}
+              />
               {pr.checkedAt !== null && <Text dimColor> · checked {ago(at - pr.checkedAt)}</Text>}
             </Text>
             <Button
