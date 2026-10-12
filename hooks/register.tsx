@@ -1284,7 +1284,8 @@ export const register: Register = (on, options) => {
 
           <Box justifyContent="space-between">
             <Text>
-              <Link href={pr.url} label="open ↗" />
+              {/* Its own label: with "open ↗" on every card, a click on any of them opened the last. */}
+              <Link href={pr.url} label={`open #${pr.number} ↗`} />
               {pr.checkedAt !== null && <Text dimColor> · checked {ago(at - pr.checkedAt)}</Text>}
             </Text>
             <Button

@@ -213,6 +213,10 @@ test('cards show every lifecycle state, animate CI, and dismiss when merged', as
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: 'refresh' })
+    // Each card links to its own PR, under its own label (a Link carries no key).
+    const links = await ui.findAll({ type: 'Link' })
+    expect(new Set(links.map(link => link.props.href)).size).toBe(3)
+    expect(new Set(links.map(link => link.props.label)).size).toBe(3)
 
     expect(await ui.find({ text: /CI RUNNING/ })).toBeDefined()
     expect(await ui.find({ text: /CI FAILED/ })).toBeDefined()
