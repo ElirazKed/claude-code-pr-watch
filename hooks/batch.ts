@@ -172,7 +172,9 @@ export function rateOf(headers: Readonly<Record<string, string>>): RateLimit | n
 
 // Seconds GitHub asks to wait (`retry-after`), or null where it doesn't say.
 export function retryAfterOf(headers: Readonly<Record<string, string>>): number | null {
-  const seconds = Number(headers['retry-after'] ?? NaN)
+  // An empty header is no wait named: Number('') would read it as 0.
+  const said = headers['retry-after']?.trim()
+  const seconds = said ? Number(said) : NaN
 
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null
 }

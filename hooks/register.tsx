@@ -250,7 +250,11 @@ const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 // One batch's call, timed, and what GitHub said: the status and headers, and the reply.
 async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string | null, timeoutMs = GH_MS) {
   const startedAt = await $.clock.now()
-  const res = await gh($, argv, token, undefined, timeoutMs)
+  // A call past its timeout throws: it fails as a timeout, rather than losing the round.
+  const res = await gh($, argv, token, undefined, timeoutMs).catch(() => ({
+    stdout: '',
+    stderr: `gh api graphql did not finish: timeout after ${Math.round(timeoutMs / 1_000)}s`,
+  }))
   const http = parseHttp(res.stdout)
 
   return { http, reply: parseReply(http.body, res.stderr, part), ms: (await $.clock.now()) - startedAt }
@@ -382,6 +386,8 @@ const refFromUrl = (url: string): PrRef | null => {
 async function publish($: EngineInterface, refs: readonly PrRef[], at: number, live?: ReadonlySet<string>): Promise<Shared> {
   const isRound = live !== undefined
   const before = await readShared($)
+  // Held by a secondary limit: no round, no Refresh, no new watch asks until the wait is over.
+  if ((before.heldUntil ?? 0) > at) return before
   // A round asks for the newest version too, once the last check is CHECK_MS old.
   const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
   const { found, errors, rate, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, at + LEASE_MS - 1_000, withLatest)
@@ -404,11 +410,10 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, l
       shared.nextAt = Math.max(shared.nextAt, Date.parse(shared.rate.resetAt) || 0)
     }
   }
-  // A secondary limit: no round, and no Refresh, until GitHub's wait is over.
-  if (waitMs !== null) {
-    shared.heldUntil = Math.max(shared.heldUntil ?? 0, (await $.clock.now()) + waitMs)
-    shared.nextAt = Math.max(shared.nextAt, shared.heldUntil)
-  }
+  // A secondary limit: no round, and no Refresh, until GitHub's wait is over. A hold another
+  // session set while this one asked stands too: this round's nextAt never cuts it short.
+  if (waitMs !== null) shared.heldUntil = Math.max(shared.heldUntil ?? 0, (await $.clock.now()) + waitMs)
+  shared.nextAt = Math.max(shared.nextAt, shared.heldUntil ?? 0)
   await writeJson($, `${await root($)}/results.json`, shared)
 
   return shared
@@ -539,10 +544,8 @@ async function sayNewer($: EngineInterface, shared: Shared) {
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
 async function fetchNow($: EngineInterface, refs: PrRef[]) {
   if (refs.length === 0) return
-  const at = await $.clock.now()
-  const shared = await readShared($)
-  // Held by a secondary limit: the next round asks, once the wait is over.
-  await apply($, (shared.heldUntil ?? 0) > at ? shared : await publish($, refs, at))
+  // Held by a secondary limit, publish asks nothing: the next round does, once the wait is over.
+  await apply($, await publish($, refs, await $.clock.now()))
 }
 
 async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {
