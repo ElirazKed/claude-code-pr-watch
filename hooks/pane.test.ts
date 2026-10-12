@@ -1537,6 +1537,8 @@ test('the band: a line per PR, most urgent first, then its buttons', IN_BAND, as
   blits.length = 0
   await clock.advance(200)
   expect(blits).toContainEqual({ requestId: 'band', key: `band-spin:${RUNNING}` })
+  // No pane is drawn in the band layout, so no frame goes there.
+  expect(blits.filter(blit => blit.requestId === 'pr-watch')).toEqual([])
   expect((await ui.find({ key: 'band-open' }))?.props).toMatchObject({ label: 'Open pane', hotkey: 'o', plain: true })
   expect((await ui.find({ key: 'band-refresh' }))?.props).toMatchObject({ label: 'Refresh', hotkey: 'r' })
   // No digit hotkeys: a bare digit in an empty prompt would press them.
