@@ -96,6 +96,9 @@ export type HandoffAsk = {
   error?: string
 }
 
+// A newer pr-watch than the one running, and how this copy updates (update.ts).
+export type Newer = { version: string; how: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'pr-watch': {
@@ -111,6 +114,8 @@ declare module 'claude-code' {
       fixing: Record<string, HandoffAsk>
       // Address with Claude, by PR url.
       addressing: Record<string, HandoffAsk>
+      // Null while no newer version is known, or the notice is off.
+      newer: Newer | null
     }
   }
 }

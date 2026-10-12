@@ -123,6 +123,15 @@ Both intervals are settings in `/config`:
 A change applies from the next round, with no reload needed. Sessions check on a 10s tick, so an interval is rounded up to the next tick. The session that runs a round uses its own settings, so keep them the same across Claude Code configs that share the machine.
 - With several `gh` accounts logged in, a PR the active account can't see is retried with the others. The cache remembers which **login** sees which owner, never a token.
 
+## Updates
+
+Claude Code doesn't say when a third-party marketplace has a newer version, and a copy loaded from a folder gets no updates at all, so pr-watch says it itself: a dim line under the pane's buttons, *↑ pr-watch 0.9.1 available · claude plugin update pr-watch@claude-code-pr-watch*, and one toast per new version for the whole machine, not one per session.
+
+- **How it checks:** every 2 hours at most, the poll's first query also reads this repo's `.claude-plugin/plugin.json` on GitHub, so it costs no request of its own. It rides the PR poll, so it checks only while some session watches an open PR. What it found is kept in `~/.cache/pr-watch/results.json` for every session, and the version last toasted in `notice.json` beside it. Only plain `x.y.z` versions are compared, and a check GitHub can't answer just says nothing.
+- **What it says to do:** installed from a marketplace, `claude plugin update pr-watch@<marketplace>` (or `/plugin` → Installed → pr-watch → Update now), then a restart. Loaded from a folder (`--plugin-dir`, `CLAUDE_CODE_PLUGIN_DIRS`), `git pull` in that folder.
+- **Turning it off:** `update_notice` in `/config`. Off, the poll doesn't ask and the pane says nothing.
+- **Auto-update instead:** `/plugin` → Marketplaces → claude-code-pr-watch → Enable auto-update, and Claude Code updates it for you.
+
 ## Develop
 
 ```

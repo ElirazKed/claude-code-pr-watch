@@ -123,7 +123,10 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // ends (now, or once a promise settles); by default it goes through, and `merges` records each
 // one's argv. `runLog`: what
 // `gh run view` prints, a failed job's log by default; `runs` records each argv. `asked` records
-// each GraphQL query's text, and a query for what threads say waits on `hold`, when set.
+// each GraphQL query's text, and a query for what threads say waits on `hold`, when set. The
+// mod's own plugin.json, wherever its folder is, reads as the file kept under 'plugin.json';
+// `gh.pw`, when set, is GitHub's answer to a round's pw field (pr-watch's manifest there), and
+// without it the repo can't be read, as when it is renamed, gone or private.
 function fakeHost(
   on: On,
   clock: Clock,
@@ -139,7 +142,8 @@ function fakeHost(
   const asked: string[] = []
   const gate: { hold: Promise<unknown> | null } = { hold: null }
   on('env.get', () => ({ value: '/home/me' }))
-  on('fs.read', ($, e) => ({ value: files.get(e.path)?.text ?? '' }))
+  const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
+  on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
   on('fs.write', ($, e) => (files.set(e.path, { text: e.text, mtimeMs: clock.now() }), { value: undefined }))
   on('fs.list', ($, e) => ({
     value: [...files]
@@ -177,8 +181,13 @@ function fakeHost(
       const fixture = gh[url] as Record<string, unknown> | undefined
       data[`p${i}`] = fixture === undefined ? null : asGql(fixture, query)
     }
+    const errors: unknown[] = []
+    if (query.includes('pw: repository(')) {
+      data.pw = gh.pw ?? null
+      if (gh.pw === undefined) errors.push({ type: 'NOT_FOUND', path: ['pw'], message: 'Could not resolve to a Repository' })
+    }
     queries.push(urls)
-    const reply = out(urls.every(url => url in gh) ? 0 : 1, JSON.stringify({ data }))
+    const reply = out(urls.every(url => url in gh) && errors.length === 0 ? 0 : 1, JSON.stringify(errors.length === 0 ? { data } : { data, errors }))
 
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
@@ -522,6 +531,169 @@ test('a /config change to the interval applies from the next round', async ($, o
   const shared = JSON.parse(files.get('/home/me/.cache/pr-watch/results.json')?.text ?? '{}')
 
   expect(shared.nextAt - shared.fetchedAt).toBe(120_000)
+})
+
+// ---- A newer pr-watch -------------------------------------------------------------------
+
+const RESULTS = '/home/me/.cache/pr-watch/results.json'
+const NOTICE = '/home/me/.cache/pr-watch/notice.json'
+// This copy's manifest, and pr-watch's on GitHub as a round's pw field answers it.
+const OWN = { text: JSON.stringify({ name: 'pr-watch', version: '0.8.0' }), mtimeMs: 0 }
+const onGitHub = (version: string) => ({ object: { text: JSON.stringify({ name: 'pr-watch', version }) } })
+const asksLatest = (query: string) => query.includes('pw: repository(owner: "ElirazKed", name: "claude-code-pr-watch")')
+const told = (toasts: readonly string[]) => toasts.filter(text => text.startsWith('↑'))
+
+// A session of pr-watch 0.8.0 watching `urls` on `gh`; `toasts` collects what it toasts. The
+// tests watch PRs that don't move, so a round runs once a minute and no spinner ticks.
+async function newerSession($: Parameters<TestBody>[0], on: On, gh: Record<string, unknown>, urls: readonly string[], toasts: string[], files = new Map<string, { text: string; mtimeMs: number }>()) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  files.set('plugin.json', OWN)
+  const host = fakeHost(on, clock, gh, files)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: urls.join(' '), origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { ...host, clock }
+}
+
+// Makes the last check two hours old, so the next round asks again.
+function ageCheck(files: Map<string, { text: string; mtimeMs: number }>, at: number) {
+  const shared = JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  files.set(RESULTS, { text: JSON.stringify({ ...shared, latest: { ...shared.latest, checkedAt: at - 2 * 3_600_000 } }), mtimeMs: at })
+}
+
+test('a round asks for the newest pr-watch every two hours at most, in its first batch only', async ($, on) => {
+  const many = Array.from({ length: 21 }, (_, i) => `https://github.com/acme/app/pull/${100 + i}`)
+  const { asked, files, clock } = await newerSession($, on, Object.fromEntries(many.map(url => [url, pr(url, {})])), many, [])
+  // A new watch asks GitHub at once, without it.
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.some(asksLatest)).toBe(false)
+
+  asked.length = 0
+  await clock.advance(10_500)
+  // 21 PRs make two queries: the first carries it.
+  expect(asked.map(asksLatest)).toEqual([true, false])
+  const checkedAt = JSON.parse(files.get(RESULTS)?.text ?? '{}').latest?.checkedAt
+  expect(checkedAt).toBeGreaterThan(0)
+
+  asked.length = 0
+  await clock.advance(60_000)
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.some(asksLatest)).toBe(false)
+
+  ageCheck(files, clock.now())
+  asked.length = 0
+  await clock.advance(60_000)
+  expect(asked.filter(asksLatest)).toHaveLength(1)
+  expect(asksLatest(asked[0] ?? '')).toBe(true)
+})
+
+test('a newer pr-watch shows under the footer and toasts once per version', async ($, on) => {
+  const toasts: string[] = []
+  const gh = { ...GH, pw: onGitHub('0.9.0') }
+  const { files, clock } = await newerSession($, on, gh, [FAILING], toasts)
+  await clock.advance(10_500)
+
+  expect(told(toasts)).toHaveLength(1)
+  // Loaded from a folder (the test's), so the way to update is a git pull there.
+  expect(told(toasts)[0]).toMatch(/^↑ pr-watch 0\.9\.0 available · git pull in \S/)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /↑ pr-watch 0\.9\.0 available/ })).toBeDefined()
+  expect(await ui.find({ text: /git pull in / })).toBeDefined()
+  expect(await ui.find({ text: /CI FAILED/ })).toBeDefined()
+  await ui.unmount()
+
+  // Round after round, and for every other session (notice.json keeps the one toasted): once.
+  await clock.advance(60_000)
+  expect(told(toasts)).toHaveLength(1)
+  expect(JSON.parse(files.get(NOTICE)?.text ?? '{}')).toMatchObject({ version: '0.9.0' })
+
+  // A later version toasts again, once.
+  gh.pw = onGitHub('0.9.1')
+  ageCheck(files, clock.now())
+  await clock.advance(60_000)
+  expect(told(toasts).slice(1)).toHaveLength(1)
+  expect(told(toasts)[1]).toMatch(/^↑ pr-watch 0\.9\.1 available/)
+})
+
+test('a version another session already toasted shows in the footer, with no toast', async ($, on) => {
+  const toasts: string[] = []
+  const files = new Map([[NOTICE, { text: JSON.stringify({ version: '0.9.0' }), mtimeMs: 0 }]])
+  const { clock } = await newerSession($, on, { ...GH, pw: onGitHub('0.9.0') }, [FAILING], toasts, files)
+  await clock.advance(10_500)
+
+  expect(told(toasts)).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /↑ pr-watch 0\.9\.0 available/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a check GitHub can't answer, or the same version, says nothing and leaves the cards be", async ($, on) => {
+  const toasts: string[] = []
+  // No pw answer: the repo can't be read.
+  const gh: Record<string, unknown> = { ...GH }
+  const { files, clock } = await newerSession($, on, gh, [FAILING], toasts)
+  await clock.advance(10_500)
+
+  const latest = JSON.parse(files.get(RESULTS)?.text ?? '{}').latest
+  expect(latest.version).toBe(null)
+  expect(latest.checkedAt).toBeGreaterThan(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /CI FAILED/ })).toBeDefined()
+  expect(await ui.find({ text: /Failing: build/ })).toBeDefined()
+  expect(await ui.find({ text: /available/ })).toBeUndefined()
+  await ui.unmount()
+
+  gh.pw = onGitHub('0.8.0')
+  ageCheck(files, clock.now())
+  await clock.advance(60_000)
+  expect(JSON.parse(files.get(RESULTS)?.text ?? '{}').latest.version).toBe('0.8.0')
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await after.find({ text: /available/ })).toBeUndefined()
+  await after.unmount()
+  expect(told(toasts)).toEqual([])
+})
+
+test('with the notice off, no round asks and nothing is said', { options: { update_notice: false } }, async ($, on) => {
+  const toasts: string[] = []
+  // A newer version is already known from a round another session ran.
+  const files = new Map([[RESULTS, { text: JSON.stringify({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, latest: { version: '0.9.0', checkedAt: 0 } }), mtimeMs: 0 }]])
+  const { asked, clock } = await newerSession($, on, { ...GH, pw: onGitHub('0.9.0') }, [FAILING], toasts, files)
+  await clock.advance(60_000)
+
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.some(asksLatest)).toBe(false)
+  expect(told(toasts)).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /available/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('turning the notice off in /config takes the note away at once, and stops the asking', async ($, on) => {
+  on('config.set', ($, e) => ({ value: e.value }))
+  const toasts: string[] = []
+  const { asked, files, clock } = await newerSession($, on, { ...GH, pw: onGitHub('0.9.0') }, [FAILING], toasts)
+  await clock.advance(10_500)
+  expect(told(toasts)).toHaveLength(1)
+
+  await $.config.set({ key: 'pr-watch.update_notice', value: false } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /available/ })).toBeUndefined()
+  await ui.unmount()
+
+  ageCheck(files, clock.now())
+  asked.length = 0
+  await clock.advance(60_000)
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.some(asksLatest)).toBe(false)
 })
 
 const READY = 'https://github.com/acme/app/pull/21'

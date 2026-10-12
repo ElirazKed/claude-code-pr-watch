@@ -30,6 +30,7 @@ import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, thre
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
+import { CHECK_MS, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -46,6 +47,8 @@ const merging = atom({ plugin: 'pr-watch', key: 'merging' } as const, {})
 const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
 const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
+// A newer pr-watch than this one, for the footer.
+const newer = atom({ plugin: 'pr-watch', key: 'newer' } as const, null)
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -84,12 +87,17 @@ type Shared = {
   // Which gh login sees an owner's private repos (a login, never a token).
   accounts: Record<string, string>
   rate: RateLimit | null
+  // pr-watch's newest version as the last check found it (null: none read yet), and when
+  // that check rode a round.
+  latest: { version: string | null; checkedAt: number }
 }
 
 // How often a round runs while some PR moves, and otherwise: the `poll_active_seconds` and
 // `poll_idle_seconds` options, kept current by `config.set`.
 const MIN_POLL_MS = 10_000
 const pace = { fastMs: 20_000, slowMs: 60_000 }
+// The `update_notice` option, kept current the same way.
+let isNoticeOn = true
 const seconds = (value: unknown, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.max(MIN_POLL_MS, value * 1_000) : fallback
 // A session whose file has not been touched for this long has exited.
@@ -102,12 +110,13 @@ const PRUNE_MS = 86_400_000
 
 // Survives /clear (the module stays loaded), unlike the session id.
 const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+let homeDir: string | null | undefined
 let dir: string | null = null
 let loginsCache: Promise<{ active: string; others: string[] }> | null = null
 const tokens = new Map<string, Promise<string | null>>()
 let prunedAt = 0
 
-const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null })
+const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, latest: { version: null, checkedAt: 0 } })
 
 async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = 20_000) {
   return $.process.run(['gh', ...argv], {
@@ -117,8 +126,14 @@ async function gh($: EngineInterface, argv: string[], token?: string | null, cwd
   })
 }
 
+async function home($: EngineInterface): Promise<string | null> {
+  if (homeDir === undefined) homeDir = (await $.env.get('HOME')) ?? null
+
+  return homeDir
+}
+
 async function root($: EngineInterface): Promise<string> {
-  dir ??= `${(await $.env.get('HOME')) ?? '/tmp'}/.cache/pr-watch`
+  dir ??= `${(await home($)) ?? '/tmp'}/.cache/pr-watch`
 
   return dir
 }
@@ -211,36 +226,43 @@ async function tokenFor($: EngineInterface, login: string): Promise<string | nul
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
-async function query($: EngineInterface, refs: readonly PrRef[], token: string | null) {
-  const out = { found: new Map<string, GhPr>(), missing: [] as PrRef[], failed: new Map<string, string>(), rate: null as RateLimit | null }
-  for (const part of chunks(refs)) {
-    const res = await gh($, ['api', 'graphql', '-f', `query=${buildQuery(part)}`], token)
+// `withLatest`: the first batch also asks for pr-watch's newest version.
+async function query($: EngineInterface, refs: readonly PrRef[], token: string | null, withLatest = false) {
+  const out = { found: new Map<string, GhPr>(), missing: [] as PrRef[], failed: new Map<string, string>(), rate: null as RateLimit | null, latest: null as string | null }
+  for (const [i, part] of chunks(refs).entries()) {
+    const res = await gh($, ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`], token)
     const reply = parseReply(res.stdout, res.stderr, part)
     if (reply.error !== null) for (const ref of part) out.failed.set(ref.url, reply.error)
     for (const [url, pr] of reply.found) out.found.set(url, pr)
     out.missing.push(...reply.missing)
     out.rate = reply.rate ?? out.rate
+    out.latest = reply.latest ?? out.latest
   }
 
   return out
 }
 
 // One batched query per gh account; PRs the expected account cannot see are retried with
-// each other logged-in account, and the one that sees them is remembered per owner.
-async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: Record<string, string>) {
+// each other logged-in account, and the one that sees them is remembered per owner. The
+// newest version, when asked, rides the very first batch only; `asked` says whether it went.
+async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: Record<string, string>, withLatest = false) {
   const found = new Map<string, GhPr>()
   const errors = new Map<string, string>()
   let rate: RateLimit | null = null
+  let latest: string | null = null
+  let isAsking = withLatest
   const byLogin = new Map<string, PrRef[]>()
   for (const ref of refs) byLogin.set(accounts[ownerOf(ref)] ?? '', [...(byLogin.get(accounts[ownerOf(ref)] ?? '') ?? []), ref])
 
   let missing: PrRef[] = []
   for (const [login, group] of byLogin) {
-    const r = await query($, group, await tokenFor($, login))
+    const r = await query($, group, await tokenFor($, login), isAsking)
+    isAsking = false
     r.found.forEach((pr, url) => found.set(url, pr))
     r.failed.forEach((err, url) => errors.set(url, err))
     missing.push(...r.missing)
     rate = r.rate ?? rate
+    latest = r.latest ?? latest
   }
   if (missing.length > 0) {
     const { active, others } = await logins($)
@@ -259,7 +281,7 @@ async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: R
     for (const ref of missing) errors.set(ref.url, 'Not found, or no gh account can see it')
   }
 
-  return { found, errors, rate }
+  return { found, errors, rate, latest, asked: withLatest && refs.length > 0 }
 }
 
 const refFromUrl = (url: string): PrRef | null => {
@@ -271,13 +293,18 @@ const refFromUrl = (url: string): PrRef | null => {
 // Fetches `refs` now and merges them into the shared results, which it returns.
 async function publish($: EngineInterface, refs: readonly PrRef[], at: number, isRound = false): Promise<Shared> {
   const before = await readShared($)
-  const { found, errors, rate } = await fetchRefs($, refs, before.accounts)
+  // A round asks for the newest version too, once the last check is CHECK_MS old.
+  const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
+  const { found, errors, rate, latest, asked } = await fetchRefs($, refs, before.accounts, withLatest)
   // Re-read: another session may have written while this one was asking GitHub.
   const shared = await readShared($)
   shared.accounts = { ...shared.accounts, ...before.accounts }
   found.forEach((pr, url) => (shared.prs[url] = { at, pr }))
   errors.forEach((error, url) => (shared.prs[url] = { ...shared.prs[url], at, error }))
   shared.rate = rate ?? shared.rate
+  // Asked is checked, answered or not: a check that fails waits as long as one that didn't,
+  // so it never rides every round. An unanswered one keeps the version known before.
+  if (asked) shared.latest = { version: latest ?? shared.latest?.version ?? null, checkedAt: at }
   if (isRound) {
     const isMoving = [...found.values()].some(pr => derive(pr).isMoving)
     shared.fetchedAt = at
@@ -363,6 +390,50 @@ async function apply($: EngineInterface, shared: Shared) {
   }
   await refreshStatus($)
   await syncAnimation($)
+  // Last, and never thrown: the update notice must not cost a PR result.
+  await sayNewer($, shared).catch(() => undefined)
+}
+
+// This copy's own version, from its plugin.json (the API names the plugin, not its version).
+// Kept once read (null: no plain version to compare); unreadable, it is read again next time,
+// and until then nothing is said.
+let ownVersion: string | null | undefined
+// The version this load toasted, should notice.json not take the write.
+let toldVersion: string | null = null
+
+async function readOwnVersion($: EngineInterface): Promise<string | null> {
+  if (ownVersion === undefined) {
+    try {
+      ownVersion = versionIn(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)))
+    } catch {
+      return null
+    }
+  }
+
+  return ownVersion
+}
+
+// Whether the last check found a newer pr-watch: the footer says so, and one toast per new
+// version across every session on the machine (notice.json keeps the one toasted, so a new
+// session or a reload doesn't toast it again).
+async function sayNewer($: EngineInterface, shared: Shared) {
+  const own = await readOwnVersion($)
+  const latest = shared.latest?.version ?? null
+  const next =
+    isNoticeOn && own !== null && latest !== null && isNewer(latest, own)
+      ? { version: latest, how: howToUpdate($.plugin.root, await home($), $.plugin.name) }
+      : null
+  await update($, newer, current => (current?.version === next?.version && current?.how === next?.how ? current : next))
+  if (next === null || toldVersion === next.version) return
+  toldVersion = next.version
+  const path = `${await root($)}/notice.json`
+  if ((await readJson<{ version?: string }>($, path))?.version === next.version) return
+  // Claim, wait, re-read (as takeLease does): sessions that read notice.json at once would
+  // otherwise all toast. Only the claim that stuck toasts.
+  await writeJson($, path, { version: next.version, owner: INSTANCE })
+  await $.clock.sleep(150)
+  const claim = await readJson<{ version?: string; owner?: string }>($, path)
+  if (claim?.version === next.version && claim.owner === INSTANCE) $.ui.toast(noticeToast(next.version, next.how))
 }
 
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
@@ -696,14 +767,22 @@ async function restore($: EngineInterface, carried: TrackedPr[]) {
 export const register: Register = (on, options) => {
   pace.fastMs = seconds(options.poll_active_seconds, 20_000)
   pace.slowMs = seconds(options.poll_idle_seconds, 60_000)
+  isNoticeOn = options.update_notice !== false
+  ownVersion = undefined
+  toldVersion = null
 
   // A change in /config applies from the next round, no reload needed.
   on('config.set', async ($, e, next) => {
     const done = await next(e)
-    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds)$/)?.[1]
+    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds|update_notice)$/)?.[1]
     if (field === undefined || done.deny !== undefined) return done
     if (field === 'poll_active_seconds') pace.fastMs = seconds(done.value, pace.fastMs)
-    else pace.slowMs = seconds(done.value, pace.slowMs)
+    else if (field === 'poll_idle_seconds') pace.slowMs = seconds(done.value, pace.slowMs)
+    else {
+      isNoticeOn = done.value !== false
+      // Off: the footer's note goes now; on, it comes back with the next tick.
+      if (!isNoticeOn) await update($, newer, () => null)
+    }
 
     return done
   }).catch(($, e, next) => next(e))
@@ -845,6 +924,7 @@ export const register: Register = (on, options) => {
     const refusedBy = await read($, refused)
     const [fixRows, addressRows] = await Promise.all([readRows($, 'fix'), readRows($, 'address')])
     const handoffs = { fix: fixRows, address: addressRows }
+    const upgrade = isNoticeOn ? await read($, newer) : null
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -884,6 +964,17 @@ export const register: Register = (on, options) => {
     // hides the pane only: the PRs stay watched, and a new PR or /pr-watch brings it back.
     const closeButton = <Button key="close" label="Close" hotkey="x" plain dimColor onPress={() => $.ui.close({ id: PANE })} />
 
+    // A newer pr-watch, under the footer's buttons: "↑ pr-watch 0.9.0 available · git pull in …".
+    const notice = upgrade !== null && (
+      <Box key="newer" flexDirection="column">
+        {noticeLines(upgrade.version, upgrade.how, width).map((line, i) => (
+          <Text key={`newer:${i}`} dimColor wrap="wrap">
+            {line}
+          </Text>
+        ))}
+      </Box>
+    )
+
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
@@ -897,6 +988,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>or with /pr-watch &lt;url&gt;</Text>
           </Box>
           <Box>{closeButton}</Box>
+          {notice}
         </Box>
       )
     }
@@ -1220,6 +1312,7 @@ export const register: Register = (on, options) => {
             <Button key="dismiss-finished" label="Dismiss finished" hotkey="d" plain dimColor onPress={() => dismissFinished($)} />
           )}
         </Box>
+        {notice}
       </Box>
     )
   })

@@ -1,6 +1,7 @@
 // One GraphQL query for many PRs: an aliased field per PR, so a tick costs one call whatever
 // the count, plus the rate limit it left. `gh pr view` fields, shaped back the way it gives them.
 import type { CheckItem, GhPr, PrRef, RepoMerge } from './pr'
+import { LATEST_FIELD, latestIn } from './update'
 
 // 20 PRs a query, run one after another: a query of 40 busy PRs can outlast GitHub's own
 // timeout (a 502 or 504) and lose the whole round, while two of 20 cost the same points and
@@ -39,14 +40,17 @@ fragment repo on Repository {
   squashMergeAllowed rebaseMergeAllowed mergeCommitAllowed viewerDefaultMergeMethod viewerPermission
 }`
 
-export function buildQuery(refs: readonly PrRef[]): string {
+// `withLatest`: also ask for pr-watch's newest version (update.ts), which costs nothing more.
+export function buildQuery(refs: readonly PrRef[], withLatest = false): string {
   const fields = refs.map((ref, i) => {
     const [owner = '', name = ''] = ref.repo.split('/')
 
     return `p${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) { ...pr } ...repo }`
   })
 
-  return `query {\n  rateLimit { remaining resetAt }\n  ${fields.join('\n  ')}\n}\n${FRAGMENT}`
+  const latest = withLatest ? `\n  ${LATEST_FIELD}` : ''
+
+  return `query {\n  rateLimit { remaining resetAt }${latest}\n  ${fields.join('\n  ')}\n}\n${FRAGMENT}`
 }
 
 export type RateLimit = { remaining: number; resetAt: string }
@@ -56,6 +60,8 @@ export type BatchResult = {
   // Not visible to this token: another account may see them.
   missing: PrRef[]
   rate: RateLimit | null
+  // pr-watch's newest version, where the query asked and GitHub could say.
+  latest: string | null
   // The whole call failed (network, auth, a limit): nothing in it is known.
   error: string | null
 }
@@ -101,7 +107,7 @@ const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
 
 // `gh api graphql` exits 1 when any alias errs, yet still prints every alias it resolved.
 export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[]): BatchResult {
-  const result: BatchResult = { found: new Map(), missing: [], rate: null, error: null }
+  const result: BatchResult = { found: new Map(), missing: [], rate: null, latest: null, error: null }
   let reply: GqlReply
   try {
     reply = JSON.parse(stdout) as GqlReply
@@ -117,6 +123,8 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
     return result
   }
   result.rate = (data.rateLimit as RateLimit | undefined) ?? null
+  // Null, with an error of its own, where the repo can't be read: the PRs don't mind.
+  result.latest = latestIn(data.pw)
   refs.forEach((ref, i) => {
     const { pullRequest: pr, ...repository } = (data[`p${i}`] as GqlRepo | null | undefined) ?? { pullRequest: null }
     if (pr == null) {
