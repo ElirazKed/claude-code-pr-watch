@@ -278,6 +278,57 @@ test('a /clear keeps the watched PRs and seats the pane again', async ($, on) =>
   await ui.unmount()
 })
 
+test('Close beside Refresh closes the pane, and the PRs stay watched', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  const { queries } = fakeHost(on, clock, GH)
+  let opens = 0
+  const closes: { id: string; origin: string }[] = []
+  on('ui.open', () => ((opens += 1), { value: { isPlaced: true } }))
+  on('ui.close', ($, e) => (closes.push({ id: e.id, origin: e.origin.kind }), { value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', () => ({ value: {} }))
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: `${RUNNING} ${MERGED}`, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  const footer = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(key => ['refresh', 'close', 'dismiss-finished'].includes(key ?? ''))
+  expect(footer).toEqual(['refresh', 'close', 'dismiss-finished'])
+  expect((await ui.find({ key: 'close' }))?.props).toMatchObject({ label: 'Close', hotkey: 'x' })
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+  expect(closes).toEqual([{ id: 'pr-watch', origin: 'plugin' }])
+
+  // Still polled, still on the cards, and not stopped: closing is not dismissing.
+  queries.length = 0
+  await clock.advance(10_500)
+  expect(queries.flat()).toContain(RUNNING)
+  const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await after.find({ text: /#12/ })).toBeDefined()
+  expect(await after.find({ text: /#7/ })).toBeDefined()
+  await after.unmount()
+
+  // A new PR brings the pane back, as after the frame's own close.
+  opens = 0
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [FAILING] } as never)
+  expect(opens).toBe(1)
+})
+
+test('the empty pane has Close too', async ($, on) => {
+  const closes: string[] = []
+  on('ui.close', ($, e) => (closes.push(e.id), { value: undefined }))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /Nothing to watch yet/ })).toBeDefined()
+  expect((await ui.find({ key: 'close' }))?.props).toMatchObject({ label: 'Close', hotkey: 'x' })
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+  expect(closes).toEqual(['pr-watch'])
+})
+
 const quietUi = (on: On) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
