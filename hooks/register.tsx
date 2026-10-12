@@ -880,6 +880,10 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    // The frame's close mark sits on its top row, which some terminal overlays cover. Closing
+    // hides the pane only: the PRs stay watched, and a new PR or /pr-watch brings it back.
+    const closeButton = <Button key="close" label="Close" hotkey="x" plain dimColor onPress={() => $.ui.close({ id: PANE })} />
+
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
@@ -892,6 +896,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>PRs appear when Claude runs gh pr …</Text>
             <Text dimColor>or with /pr-watch &lt;url&gt;</Text>
           </Box>
+          <Box>{closeButton}</Box>
         </Box>
       )
     }
@@ -1210,6 +1215,7 @@ export const register: Register = (on, options) => {
         {list.map(card)}
         <Box gap={2}>
           <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
+          {closeButton}
           {done > 0 && (
             <Button key="dismiss-finished" label="Dismiss finished" hotkey="d" plain dimColor onPress={() => dismissFinished($)} />
           )}

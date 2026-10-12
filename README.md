@@ -42,6 +42,8 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 
 `/pr-watch` opens the pane, and `/pr-watch stop <number|url|all>` stops watching. Finished PRs stay until you dismiss them, `d` dismisses them all, and `r` refreshes.
 
+Close (`x`), beside Refresh, closes the pane, as does `ctrl+x x` or the mark on the pane's frame; the PRs stay watched, and `/pr-watch`, the next new PR, a `/clear` or a new session brings the pane back. It's there for when something drawn over the terminal's top rows hides the frame's mark.
+
 Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes or a review lands, and the status line follows the focused PR.
 
 ## Reviews
