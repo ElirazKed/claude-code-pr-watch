@@ -17,16 +17,61 @@ export function findPrUrls(text: string): PrRef[] {
   return [...found.values()]
 }
 
-// `gh pr view 12 -R owner/repo` style references that carry no URL.
-export function refFromGhCommand(command: string): PrRef | null {
-  const sub = command.match(/\bgh\s+pr\s+[\w-]+\s+(?:[^|;&]*?\s)?#?(\d+)\b/)
-  const repo = command.match(/(?:-R|--repo)[\s=]+([\w.-]+\/[\w.-]+)/)
-  const name = repo?.[1]
-  if (sub === null || name === undefined) return null
-  const number = Number(sub[1])
+// `gh pr` flags that take no value, so the word after one can be the PR. Any other flag is
+// taken to carry a value (`--interval 20`, `--jq .state`): a PR it hides is missed, never made up.
+const BARE_FLAGS = new Set([
+  '--watch', '--web', '-w', '--squash', '-s', '--rebase', '-r', '--merge', '-m', '--auto', '--delete-branch', '-d',
+  '--admin', '--disable-auto', '--draft', '--fill', '-f', '--fill-first', '--fill-verbose', '--comments', '-c',
+  '--required', '--fail-fast', '--approve', '-a', '--request-changes', '--undo', '--name-only', '--patch', '--yes',
+  '--force', '--editor', '-e', '--dry-run', '--detach', '--recurse-submodules',
+])
 
-  return { url: `https://github.com/${name}/pull/${number}`, repo: name, number }
+// One command of a line (`a && b; c | d`), as words.
+const commandsOf = (code: string) =>
+  code
+    .split(/\|\||&&|[;|&\n]/)
+    .map(part => part.trim().split(/\s+/).filter(Boolean))
+    .filter(words => words.length > 0)
+
+// `gh pr view 12 -R owner/repo` style references that carry no URL: each `gh pr <sub>` of the
+// line with its own number and its own -R, never another command's (`gh pr list -R a/b; gh pr
+// view 7 -R c/d` is c/d#7), and never a flag's value or a redirection (`--interval 20`, `2>&1`).
+export function ghPrRefs(code: string, subs: (sub: string) => boolean = () => true): PrRef[] {
+  const refs: PrRef[] = []
+  for (const words of commandsOf(code)) {
+    const at = words.findIndex((word, i) => /(^|\/)gh$/.test(word) && words[i + 1] === 'pr')
+    const sub = at < 0 ? undefined : words[at + 2]
+    if (sub === undefined || !subs(sub)) continue
+    let number: number | null = null
+    let repo: string | null = null
+    let isPositionalSeen = false
+    const rest = words.slice(at + 3)
+    for (let i = 0; i < rest.length; i++) {
+      const word = rest[i] ?? ''
+      if (/^\d*[<>]/.test(word)) break
+      const flag = word.match(/^(-R|--repo)(?:=(.*))?$/)
+      if (flag !== null) {
+        repo = flag[2] ?? rest[++i] ?? null
+        continue
+      }
+      if (word.startsWith('-')) {
+        if (!word.includes('=') && !BARE_FLAGS.has(word)) i++
+        continue
+      }
+      if (isPositionalSeen) continue
+      isPositionalSeen = true
+      const n = word.match(/^#?(\d+)$/)
+      if (n !== null) number = Number(n[1])
+    }
+    if (number !== null && repo !== null && /^[\w.-]+\/[\w.-]+$/.test(repo)) {
+      refs.push({ url: `https://github.com/${repo}/pull/${number}`, repo, number })
+    }
+  }
+
+  return refs
 }
+
+export const refFromGhCommand = (command: string): PrRef | null => ghPrRefs(command)[0] ?? null
 
 const toolName = (tool: string) => tool.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '')
 
@@ -93,9 +138,10 @@ function touchedByCommand(command: string, output: string): Touched {
   const subs = [...code.matchAll(/\bgh\s+pr\s+([\w-]+)/g)].map(m => m[1] ?? '')
   const apiRefs = [...code.matchAll(API_PULL)].map(([, repo = '', n]) => ({ url: `https://github.com/${repo}/pull/${Number(n)}`, repo, number: Number(n) }))
   // `gh pr checks 12 -R o/r`; not `gh pr list --limit 30 -R o/r`.
-  const isOnePr = subs.some(sub => sub !== 'create' && (ACTS.has(sub) || READS_ONE.has(sub)))
-  const fromFlags = isOnePr ? refFromGhCommand(code) : null
-  const named = uniq([...findPrUrls(code), ...apiRefs, ...(fromFlags ? [fromFlags] : [])])
+  const isOneSub = (sub: string) => sub !== 'create' && (ACTS.has(sub) || READS_ONE.has(sub))
+  const isOnePr = subs.some(isOneSub)
+  const fromFlags = ghPrRefs(code, isOneSub)
+  const named = uniq([...findPrUrls(code), ...apiRefs, ...fromFlags])
   const isPush = GIT_PUSH.test(code)
   if (subs.some(sub => ACTS.has(sub)) || isPush || GH_API_WRITE.test(code)) {
     // `gh pr create` prints the new PR; `gh pr comment` the comment's link on its PR.

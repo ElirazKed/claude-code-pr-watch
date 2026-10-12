@@ -13,6 +13,7 @@ import {
   methodsOf,
   noMerge,
   pickMethod,
+  ghPrRefs,
   refFromGhCommand,
   shellCode,
   stepIndex,
@@ -53,6 +54,25 @@ describe('detecting PRs', () => {
   test('builds a ref from a -R flag and number', async () => {
     expect(refFromGhCommand('gh pr checks 42 -R acme/app')?.url).toBe('https://github.com/acme/app/pull/42')
     expect(refFromGhCommand('gh pr checks 42')).toBe(null)
+  })
+
+  test('each gh pr command keeps its own number and -R', async () => {
+    const line = 'gh pr list --repo acme/app --state open --json number; X=$(gh auth token --user octocat) gh pr view 143 --repo acme/api --json state --jq .state 2>&1 | head -1'
+    expect(ghPrRefs(line)).toEqual([{ url: 'https://github.com/acme/api/pull/143', repo: 'acme/api', number: 143 }])
+    // A flag's value or a redirection is never the PR.
+    expect(refFromGhCommand('gh pr checks --watch --interval 20 -R acme/app')).toBe(null)
+    expect(refFromGhCommand('gh pr view --json state 2>&1 -R acme/app')).toBe(null)
+    expect(refFromGhCommand('gh pr checks --watch 12 --interval 20 -R acme/app')?.number).toBe(12)
+    expect(refFromGhCommand('gh pr merge --squash #7 --repo=acme/app')?.url).toBe('https://github.com/acme/app/pull/7')
+    // A branch name first: gh resolves it, so no number here.
+    expect(refFromGhCommand('gh pr view my-branch-2 -R acme/app')).toBe(null)
+    // -R from another command doesn't lend its repo.
+    expect(ghPrRefs('gh pr view 9 && gh pr list -R acme/app')).toEqual([])
+  })
+
+  test('a read in one command and an act in another stay apart', async () => {
+    const t = touched('Bash', { command: 'gh pr list -R acme/app; gh pr view 143 -R acme/api 2>&1 | head -1' }, '0')
+    expect(t.read.map(r => r.url)).toEqual(['https://github.com/acme/api/pull/143'])
   })
 
   test('reads the cd prefix', async () => {
