@@ -143,6 +143,100 @@ export function parseReply(stdout: string, stderr: string, refs: readonly PrRef[
   return result
 }
 
+// ---- What GitHub said about a call ----------------------------------------------------
+// The poller runs `gh api graphql -i`, which prints, on stdout and whatever the status, the
+// status line ("HTTP/2.0 502 Bad Gateway", ending "\n"), the headers (each ending "\r\n",
+// named as Go spells them: "X-Ratelimit-Remaining"), a blank line, then the body. A call that
+// got no answer (a cut connection) prints nothing there; gh's stderr says why as before.
+
+export type Http = { status: number | null; headers: Record<string, string>; body: string }
+
+// Headers keyed in lower case; without a status line, all of stdout is the body.
+export function parseHttp(stdout: string): Http {
+  const head = stdout.match(/^HTTP\/[\d.]+ (\d{3})[^\n]*\n((?:[^\r\n]+\r?\n)*)\r?\n/)
+  if (head === null) return { status: null, headers: {}, body: stdout }
+  const lines = (head[2] ?? '').split(/\r?\n/).filter(line => line.includes(':'))
+  const headers = Object.fromEntries(lines.map(line => [line.slice(0, line.indexOf(':')).trim().toLowerCase(), line.slice(line.indexOf(':') + 1).trim()]))
+
+  return { status: Number(head[1]), headers, body: stdout.slice(head[0].length) }
+}
+
+// The primary limit as the headers give it, failed calls included (the body's rateLimit
+// field comes only with data); null where they don't.
+export function rateOf(headers: Readonly<Record<string, string>>): RateLimit | null {
+  const remaining = Number(headers['x-ratelimit-remaining'] ?? NaN)
+  const reset = Number(headers['x-ratelimit-reset'] ?? NaN)
+
+  return Number.isFinite(remaining) && Number.isFinite(reset) ? { remaining, resetAt: new Date(reset * 1_000).toISOString() } : null
+}
+
+// Seconds GitHub asks to wait (`retry-after`), or null where it doesn't say.
+export function retryAfterOf(headers: Readonly<Record<string, string>>): number | null {
+  const seconds = Number(headers['retry-after'] ?? NaN)
+
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null
+}
+
+// Why a whole call failed, as far as asking again goes:
+// - `secondary-limit`: GitHub's limits on bursts and compute (a 403, or a 200 with errors,
+//   saying "secondary rate limit" or "abuse", or any retry-after). Never asked again at once:
+//   GitHub may ban a client that keeps on, so no session polls until it has waited.
+// - `primary-limit`: the hourly points are spent (x-ratelimit-remaining 0, or GitHub says
+//   "API rate limit exceeded"). The round backs off to the reset, as on a low rate.
+// - `timeout`: GitHub having a moment. Its gateway's 502, 503 or 504 (gh says "gh: HTTP 502",
+//   or "gh: Server Error (HTTP 502)" where the page says why), GraphQL's own timeout ("This
+//   may be the result of a timeout", "couldn't respond to your request in time"), or the
+//   connection cut on the way (`Post "https://api.github.com/graphql": EOF`, a reset, an
+//   HTTP/2 stream error). Asked once more.
+// - `other`: a refusal (401, 403, 404) and the rest: asking again won't help.
+export type CallFailure = 'timeout' | 'secondary-limit' | 'primary-limit' | 'other'
+
+export function failureOf(error: string, http: Http): CallFailure {
+  if (retryAfterOf(http.headers) !== null || /secondary rate limit|abuse/i.test(error)) return 'secondary-limit'
+  if (http.headers['x-ratelimit-remaining'] === '0' || /rate limit/i.test(error)) return 'primary-limit'
+  const isGateway = [502, 503, 504].includes(http.status ?? 0) || /\bHTTP 50[234]\b/.test(error)
+  const isCut = /\b(timeout|EOF|connection reset|broken pipe|stream error|GOAWAY|deadline exceeded)\b|request in time/i.test(error)
+
+  return isGateway || isCut ? 'timeout' : 'other'
+}
+
+// What a card says while a secondary limit holds the poll: GitHub's own words are about
+// "abuse" and "integrations", which the person needn't parse.
+export const limitNote = (waitMs: number) => `GitHub's rate limit for bursts: polling waits ${Math.round(waitMs / 1_000)}s`
+
+// ---- The failure log ------------------------------------------------------------------
+// ~/.cache/pr-watch/errors.log: one JSON line per failed call, the newest last, the last
+// LOG_LINES kept, so the next "⚠ 502" has a record to `tail`.
+export const LOG_LINES = 200
+
+export type CallLog = { login: string; size: number; ms: number; http: Http; failure: CallFailure; error: string }
+
+export function logLine(at: number, call: CallLog): string {
+  const { headers } = call.http
+  const header = (name: string) => headers[name] ?? null
+
+  return JSON.stringify({
+    at: new Date(at).toISOString(),
+    login: call.login,
+    batch: call.size,
+    ms: call.ms,
+    status: call.http.status,
+    class: call.failure,
+    remaining: header('x-ratelimit-remaining'),
+    used: header('x-ratelimit-used'),
+    resource: header('x-ratelimit-resource'),
+    retryAfter: header('retry-after'),
+    error: call.error.slice(0, 200),
+  })
+}
+
+// The log with `line` added, cut to its last LOG_LINES lines.
+export function appendLog(log: string, line: string, max = LOG_LINES): string {
+  const lines = [...log.split('\n').filter(Boolean), line]
+
+  return `${lines.slice(-max).join('\n')}\n`
+}
+
 export function chunks<T>(items: readonly T[], size = BATCH_SIZE): T[][] {
   const out: T[][] = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))

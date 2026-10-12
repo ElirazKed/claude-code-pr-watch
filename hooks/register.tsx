@@ -24,8 +24,8 @@ import {
   stepIndex,
   touched,
 } from './pr'
-import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batch'
-import type { RateLimit } from './batch'
+import { appendLog, buildQuery, checksQuery, chunks, failureOf, limitNote, logLine, parseChecks, parseHttp, parseReply, rateOf, retryAfterOf } from './batch'
+import type { CallFailure, CallLog, Http, RateLimit } from './batch'
 import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, threadsQuery } from './address'
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
@@ -33,6 +33,8 @@ import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine 
 import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
+import { failedEntry, keptEntries } from './cache'
+import type { Entry } from './cache'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -87,7 +89,6 @@ const VERDICT_COLOUR: Record<Verdict, 'success' | 'error' | 'suggestion' | undef
 // fetches every live session's PRs in one batched query, and the rest read results.json.
 // So N sessions cost one GitHub call per round, not N.
 
-type Entry = { at: number; pr?: GhPr; error?: string }
 type Shared = {
   fetchedAt: number
   nextAt: number
@@ -98,6 +99,8 @@ type Shared = {
   // pr-watch's newest version as the last check found it (null: none read yet), and when
   // that check rode a round.
   latest: { version: string | null; checkedAt: number }
+  // Until when a secondary limit holds every session off GitHub (absent: none yet).
+  heldUntil?: number
 }
 
 // How often a round runs while some PR moves, and otherwise: the `poll_active_seconds` and
@@ -113,6 +116,14 @@ const seconds = (value: unknown, fallback: number) =>
 // A session whose file has not been touched for this long has exited.
 const ALIVE_MS = 60_000
 const LEASE_MS = 30_000
+// A batch that failed on GitHub having a moment (a `timeout`, batch.ts) is asked once more,
+// RETRY_MS on, and only while the lease has RETRY_MIN_MS left for it: the retry may take what
+// is left, never more, so a round never outlives its lease and runs beside another session's.
+const RETRY_MS = 2_000
+const RETRY_MIN_MS = 5_000
+const GH_MS = 20_000
+// How long every session holds off after a secondary limit that names no retry-after.
+const LIMIT_WAIT_MS = 60_000
 // A PR no account can see is asked about again only this often.
 const UNREACHABLE_MS = 300_000
 const LOW_RATE = 300
@@ -128,7 +139,7 @@ let prunedAt = 0
 
 const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, latest: { version: null, checkedAt: 0 } })
 
-async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = 20_000) {
+async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = GH_MS) {
   return $.process.run(['gh', ...argv], {
     cwd,
     timeoutMs,
@@ -236,17 +247,78 @@ async function tokenFor($: EngineInterface, login: string): Promise<string | nul
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
-// `withLatest`: the first batch also asks for pr-watch's newest version.
-async function query($: EngineInterface, refs: readonly PrRef[], token: string | null, withLatest = false) {
-  const out = { found: new Map<string, GhPr>(), missing: [] as PrRef[], failed: new Map<string, string>(), rate: null as RateLimit | null, latest: null as string | null }
+// One batch's call, timed, and what GitHub said: the status and headers, and the reply.
+async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string | null, timeoutMs = GH_MS) {
+  const startedAt = await $.clock.now()
+  const res = await gh($, argv, token, undefined, timeoutMs)
+  const http = parseHttp(res.stdout)
+
+  return { http, reply: parseReply(http.body, res.stderr, part), ms: (await $.clock.now()) - startedAt }
+}
+
+// Why a failed call failed (null: it didn't), logged to errors.log on the way.
+async function failureIn($: EngineInterface, login: string, size: number, call: { http: Http; reply: { error: string | null }; ms: number }) {
+  if (call.reply.error === null) return null
+  const failure: CallFailure = failureOf(call.reply.error, call.http)
+  await logFailure($, { login: login || (await logins($)).active, size, ms: call.ms, http: call.http, failure, error: call.reply.error })
+
+  return failure
+}
+
+// Best effort: a log that can't be read starts over, and one that can't be written is skipped.
+async function logFailure($: EngineInterface, call: CallLog) {
+  const path = `${await root($)}/errors.log`
+  let log = ''
+  try {
+    log = String(await $.fs.read(path))
+  } catch {
+    // None yet.
+  }
+  try {
+    await $.fs.write(path, appendLog(log, logLine(await $.clock.now(), call)))
+  } catch {
+    // Nothing to do: the log is for the person reading it later.
+  }
+}
+
+// `withLatest`: the first batch also asks for pr-watch's newest version. `until`: when the
+// lease ends (a second kept to write the results), past which no retry runs. A secondary
+// limit stops the asking (`waitMs`: how long every session holds off).
+async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
+  const token = await tokenFor($, login)
+  const out = {
+    found: new Map<string, GhPr>(),
+    missing: [] as PrRef[],
+    failed: new Map<string, string>(),
+    rate: null as RateLimit | null,
+    latest: null as string | null,
+    waitMs: null as number | null,
+  }
   for (const [i, part] of chunks(refs).entries()) {
-    const res = await gh($, ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`], token)
-    const reply = parseReply(res.stdout, res.stderr, part)
-    if (reply.error !== null) for (const ref of part) out.failed.set(ref.url, reply.error)
+    const argv = ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`, '-i']
+    let call = await askBatch($, part, argv, token)
+    let failure = await failureIn($, login, part.length, call)
+    if (failure === 'timeout') {
+      const left = until - (await $.clock.now()) - RETRY_MS
+      if (left >= RETRY_MIN_MS) {
+        await $.clock.sleep(RETRY_MS)
+        call = await askBatch($, part, argv, token, Math.min(left, GH_MS))
+        failure = await failureIn($, login, part.length, call)
+      }
+    }
+    const { http, reply } = call
+    const after = retryAfterOf(http.headers)
+    const waitMs = failure === 'secondary-limit' ? (after !== null ? after * 1_000 : LIMIT_WAIT_MS) : null
+    if (reply.error !== null) for (const ref of part) out.failed.set(ref.url, waitMs !== null ? limitNote(waitMs) : reply.error)
     for (const [url, pr] of reply.found) out.found.set(url, pr)
     out.missing.push(...reply.missing)
-    out.rate = reply.rate ?? out.rate
+    out.rate = rateOf(http.headers) ?? reply.rate ?? out.rate
     out.latest = reply.latest ?? out.latest
+    if (waitMs !== null) {
+      out.waitMs = waitMs
+
+      break
+    }
   }
 
   return out
@@ -255,43 +327,48 @@ async function query($: EngineInterface, refs: readonly PrRef[], token: string |
 // One batched query per gh account; PRs the expected account cannot see are retried with
 // each other logged-in account, and the one that sees them is remembered per owner. The
 // newest version, when asked, rides the very first batch only; `asked` says whether it went.
-async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: Record<string, string>, withLatest = false) {
+async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: Record<string, string>, until: number, withLatest = false) {
   const found = new Map<string, GhPr>()
   const errors = new Map<string, string>()
   let rate: RateLimit | null = null
   let latest: string | null = null
   let isAsking = withLatest
+  let waitMs: number | null = null
   const byLogin = new Map<string, PrRef[]>()
   for (const ref of refs) byLogin.set(accounts[ownerOf(ref)] ?? '', [...(byLogin.get(accounts[ownerOf(ref)] ?? '') ?? []), ref])
 
   let missing: PrRef[] = []
   for (const [login, group] of byLogin) {
-    const r = await query($, group, await tokenFor($, login), isAsking)
+    if (waitMs !== null) break
+    const r = await query($, group, login, until, isAsking)
     isAsking = false
+    waitMs = r.waitMs
     r.found.forEach((pr, url) => found.set(url, pr))
     r.failed.forEach((err, url) => errors.set(url, err))
     missing.push(...r.missing)
     rate = r.rate ?? rate
     latest = r.latest ?? latest
   }
-  if (missing.length > 0) {
+  if (missing.length > 0 && waitMs === null) {
     const { active, others } = await logins($)
     for (const login of [active, ...others]) {
       const untried = missing.filter(ref => (accounts[ownerOf(ref)] ?? '') !== login && (login !== active || ownerOf(ref) in accounts))
       if (untried.length === 0) continue
-      const r = await query($, untried, await tokenFor($, login))
+      const r = await query($, untried, login, until)
+      waitMs = r.waitMs
       r.found.forEach((pr, url) => {
         found.set(url, pr)
         const ref = untried.find(x => x.url === url)
         if (ref !== undefined) accounts[ownerOf(ref)] = login
       })
       missing = missing.filter(ref => !r.found.has(ref.url))
-      if (missing.length === 0) break
+      if (missing.length === 0 || waitMs !== null) break
     }
-    for (const ref of missing) errors.set(ref.url, 'Not found, or no gh account can see it')
+    // Held by a secondary limit, the rest were not all asked: they wait, as they were.
+    if (waitMs === null) for (const ref of missing) errors.set(ref.url, 'Not found, or no gh account can see it')
   }
 
-  return { found, errors, rate, latest, asked: withLatest && refs.length > 0 }
+  return { found, errors, rate, latest, waitMs, asked: withLatest && refs.length > 0 }
 }
 
 const refFromUrl = (url: string): PrRef | null => {
@@ -300,28 +377,37 @@ const refFromUrl = (url: string): PrRef | null => {
   return m === null ? null : { url, repo: m[1] ?? '', number: Number(m[2]) }
 }
 
-// Fetches `refs` now and merges them into the shared results, which it returns.
-async function publish($: EngineInterface, refs: readonly PrRef[], at: number, isRound = false): Promise<Shared> {
+// Fetches `refs` now and merges them into the shared results, which it returns. `live`, on a
+// round: the PRs live sessions watch; the round drops the others once they are old.
+async function publish($: EngineInterface, refs: readonly PrRef[], at: number, live?: ReadonlySet<string>): Promise<Shared> {
+  const isRound = live !== undefined
   const before = await readShared($)
   // A round asks for the newest version too, once the last check is CHECK_MS old.
   const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
-  const { found, errors, rate, latest, asked } = await fetchRefs($, refs, before.accounts, withLatest)
+  const { found, errors, rate, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, at + LEASE_MS - 1_000, withLatest)
   // Re-read: another session may have written while this one was asking GitHub.
   const shared = await readShared($)
   shared.accounts = { ...shared.accounts, ...before.accounts }
   found.forEach((pr, url) => (shared.prs[url] = { at, pr }))
-  errors.forEach((error, url) => (shared.prs[url] = { ...shared.prs[url], at, error }))
+  // A PR with data keeps it through a failure, and its card says so only once it lasts.
+  errors.forEach((error, url) => (shared.prs[url] = failedEntry(shared.prs[url], error, at)))
   shared.rate = rate ?? shared.rate
   // Asked is checked, answered or not: a check that fails waits as long as one that didn't,
   // so it never rides every round. An unanswered one keeps the version known before.
   if (asked) shared.latest = { version: latest ?? shared.latest?.version ?? null, checkedAt: at }
   if (isRound) {
+    shared.prs = keptEntries(shared.prs, live, at)
     const isMoving = [...found.values()].some(pr => derive(pr).isMoving)
     shared.fetchedAt = at
     shared.nextAt = at + (isMoving ? pace.fastMs : pace.slowMs)
     if (shared.rate !== null && shared.rate.remaining < LOW_RATE) {
       shared.nextAt = Math.max(shared.nextAt, Date.parse(shared.rate.resetAt) || 0)
     }
+  }
+  // A secondary limit: no round, and no Refresh, until GitHub's wait is over.
+  if (waitMs !== null) {
+    shared.heldUntil = Math.max(shared.heldUntil ?? 0, (await $.clock.now()) + waitMs)
+    shared.nextAt = Math.max(shared.nextAt, shared.heldUntil)
   }
   await writeJson($, `${await root($)}/results.json`, shared)
 
@@ -344,7 +430,7 @@ async function tick($: EngineInterface, own: readonly PrRef[], at: number): Prom
       return ref === null || isUnreachable || isFinished ? [] : [ref]
     })
 
-    return await publish($, due, at, true)
+    return await publish($, due, at, urls)
   } finally {
     await releaseLease($)
   }
@@ -365,8 +451,12 @@ async function apply($: EngineInterface, shared: Shared) {
   const moved: string[] = []
   const next = list.map(current => {
     const entry = shared.prs[current.url]
-    if (entry === undefined || (current.checkedAt !== null && entry.at <= current.checkedAt)) return current
-    if (entry.pr === undefined) return { ...current, error: entry.error ?? null, checkedAt: current.checkedAt ?? entry.at }
+    if (entry === undefined) return current
+    const error = entry.error ?? null
+    // No newer data, yet the error may have come or gone: a failure that lasted keeps the
+    // entry's time, so "checked 2m ago" stays the age of what the card shows.
+    if (current.checkedAt !== null && entry.at <= current.checkedAt) return error === current.error ? current : { ...current, error }
+    if (entry.pr === undefined) return { ...current, error, checkedAt: current.checkedAt ?? entry.at }
     const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others], entry.pr.author?.login)
     const pr: TrackedPr = {
       ...current,
@@ -378,7 +468,7 @@ async function apply($: EngineInterface, shared: Shared) {
       reviews: reviewsOf(entry.pr) ?? current.reviews,
       reviewSeen: seen,
       checkedAt: entry.at,
-      error: entry.error ?? null,
+      error,
     }
     const said = reviewToasts(fresh, pr.number)
     for (const text of said) $.ui.toast(text)
@@ -449,7 +539,10 @@ async function sayNewer($: EngineInterface, shared: Shared) {
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
 async function fetchNow($: EngineInterface, refs: PrRef[]) {
   if (refs.length === 0) return
-  await apply($, await publish($, refs, await $.clock.now()))
+  const at = await $.clock.now()
+  const shared = await readShared($)
+  // Held by a secondary limit: the next round asks, once the wait is over.
+  await apply($, (shared.heldUntil ?? 0) > at ? shared : await publish($, refs, at))
 }
 
 async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {

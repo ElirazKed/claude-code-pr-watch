@@ -131,6 +131,10 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 - When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
 - Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote (Address with Claude asks that of one PR, on its press).
+- **When GitHub stumbles:** a query its gateway drops (a 502, 503 or 504, its own timeout, a cut connection) is asked once more 2 seconds later, while the round's 30-second lease has room. A card that has data keeps it through failed rounds, its *checked 1m ago* growing, and shows the error only once fetches have failed for 2 minutes. A PR never read yet shows it at once.
+- **Rate limits:** a secondary limit (GitHub's limit on bursts) is never retried. Every session waits out its `retry-after`, or a minute where it names none, Refresh included. Spent hourly points wait for the reset.
+- **Only watched PRs are kept:** each round drops a PR from `results.json` once no live session watches it and its last fetch is an hour old.
+- **Failures are logged:** each failed call is a JSON line in `~/.cache/pr-watch/errors.log` (time, login, batch size, duration, HTTP status, kind, rate-limit headers, the message), the last 200 kept. `tail ~/.cache/pr-watch/errors.log` after a ⚠ on a card.
 
 ### Poll intervals
 
