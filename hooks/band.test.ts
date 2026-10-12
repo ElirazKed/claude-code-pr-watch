@@ -179,17 +179,34 @@ describe('the action line', () => {
   })
 
   test('with room, everything: the count, the hand-off, the long notice', async () => {
-    expect(actionsOf(120, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: true, notice: notice.long })
+    expect(actionsOf(120, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: true, notice: notice.long, gh: null })
   })
 
   test('narrower, the notice goes short, then goes; then the hand-off; the count stays longest', async () => {
     const all = fixed + 2 + 7 + 2 + fix
     expect(actionsOf(all + 2 + 8, fixed, 3, fix, notice).notice).toBe('↑ 0.11.0')
-    expect(actionsOf(all + 2, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: true, notice: null })
-    expect(actionsOf(fixed + 2 + 7, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: false, notice: null })
+    expect(actionsOf(all + 2, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: true, notice: null, gh: null })
+    expect(actionsOf(fixed + 2 + 7, fixed, 3, fix, notice)).toEqual({ more: '+3 more', handoff: false, notice: null, gh: null })
+  })
+
+  test('a low gh budget comes last, short where the line is short, and goes first', async () => {
+    const low = { long: 'gh 12% · resets 13:40', short: 'gh 12%', isPause: false }
+    const all = fixed + 2 + 7 + 2 + fix + 2 + notice.long.length
+    expect(actionsOf(all + 2 + low.long.length, fixed, 3, fix, notice, low).gh).toBe(low.long)
+    expect(actionsOf(all + 2 + 6, fixed, 3, fix, notice, low)).toEqual({ more: '+3 more', handoff: true, notice: notice.long, gh: 'gh 12%' })
+    expect(actionsOf(all, fixed, 3, fix, notice, low)).toEqual({ more: '+3 more', handoff: true, notice: notice.long, gh: null })
+  })
+
+  test('a pause comes before the hand-off and the notice', async () => {
+    const pause = { long: '⏸ GitHub rate limit · polling resumes in 45s', short: '⏸ resumes in 45s', isPause: true }
+    const roomy = actionsOf(200, fixed, 0, fix, notice, pause)
+    expect(roomy).toEqual({ more: null, handoff: true, notice: notice.long, gh: pause.long })
+    // Room for the pause or the hand-off, not both: the pause stays.
+    expect(actionsOf(fixed + 2 + pause.long.length, fixed, 0, fix, notice, pause)).toEqual({ more: null, handoff: false, notice: null, gh: pause.long })
+    expect(actionsOf(fixed + 2 + 16, fixed, 0, fix, null, pause).gh).toBe('⏸ resumes in 45s')
   })
 
   test('nothing more, no hand-off, no notice: just the buttons', async () => {
-    expect(actionsOf(80, fixed, 0, null, null)).toEqual({ more: null, handoff: false, notice: null })
+    expect(actionsOf(80, fixed, 0, null, null)).toEqual({ more: null, handoff: false, notice: null, gh: null })
   })
 })

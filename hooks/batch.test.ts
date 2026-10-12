@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { LOG_LINES, appendLog, buildQuery, chunks, failureOf, limitNote, logLine, parseHttp, parseReply, rateOf, retryAfterOf } from './batch'
+import { LOG_LINES, MIN_CALL_MS, appendLog, buildQuery, callBudget, chunks, failureOf, logLine, parseHttp, parseReply, rateOf, retryAfterOf } from './batch'
 import { LATEST_FIELD } from './update'
 
 const A = { url: 'https://github.com/acme/app/pull/7', repo: 'acme/app', number: 7 }
@@ -11,7 +11,7 @@ describe('batched query', () => {
     const query = buildQuery([A, B])
     expect(query).toContain('p0: repository(owner: "acme", name: "app") { pullRequest(number: 7) { ...pr } ...repo }')
     expect(query).toContain('p1: repository(owner: "secret", name: "app")')
-    expect(query).toContain('rateLimit { remaining resetAt }')
+    expect(query).toContain('rateLimit { limit remaining resetAt }')
   })
 
   test('asks who reviewed and whether threads are resolved, never what anyone wrote', async () => {
@@ -119,7 +119,15 @@ describe('what GitHub said about a call', () => {
     expect(http.headers['content-type']).toBe('application/json; charset=utf-8')
     expect(http.body).toBe(body)
     expect(parseReply(http.body, '', [A]).found.has(A.url)).toBe(true)
-    expect(rateOf(http.headers)).toEqual({ remaining: 4998, resetAt: new Date(1791378000 * 1_000).toISOString() })
+    expect(rateOf(http.headers)).toEqual({ limit: 5000, remaining: 4998, resetAt: new Date(1791378000 * 1_000).toISOString() })
+  })
+
+  test("the rate headers count only where they speak of GraphQL's points", async () => {
+    const reset = 'X-Ratelimit-Reset: 1791378000'
+    const of = (lines: string[]) => rateOf(parseHttp(head('200 OK', lines)).headers)
+    // No limit named: the caller takes GitHub's usual one.
+    expect(of(['X-Ratelimit-Remaining: 12', reset])).toEqual({ remaining: 12, resetAt: new Date(1791378000 * 1_000).toISOString() })
+    expect(of(['X-Ratelimit-Remaining: 12', reset, 'X-Ratelimit-Resource: core'])).toBe(null)
   })
 
   test("a gateway's 502: its HTML page is the body, with no rate headers", async () => {
@@ -195,8 +203,21 @@ describe('what GitHub said about a call', () => {
     }
   })
 
-  test('a secondary limit reads plainly on a card', async () => {
-    expect(limitNote(60_000)).toBe("GitHub's rate limit for bursts: polling waits 60s")
+})
+
+describe("a round's time", () => {
+  const until = Date.parse('2026-10-07T12:00:39Z')
+
+  test('a call may take what is left of the lease, never more than its own cap', async () => {
+    expect(callBudget(until, until - 29_000, 20_000)).toBe(20_000)
+    expect(callBudget(until, until - 8_850, 20_000)).toBe(8_850)
+  })
+
+  test('with less than MIN_CALL_MS left, no call starts: the next round asks', async () => {
+    expect(MIN_CALL_MS).toBe(5_000)
+    expect(callBudget(until, until - MIN_CALL_MS, 20_000)).toBe(MIN_CALL_MS)
+    expect(callBudget(until, until - MIN_CALL_MS + 1, 20_000)).toBe(null)
+    expect(callBudget(until, until + 1_000, 20_000)).toBe(null)
   })
 })
 

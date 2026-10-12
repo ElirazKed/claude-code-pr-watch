@@ -50,10 +50,11 @@ export function buildQuery(refs: readonly PrRef[], withLatest = false): string {
 
   const latest = withLatest ? `\n  ${LATEST_FIELD}` : ''
 
-  return `query {\n  rateLimit { remaining resetAt }${latest}\n  ${fields.join('\n  ')}\n}\n${FRAGMENT}`
+  return `query {\n  rateLimit { limit remaining resetAt }${latest}\n  ${fields.join('\n  ')}\n}\n${FRAGMENT}`
 }
 
-export type RateLimit = { remaining: number; resetAt: string }
+// `limit`: the hourly points, where the reply said (an older results.json has none).
+export type RateLimit = { remaining: number; resetAt: string; limit?: number }
 
 export type BatchResult = {
   found: Map<string, GhPr>
@@ -162,12 +163,16 @@ export function parseHttp(stdout: string): Http {
 }
 
 // The primary limit as the headers give it, failed calls included (the body's rateLimit
-// field comes only with data); null where they don't.
+// field comes only with data); null where they don't, or where they speak of a limit other
+// than GraphQL's.
 export function rateOf(headers: Readonly<Record<string, string>>): RateLimit | null {
   const remaining = Number(headers['x-ratelimit-remaining'] ?? NaN)
   const reset = Number(headers['x-ratelimit-reset'] ?? NaN)
+  const limit = Number(headers['x-ratelimit-limit'] ?? NaN)
+  const resource = headers['x-ratelimit-resource']
+  if (!Number.isFinite(remaining) || !Number.isFinite(reset) || (resource !== undefined && resource !== 'graphql')) return null
 
-  return Number.isFinite(remaining) && Number.isFinite(reset) ? { remaining, resetAt: new Date(reset * 1_000).toISOString() } : null
+  return { remaining, resetAt: new Date(reset * 1_000).toISOString(), ...(Number.isFinite(limit) && { limit }) }
 }
 
 // Seconds GitHub asks to wait (`retry-after`), or null where it doesn't say.
@@ -202,9 +207,18 @@ export function failureOf(error: string, http: Http): CallFailure {
   return isGateway || isCut ? 'timeout' : 'other'
 }
 
-// What a card says while a secondary limit holds the poll: GitHub's own words are about
-// "abuse" and "integrations", which the person needn't parse.
-export const limitNote = (waitMs: number) => `GitHub's rate limit for bursts: polling waits ${Math.round(waitMs / 1_000)}s`
+// ---- A round's time ------------------------------------------------------------------
+// A round never outlives its lease, so it never runs beside another session's. A call starts
+// only with MIN_CALL_MS left before `until` (a batch has answered in 2.5 s, and a gateway that
+// gives up takes 10), and may take what is left, never more than `max`. Null: no call starts;
+// what it would have asked is left for the next round.
+export const MIN_CALL_MS = 5_000
+
+export function callBudget(until: number, now: number, max: number): number | null {
+  const left = until - now
+
+  return left >= MIN_CALL_MS ? Math.min(left, max) : null
+}
 
 // ---- The failure log ------------------------------------------------------------------
 // ~/.cache/pr-watch/errors.log: one JSON line per failed call, the newest last, the last

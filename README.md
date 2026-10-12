@@ -46,6 +46,17 @@ Close (`x`), beside Refresh, closes the pane, as does `ctrl+x x` or the mark on 
 
 Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes or a review lands, and the status line follows the focused PR.
 
+Under the pane's buttons, the **gh line** says how much of GitHub's hourly budget each of your gh logins has left, so you can put off heavy `gh` work before it runs out:
+
+```
+gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST · resets 13:40
+    hubot 4.9k/5k GraphQL · 5k/5k REST
+```
+
+- **Both buckets:** GraphQL counts points (most `gh pr` commands, and the poll), REST counts requests (`gh api`, `gh run`). The reset time, in your time zone, is the lowest bucket's; where it won't fit beside its login it gets a line of its own.
+- **Colours:** dim while there's plenty; yellow below 20% of a limit, red below 5%.
+- **Hourly limits only:** GitHub's secondary limits, on bursts of requests, have no counter to read, so the line can't warn of them. Once one is hit, the line says so instead: *⏸ GitHub rate limit · polling resumes in 45s*, counted down, gone when the wait is over. The cards keep their last data and their *checked 2m ago* meanwhile, and say nothing of it themselves.
+
 ## Layout
 
 `layout` in `/config` says where the PRs show:
@@ -64,6 +75,7 @@ o: Open pane  r: Refresh  f: Fix #13 with Claude
 - **Buttons:** **Open pane** (`o`) opens the full pane at any width, with the keys. **Refresh** (`r`) asks GitHub now. The most urgent PR's **Fix with Claude** or **Address with Claude** (`f`, `a`) drafts in the prompt box as a card's does; where it would ask first, or the draft goes wrong, the pane opens with the keys to show that card's question or error. The keys work once the band has them: `ctrl+x tab`, or a click. Merging, dismissing and stopping stay in the pane.
 - **When it's empty:** nothing watched, the band is left empty, and a survey there has it to itself. `ctrl+x ctrl+a` or the band's `[-]` folds it away.
 - **The pane:** new PRs never open it. `/pr-watch` does, and an open pane works as ever.
+- **The gh line:** the band says it only once some bucket is below 20%, at the end of the buttons' line (*gh 12% · resets 13:40*, or *gh 12%*), and drops it first where the line is short. A secondary limit's pause (*⏸ GitHub rate limit · polling resumes in 45s*) shows there at once, ahead of the hand-off button.
 
 A change applies at once. Switching to `band` closes the pane; switching back to `pane` opens it.
 
@@ -129,10 +141,12 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 
 - Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
 - When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
-- By default it polls every 20s while CI is running somewhere and every 60s otherwise. It backs off when fewer than 300 calls of your rate limit remain.
+- By default it polls every 20s while CI is running somewhere and every 60s otherwise.
 - Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote (Address with Claude asks that of one PR, on its press).
-- **When GitHub stumbles:** a query its gateway drops (a 502, 503 or 504, its own timeout, a cut connection) is asked once more 2 seconds later, while the round's 30-second lease has room. A card that has data keeps it through failed rounds, its *checked 1m ago* growing, and shows the error only once fetches have failed for 2 minutes. A PR never read yet shows it at once.
-- **Rate limits:** a secondary limit (GitHub's limit on bursts) is never retried. Every session waits out its `retry-after`, or a minute where it names none, Refresh included. Spent hourly points wait for the reset.
+- **A round never outlives its 30-second lease:** a query starts only with 5 seconds of it left, and may take no longer than is left. A batch with no time left waits, untouched, for the next round, which asks it first.
+- **When GitHub stumbles:** a query its gateway drops (a 502, 503 or 504, its own timeout, a cut connection) is asked once more 2 seconds later, while the lease has room. A card that has data keeps it through failed rounds, its *checked 1m ago* growing, and shows the error only once fetches have failed for 2 minutes. A PR never read yet shows it at once, and the next round asks again. Only a PR no logged-in account can see waits 5 minutes before it's asked again.
+- **Rate limits, per login:** each round reads GraphQL's points from the poll's own replies (free), and, at most every 5 minutes per login, REST's requests from GitHub's `/rate_limit`, which counts against no limit. Only the session running the round asks; every session reads them from `results.json`. A login with fewer than 300 points left isn't polled until its reset: its PRs keep their last data, and the other login's are polled as ever. Only when every login the round needs is that low does the round itself wait for the first reset.
+- **Secondary limits:** GitHub's limit on bursts is never retried. Every session waits out its `retry-after`, or a minute where it names none, Refresh and new watches included, under the gh line's pause.
 - **Only watched PRs are kept:** each round drops a PR from `results.json` once no live session watches it and its last fetch is an hour old.
 - **Failures are logged:** each failed call is a JSON line in `~/.cache/pr-watch/errors.log` (time, login, batch size, duration, HTTP status, kind, rate-limit headers, the message), the last 200 kept. `tail ~/.cache/pr-watch/errors.log` after a ⚠ on a card.
 

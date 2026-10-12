@@ -99,6 +99,17 @@ export type HandoffAsk = {
 // A newer pr-watch than the one running, and how this copy updates (update.ts).
 export type Newer = { version: string; how: string }
 
+// One of GitHub's hourly limits for a gh login, as last seen (rate.ts): GraphQL's points or
+// REST's requests. Times in ms.
+export type Bucket = { limit: number; remaining: number; resetAt: number; seenAt: number }
+
+// A login's two buckets, and when the round last asked GitHub's /rate_limit for it.
+export type LoginRates = { graphql?: Bucket; core?: Bucket; askedAt?: number }
+
+// What the gh line shows: each logged-in login's buckets, the active one first, and until
+// when a secondary limit holds every session off GitHub (0: no hold).
+export type Limits = { logins: ({ login: string } & Pick<LoginRates, 'graphql' | 'core'>)[]; heldUntil: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'pr-watch': {
@@ -116,6 +127,8 @@ declare module 'claude-code' {
       addressing: Record<string, HandoffAsk>
       // Null while no newer version is known, or the notice is off.
       newer: Newer | null
+      // GitHub's budget per login, and a hold, as the shared results last said.
+      limits: Limits
     }
   }
 }

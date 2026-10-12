@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { KEEP_MS, QUIET_MS, failedEntry, keptEntries } from './cache'
+import { KEEP_MS, NOT_FOUND, QUIET_MS, UNREACHABLE_MS, failedEntry, isUnreachable, keptEntries } from './cache'
 import type { Entry } from './cache'
 import type { GhPr } from './pr'
 
@@ -34,6 +34,27 @@ describe('a failed fetch', () => {
     const older = { at: T, pr, error: 'gh: HTTP 502' }
     expect(failedEntry(older, 'gh: HTTP 502', T + 60_000)).toEqual({ at: T, pr, failedSince: T })
     expect(failedEntry(older, 'gh: HTTP 502', T + QUIET_MS)).toEqual({ at: T, pr, failedSince: T, error: 'gh: HTTP 502' })
+  })
+})
+
+describe('a PR no account can see', () => {
+  test('is flagged, and a round leaves it out for UNREACHABLE_MS', async () => {
+    const entry = failedEntry(undefined, NOT_FOUND, T, true)
+    expect(entry).toEqual({ at: T, error: NOT_FOUND, isUnreachable: true })
+    expect(isUnreachable(entry, T + UNREACHABLE_MS - 1)).toBe(true)
+    expect(isUnreachable(entry, T + UNREACHABLE_MS)).toBe(false)
+  })
+
+  test('a first fetch that failed on the way (a 502, a hold) is no miss: the next round asks', async () => {
+    expect(isUnreachable(failedEntry(undefined, 'gh: HTTP 502', T), T + 10_000)).toBe(false)
+    expect(isUnreachable(undefined, T)).toBe(false)
+  })
+
+  test("an older version's miss has the words and no flag; one with data is never left out", async () => {
+    expect(isUnreachable({ at: T, error: NOT_FOUND }, T + 10_000)).toBe(true)
+    expect(isUnreachable({ at: T, pr, error: NOT_FOUND }, T + 10_000)).toBe(false)
+    // Read at last: the flag goes with the miss.
+    expect(failedEntry({ at: T, pr }, NOT_FOUND, T + 10_000, true)).toEqual({ at: T, pr, failedSince: T + 10_000 })
   })
 })
 
