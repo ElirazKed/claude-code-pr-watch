@@ -46,6 +46,27 @@ Close (`x`), beside Refresh, closes the pane, as does `ctrl+x x` or the mark on 
 
 Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes or a review lands, and the status line follows the focused PR.
 
+## Layout
+
+`layout` in `/config` says where the PRs show:
+
+- **`pane`** (the default): the pane, opened as PRs come. Claude Code places it: docked beside the conversation in a wide fullscreen terminal, otherwise above the prompt.
+- **`band`**: a few short lines in the band just above the prompt instead, for a terminal with little room, or one whose top rows something else covers. The pane opens only when you ask for it.
+
+```
+✗ #13 Retry uploads with exponential backoff · 1 check failing
+⠹ #12 Retry uploads with exponential backoff · CI running · 1/3
+✓ #7 Retry uploads with exponential backoff · merged
+o: Open pane  r: Refresh  f: Fix #13 with Claude
+```
+
+- **What it shows:** a line per PR, most urgent first (conflicts, failing CI, changes requested, comments to address, then what can merge, what waits, what's done), with the card's icon and spinner, the title cut to fit, and the state in a few words. Five lines at most, the buttons included; past that, *+3 more* on the buttons' line. It takes two lines when another mod draws in the band too, and keeps theirs below.
+- **Buttons:** **Open pane** (`o`) opens the full pane at any width, with the keys. **Refresh** (`r`) asks GitHub now. The most urgent PR's **Fix with Claude** or **Address with Claude** (`f`, `a`) drafts in the prompt box as a card's does; where it would ask first, or the draft goes wrong, the pane opens with the keys to show that card's question or error. The keys work once the band has them: `ctrl+x tab`, or a click. Merging, dismissing and stopping stay in the pane.
+- **When it's empty:** nothing watched, the band is left empty, and a survey there has it to itself. `ctrl+x ctrl+a` or the band's `[-]` folds it away.
+- **The pane:** new PRs never open it. `/pr-watch` does, and an open pane works as ever.
+
+A change applies at once. Switching to `band` closes the pane; switching back to `pane` opens it.
+
 ## Reviews
 
 A card says who reviewed and what is left to address:
@@ -125,7 +146,7 @@ A change applies from the next round, with no reload needed. Sessions check on a
 
 ## Updates
 
-Claude Code doesn't say when a third-party marketplace has a newer version, and a copy loaded from a folder gets no updates at all, so pr-watch says it itself: a dim line under the pane's buttons, *↑ pr-watch 0.9.1 available · claude plugin update pr-watch@claude-code-pr-watch*, and one toast per new version for the whole machine, not one per session.
+Claude Code doesn't say when a third-party marketplace has a newer version, and a copy loaded from a folder gets no updates at all, so pr-watch says it itself: a dim line under the pane's buttons, *↑ pr-watch 0.9.1 available · claude plugin update pr-watch@claude-code-pr-watch* (in the band, *↑ pr-watch 0.9.1 available* at the end of its buttons' line), and one toast per new version for the whole machine, not one per session.
 
 - **How it checks:** every 2 hours at most, the poll's first query also reads this repo's `.claude-plugin/plugin.json` on GitHub, so it costs no request of its own. It rides the PR poll, so it checks only while some session watches an open PR. What it found is kept in `~/.cache/pr-watch/results.json` for every session, and the version last toasted in `notice.json` beside it. Only plain `x.y.z` versions are compared, and a check GitHub can't answer just says nothing.
 - **What it says to do:** installed from a marketplace, `claude plugin update pr-watch@<marketplace>` (or `/plugin` → Installed → pr-watch → Update now), then a restart. Loaded from a folder (`--plugin-dir`, `CLAUDE_CODE_PLUGIN_DIRS`), `git pull` in that folder.

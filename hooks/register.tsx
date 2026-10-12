@@ -30,7 +30,9 @@ import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, thre
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
-import { CHECK_MS, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
+import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
+import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
+import type { Layout } from './band'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -59,6 +61,12 @@ let hasHinted = false
 const barWidth = new Map<string, number>()
 let anim: { cancel: () => void } | null = null
 let frame = 0
+// Whether the pane is drawn: set by its render, cleared when a spinner blit is refused (closed,
+// or never opened in the band layout), so a hidden pane costs no frames.
+let isPaneDrawn = false
+// The band's instance, and the PRs whose spinner it last drew, so the animation blits there too.
+let bandId: string | null = null
+const bandSpins = new Set<string>()
 
 // Rows kept by an older version of this mod lack the newer fields.
 function full(pr: TrackedPr): TrackedPr {
@@ -98,6 +106,8 @@ const MIN_POLL_MS = 10_000
 const pace = { fastMs: 20_000, slowMs: 60_000 }
 // The `update_notice` option, kept current the same way.
 let isNoticeOn = true
+// The `layout` option, the same way: the pane (opened as PRs come), or the band above the prompt.
+let layout: Layout = 'pane'
 const seconds = (value: unknown, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.max(MIN_POLL_MS, value * 1_000) : fallback
 // A session whose file has not been touched for this long has exited.
@@ -669,6 +679,25 @@ const HANDOFFS = [
   },
 ] as const
 
+// A hand-off pressed in the band: the draft lands in the prompt box as from a card. Where it
+// asks first, or goes wrong, instead, the pane opens, with the keys, where that card says so:
+// the band has no room for the question.
+async function bandHandoff($: EngineInterface, kind: Kind, pr: TrackedPr) {
+  // A question already waits on the card: the pane answers it; a second collection would
+  // only replace it.
+  if ((await readRows($, kind))[pr.url]?.asking !== undefined) {
+    await $.ui.open({ ...OPEN, focus: true })
+
+    return
+  }
+  if (kind === 'fix') await collectFailure($, pr)
+  else await collectThreads($, pr)
+  const ask = (await readRows($, kind))[pr.url]
+  // A draft that landed stays where it is (a part that wouldn't come is said on the card).
+  const hasFailed = ask?.error !== undefined && ask.done === undefined
+  if (ask?.asking !== undefined || hasFailed) await $.ui.open({ ...OPEN, focus: true })
+}
+
 async function refreshStatus($: EngineInterface) {
   const list = await read($, prs)
   const focus = list.find(isActive) ?? list[list.length - 1]
@@ -701,6 +730,12 @@ async function track($: EngineInterface, refs: PrRef[], isExplicit = false) {
 
 async function show($: EngineInterface, fresh: PrRef[]) {
   await update($, prs, list => [...list, ...fresh.filter(r => !list.some(pr => pr.url === r.url)).map(placeholder)])
+  // The band shows a new PR by itself; the pane waits to be asked for.
+  if (layout === 'band') {
+    await syncAnimation($)
+
+    return
+  }
   const opened = await $.ui.open(OPEN)
   if (!opened.isPlaced && !hasHinted) {
     hasHinted = true
@@ -723,9 +758,17 @@ async function syncAnimation($: EngineInterface) {
         return
       }
       for (const pr of moving) {
-        void $.ui.blit({ requestId: PANE, key: `spin:${pr.url}`, cells: spinnerCell(frame + pr.number) })
+        if (isPaneDrawn) {
+          // The spinner is one cell, so a refusal means the pane isn't mounted, never another size.
+          void $.ui.blit({ requestId: PANE, key: `spin:${pr.url}`, cells: spinnerCell(frame + pr.number) }).then(done => {
+            if ('deny' in done) isPaneDrawn = false
+          })
+        }
+        if (layout === 'band' && bandId !== null && bandSpins.has(pr.url)) {
+          void $.ui.blit({ requestId: bandId, key: `band-spin:${pr.url}`, cells: spinnerCell(frame + pr.number) })
+        }
         const width = barWidth.get(pr.url)
-        if (width !== undefined && pr.checks.pending > 0) {
+        if (isPaneDrawn && width !== undefined && pr.checks.pending > 0) {
           void $.ui.blit({ requestId: PANE, key: `bar:${pr.url}`, cells: barCells(pr.checks, width, frame) })
         }
       }
@@ -759,7 +802,7 @@ async function dismissFinished($: EngineInterface) {
 async function restore($: EngineInterface, carried: TrackedPr[]) {
   const list = await read($, prs)
   if (list.length === 0) await update($, prs, () => carried)
-  if (!(await $.ui.panes()).some(pane => pane.id === PANE)) await $.ui.open(OPEN)
+  if (layout === 'pane' && !(await $.ui.panes()).some(pane => pane.id === PANE)) await $.ui.open(OPEN)
   await refreshStatus($)
   await syncAnimation($)
 }
@@ -768,17 +811,27 @@ export const register: Register = (on, options) => {
   pace.fastMs = seconds(options.poll_active_seconds, 20_000)
   pace.slowMs = seconds(options.poll_idle_seconds, 60_000)
   isNoticeOn = options.update_notice !== false
+  layout = layoutOf(options.layout)
   ownVersion = undefined
+  isPaneDrawn = false
   toldVersion = null
 
   // A change in /config applies from the next round, no reload needed.
   on('config.set', async ($, e, next) => {
     const done = await next(e)
-    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds|update_notice)$/)?.[1]
+    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds|update_notice|layout)$/)?.[1]
     if (field === undefined || done.deny !== undefined) return done
     if (field === 'poll_active_seconds') pace.fastMs = seconds(done.value, pace.fastMs)
     else if (field === 'poll_idle_seconds') pace.slowMs = seconds(done.value, pace.slowMs)
-    else {
+    else if (field === 'layout') {
+      // The band draws, or stops, at once. On the band the pane closes (the room was wanted
+      // back); back on the pane, it opens as a session start would open it.
+      layout = layoutOf(done.value)
+      bandSpins.clear()
+      $.ui.invalidate('ui.render')
+      if (layout === 'band') void $.ui.close({ id: PANE })
+      else if ((await read($, prs)).length > 0) void $.ui.open(OPEN)
+    } else {
       isNoticeOn = done.value !== false
       // Off: the footer's note goes now; on, it comes back with the next tick.
       if (!isNoticeOn) await update($, newer, () => null)
@@ -816,7 +869,7 @@ export const register: Register = (on, options) => {
       }
     })
     if ((await read($, prs)).length > 0) {
-      void $.ui.open(OPEN)
+      if (layout === 'pane') void $.ui.open(OPEN)
       await refreshStatus($)
       await syncAnimation($)
     }
@@ -916,6 +969,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    isPaneDrawn = true
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
     const list = (await read($, prs)).map(full)
@@ -1318,6 +1372,110 @@ export const register: Register = (on, options) => {
           )}
         </Box>
         {notice}
+      </Box>
+    )
+  })
+
+  // The band layout: a line per watched PR above the prompt, most urgent first, and one line of
+  // buttons. It yields to a survey, draws nothing with nothing watched, and keeps whatever the
+  // plugins after it draw there, below its own lines (it shrinks to two lines beside them).
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const isTerminal = e.surface === 'terminal'
+    // Nothing of ours mounted in the terminal's band: no spinner to blit there. A desktop draw
+    // leaves the terminal's spinners be.
+    const yieldBand = () => {
+      if (isTerminal) bandSpins.clear()
+
+      return next(e)
+    }
+    if (layout !== 'band' || e.props.hasSurvey) return yieldBand()
+    const list = (await read($, prs)).map(full)
+    if (list.length === 0) return yieldBand()
+    const theirs = await next(e)
+    const plan = planOf(list, e.props.maxRows, theirs.type === 'engine' ? BAND_ROWS : SHARED_ROWS)
+    if (plan.shown.length === 0) {
+      if (isTerminal) bandSpins.clear()
+
+      return theirs
+    }
+    const { Box, Text, Button } = $.ui.resolve(e)
+    // Narrowed by the surface, so the terminal's table (the one with a Raster) is resolved there.
+    const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
+    const [at, fixRows, addressRows, upgrade] = await Promise.all([
+      read($, now),
+      readRows($, 'fix'),
+      readRows($, 'address'),
+      isNoticeOn ? read($, newer) : null,
+    ])
+    const width = Math.max(20, e.props.bodyColumns)
+    if (isTerminal) {
+      bandId = e.requestId
+      bandSpins.clear()
+    }
+
+    const line = (pr: TrackedPr) => {
+      const row = rowOf(pr, width)
+      const isSpinning = pr.isMoving && Raster !== null
+      if (isSpinning) bandSpins.add(pr.url)
+
+      return (
+        <Box key={`band:${pr.url}`}>
+          {isSpinning ? (
+            <Raster key={`band-spin:${pr.url}`} columns={1} rows={1} cells={spinnerCell(frame + pr.number)} />
+          ) : (
+            <Text color={pr.tone} bold>
+              {row.icon}
+            </Text>
+          )}
+          <Text wrap="truncate-end">
+            {' '}
+            <Text color={pr.tone} bold>
+              {row.number}
+            </Text>
+            {row.title !== '' && <Text> {row.title}</Text>}
+            <Text dimColor>{row.title !== '' ? ' · ' : ' '}</Text>
+            <Text color={pr.tone}>{row.state}</Text>
+          </Text>
+        </Box>
+      )
+    }
+
+    // The most urgent PR's hand-off, when it has one: Fix where CI failed, else Address where
+    // threads are open. While it collects, what it does stands in for its button.
+    const top = plan.shown[0]
+    const handoff = top !== undefined && top.state === 'OPEN' ? HANDOFFS.find(h => h.isOffered(top)) : undefined
+    const isFix = handoff?.id === 'fix'
+    const isCollecting = top !== undefined && isBusy((isFix ? fixRows : addressRows)[top.url]?.busy, at)
+    const handoffLabel = `${isFix ? 'Fix' : 'Address'} #${top?.number} with Claude`
+    const handoffKey = isFix ? 'f' : 'a'
+    const busyText = `◌ ${handoff?.busy}`
+    const fixed = buttonCells('o', 'Open pane') + 2 + buttonCells('r', 'Refresh')
+    const actions = actionsOf(
+      width,
+      fixed,
+      plan.more,
+      handoff === undefined ? null : isCollecting ? cells(busyText) : buttonCells(handoffKey, handoffLabel),
+      upgrade === null ? null : { long: headOf(upgrade.version), short: `↑ ${upgrade.version}` },
+    )
+
+    return (
+      <Box flexDirection="column">
+        {plan.shown.map(line)}
+        {plan.hasActions && (
+          <Box key="band:actions" gap={2}>
+            {actions.more !== null && <Text dimColor>{actions.more}</Text>}
+            {/* A press is the person's ask: the pane is placed at any width, with the keys. */}
+            <Button key="band-open" label="Open pane" hotkey="o" plain dimColor onPress={() => $.ui.open({ ...OPEN, focus: true })} />
+            <Button key="band-refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
+            {actions.handoff && top !== undefined && handoff !== undefined && (isCollecting ? (
+              <Text color="suggestion">{busyText}</Text>
+            ) : (
+              <Button key="band-handoff" label={handoffLabel} hotkey={handoffKey} plain dimColor onPress={() => bandHandoff($, handoff.id, top)} />
+            ))}
+            {actions.notice !== null && <Text dimColor>{actions.notice}</Text>}
+          </Box>
+        )}
+        {theirs}
       </Box>
     )
   })
