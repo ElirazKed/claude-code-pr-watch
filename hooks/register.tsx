@@ -140,7 +140,7 @@ const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(
 let homeDir: string | null | undefined
 let dir: string | null = null
 let loginsCache: Promise<{ active: string; others: string[] }> | null = null
-let zone: Promise<number> | null = null
+let zone: { at: number; offset: Promise<number> } | null = null
 const tokens = new Map<string, Promise<string | null>>()
 let prunedAt = 0
 
@@ -255,15 +255,24 @@ async function tokenFor($: EngineInterface, login: string): Promise<string | nul
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
 // The person's time zone, minutes east of UTC, for the gh line's reset time: `date +%z`,
-// once per process; where it won't say, what the runtime thinks.
-async function zoneOffset($: EngineInterface): Promise<number> {
-  const guess = () => -new Date().getTimezoneOffset()
-  zone ??= $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).then(
-    res => offsetOf(res.stdout) ?? guess(),
-    () => guess(),
-  )
+// asked again each ZONE_MS, so a session that lives through a clock change follows it; where
+// it won't say, what the runtime thinks.
+const ZONE_MS = 3_600_000
 
-  return zone
+async function zoneOffset($: EngineInterface): Promise<number> {
+  const at = await $.clock.now()
+  const guess = () => -new Date().getTimezoneOffset()
+  if (zone === null || at - zone.at >= ZONE_MS) {
+    zone = {
+      at,
+      offset: $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).then(
+        res => offsetOf(res.stdout) ?? guess(),
+        () => guess(),
+      ),
+    }
+  }
+
+  return zone.offset
 }
 
 // One batch's call, timed, and what GitHub said: the status and headers, and the reply.
@@ -361,9 +370,10 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
 
       break
     }
-    // Spent points: the login's other batches would only be refused the same way.
+    // Spent points: the login's other batches would only be refused the same way. This one
+    // went unanswered too, so it is left as well, never read as "not found".
     if (failure === 'primary-limit') {
-      out.left.push(...parts.slice(i + 1).flat())
+      out.left.push(...parts.slice(i).flat())
 
       break
     }
@@ -375,8 +385,9 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
 // One batched query per gh account; PRs the expected account cannot see are retried with
 // each other logged-in account, and the one that sees them is remembered per owner. The
 // newest version, when asked, rides the first batch that goes; `asked` says whether it went.
-// A login whose points are low (rate.ts) is left out until its reset, its PRs keeping what
-// they have, and the others are asked as ever. `rates` goes in as known and comes back with
+// On a round (`isRound`), a login whose points are low (rate.ts) is left out until its reset,
+// its PRs keeping what they have, and the others are asked as ever; a watch or a Refresh, one
+// call the person asked for, still goes. `rates` goes in as known and comes back with
 // the points each login's replies said; `needed`: the logins these PRs are polled as.
 async function fetchRefs(
   $: EngineInterface,
@@ -385,6 +396,7 @@ async function fetchRefs(
   rates: Rates,
   at: number,
   until: number,
+  isRound: boolean,
   withLatest = false,
 ) {
   const found = new Map<string, GhPr>()
@@ -396,6 +408,7 @@ async function fetchRefs(
   const { active, others } = await logins($)
   // The active account polls the owners no other account was found for.
   const nameOf = (login: string) => login || active
+  const isLow = (login: string) => isRound && lowUntil(seen, login, at) !== null
   const saw = (login: string, r: { rate: RateLimit | null; rateAt: number }) => {
     const graphql = bucketOf(r.rate, r.rateAt)
     if (graphql !== null) seen = withSeen(seen, nameOf(login), { graphql })
@@ -407,7 +420,7 @@ async function fetchRefs(
   let missing: PrRef[] = []
   for (const [login, group] of byLogin) {
     if (waitMs !== null) break
-    if (lowUntil(seen, nameOf(login), at) !== null) continue
+    if (isLow(nameOf(login))) continue
     const r = await query($, group, login, until, isAsking)
     if (r.isLatestAsked) isAsking = false
     waitMs = r.waitMs
@@ -424,7 +437,7 @@ async function fetchRefs(
     for (const login of [active, ...others]) {
       const untried = missing.filter(ref => (accounts[ownerOf(ref)] ?? '') !== login && (login !== active || ownerOf(ref) in accounts))
       if (untried.length === 0) continue
-      if (lowUntil(seen, login, at) !== null) {
+      if (isLow(login)) {
         isSure = false
 
         continue
@@ -482,7 +495,7 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, l
   const until = at + LEASE_MS - 1_000
   // A round asks for the newest version too, once the last check is CHECK_MS old.
   const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
-  const { found, errors, rates, needed, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, before.rates, at, until, withLatest)
+  const { found, errors, rates, needed, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, before.rates, at, until, isRound, withLatest)
   // REST's count rides a round, never a watch or a Refresh, nor a round a limit stopped.
   const seen = isRound && waitMs === null ? await askRest($, rates, at, until) : rates
   // Re-read: another session may have written while this one was asking GitHub.
@@ -615,7 +628,7 @@ async function apply($: EngineInterface, shared: Shared) {
 // What the gh line shows: the logged-in logins' buckets, the active one first (every login the
 // results know of, where gh named none), and the hold.
 function limitsOf(shared: Shared, names: readonly string[]): Limits {
-  const rates = shared.rates ?? {}
+  const { rates } = shared
   const known = names.filter(name => name !== '')
   const order = known.length > 0 ? known : Object.keys(rates)
 
