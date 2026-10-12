@@ -116,6 +116,21 @@ function merged(gh: Record<string, unknown>, argv: readonly string[]) {
   else gh[url] = { ...fixture, state: 'MERGED', mergedAt: '2026-10-07T12:00:00Z' }
 }
 
+type Blip = { stderr: string; afterMs?: number; status?: number; headers?: string[]; body?: string }
+// What `gh api -i` prints before the body: the status line ("\n"), each header ("\r\n"), a blank line.
+const httpHead = (status: string, headers: readonly string[]) => `HTTP/2.0 ${status}\n${headers.map(line => `${line}\r\n`).join('')}\r\n`
+// When the hour's points and requests reset, in every fixture.
+const POINTS_RESET = Date.parse('2026-10-07T13:00:00Z')
+const REQUESTS_RESET = Date.parse('2026-10-07T13:30:00Z')
+// The rate headers of a reply that got through, as the body's rateLimit field says it.
+const rateHeaders = (remaining: number) => [
+  'X-Ratelimit-Limit: 5000',
+  `X-Ratelimit-Remaining: ${remaining}`,
+  `X-Ratelimit-Reset: ${POINTS_RESET / 1_000}`,
+  'X-Ratelimit-Resource: graphql',
+  `X-Ratelimit-Used: ${5_000 - remaining}`,
+]
+
 const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRequest\(number: (\d+)\)/g
 
 // Stands for gh, $HOME and the file system: answers batched queries from `gh`, keeps files in
@@ -127,7 +142,16 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // each GraphQL query's text, and a query for what threads say waits on `hold`, when set. The
 // mod's own plugin.json, wherever its folder is, reads as the file kept under 'plugin.json';
 // `gh.pw`, when set, is GitHub's answer to a round's pw field (pr-watch's manifest there), and
-// without it the repo can't be read, as when it is renamed, gone or private.
+// without it the repo can't be read, as when it is renamed, gone or private. While `blips`
+// holds a failure, each GraphQL query takes the first, `afterMs` (mocked time) on: gh's
+// stderr for it, and on stdout its `body` (a gateway's HTML page by default), after its
+// status (the one stderr names) and `headers` where gh is run with -i, as `gh api -i` prints
+// them; a blip with no status is a cut connection, with nothing on stdout. A reply that gets
+// through prints its status and rate headers too, under -i. `budget.logins` are gh's logins,
+// the first active (another's token is "<login>-token"), and `budget.points` and
+// `budget.requests` what each has left (4000 and 4900 of 5000 by default), as the replies and
+// `gh api rate_limit` say; `restAsks` records each login /rate_limit was asked for. The time
+// zone (`date +%z`) is +0300.
 function fakeHost(
   on: On,
   clock: Clock,
@@ -142,6 +166,11 @@ function fakeHost(
   const runs: string[][] = []
   const asked: string[] = []
   const gate: { hold: Promise<unknown> | null } = { hold: null }
+  const blips: Blip[] = []
+  const budget = { logins: ['me'], points: {} as Record<string, number>, requests: {} as Record<string, number> }
+  const restAsks: string[] = []
+  // Each GraphQL call's timeout.
+  const timeouts: number[] = []
   on('env.get', () => ({ value: '/home/me' }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
@@ -169,18 +198,42 @@ function fakeHost(
 
       return Promise.resolve(runLog(e.argv)).then(reply => out(reply.exitCode, reply.stdout ?? '', reply.stderr))
     }
-    if (e.argv[1] === 'auth') return out(0, '  ✓ Logged in to github.com account me (keyring)\n  - Active account: true\n')
+    if (e.argv[0] === 'date') return out(0, '+0300\n')
+    if (e.argv[1] === 'auth' && e.argv[2] === 'token') return out(0, `${e.argv[e.argv.indexOf('--user') + 1]}-token\n`)
+    if (e.argv[1] === 'auth') {
+      return out(0, budget.logins.map((login, i) => `  ✓ Logged in to github.com account ${login} (keyring)\n  - Active account: ${i === 0}\n`).join(''))
+    }
+    // Who asks: another login's token, or the active one.
+    const login = e.init?.env?.GH_TOKEN?.replace(/-token$/, '') ?? budget.logins[0] ?? ''
+    if (e.argv[1] === 'api' && e.argv[2] === 'rate_limit') {
+      restAsks.push(login)
+      const one = (remaining: number, reset: number) => ({ limit: 5_000, used: 5_000 - remaining, remaining, reset: reset / 1_000 })
+      const resources = { core: one(budget.requests[login] ?? 4_900, REQUESTS_RESET), graphql: one(budget.points[login] ?? 4_000, POINTS_RESET) }
+
+      return out(0, JSON.stringify({ resources, rate: resources.core }))
+    }
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     if (e.argv[1] !== 'api') return out(1, '')
     const query = String(e.argv[4] ?? '').slice('query='.length)
     asked.push(query)
+    timeouts.push(e.init?.timeoutMs ?? 0)
     const urls: string[] = []
-    const data: Record<string, unknown> = { rateLimit: { remaining: 4000, resetAt: '2026-10-07T13:00:00Z' } }
+    const data: Record<string, unknown> = { rateLimit: { limit: 5000, remaining: budget.points[login] ?? 4000, resetAt: '2026-10-07T13:00:00Z' } }
     for (const [, i, owner, name, num] of query.matchAll(ALIAS)) {
       const url = `https://github.com/${owner}/${name}/pull/${num}`
       urls.push(url)
       const fixture = gh[url] as Record<string, unknown> | undefined
       data[`p${i}`] = fixture === undefined ? null : asGql(fixture, query)
+    }
+    const isHead = e.argv.includes('-i')
+    const blip = blips.shift()
+    if (blip !== undefined) {
+      queries.push(urls)
+      const status = blip.status ?? Number(blip.stderr.match(/HTTP (\d{3})/)?.[1] ?? 0)
+      const body = blip.body ?? '<html><body><h1>Bad Gateway</h1></body></html>'
+      const stdout = !isHead ? body : status === 0 ? '' : httpHead(`${status} Bad Gateway`, blip.headers ?? []) + body
+
+      return clock.sleep(blip.afterMs ?? 0).then(() => out(1, stdout, `${blip.stderr}\n`))
     }
     const errors: unknown[] = []
     if (query.includes('pw: repository(')) {
@@ -188,12 +241,13 @@ function fakeHost(
       if (gh.pw === undefined) errors.push({ type: 'NOT_FOUND', path: ['pw'], message: 'Could not resolve to a Repository' })
     }
     queries.push(urls)
-    const reply = out(urls.every(url => url in gh) && errors.length === 0 ? 0 : 1, JSON.stringify(errors.length === 0 ? { data } : { data, errors }))
+    const body = JSON.stringify(errors.length === 0 ? { data } : { data, errors })
+    const reply = out(urls.every(url => url in gh) && errors.length === 0 ? 0 : 1, isHead ? httpHead('200 OK', rateHeaders(budget.points[login] ?? 4_000)) + body : body)
 
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs, asked, gate }
+  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -1461,6 +1515,436 @@ test('a card with failed CI and open threads offers both, and each press keeps t
   await ui.unmount()
 })
 
+// ---- GitHub having a moment -------------------------------------------------------------
+
+const NOON = Date.parse('2026-10-07T12:00:00Z')
+const BAD_GATEWAY = { stderr: 'gh: HTTP 502' }
+
+// A session watching #13 (CI failed, nothing moving), its watch fetched at noon, where the
+// first `blips` GraphQL queries fail. Rounds then run a minute apart: 12:00:10, 12:01:10, …
+// `setup` sees the host before the session starts (its gh logins and their budgets).
+async function blipSession(
+  $: Parameters<TestBody>[0],
+  on: On,
+  blips: Blip[] = [],
+  files = new Map<string, { text: string; mtimeMs: number }>(),
+  { fixtures = GH, setup = () => undefined }: { fixtures?: Record<string, unknown>; setup?: (host: ReturnType<typeof fakeHost>) => void } = {},
+) {
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  const host = fakeHost(on, clock, fixtures, files)
+  host.blips.push(...blips)
+  setup(host)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: FAILING, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { ...host, clock, entry: () => JSON.parse(files.get(RESULTS)?.text ?? '{}').prs?.[FAILING] }
+}
+
+// What #13's card says: its error line, if any, and how old its data is.
+async function blipCard($: Parameters<TestBody>[0]) {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The innermost Text that says it (each one around it says it too).
+  const line = async (text: RegExp) => (await ui.findAll({ type: 'Text', text })).map(t => t.text).sort((a, b) => a.length - b.length)[0] ?? null
+  const said = { warning: await line(/⚠ /), checked: await line(/· checked /), isFailedShown: (await ui.find({ text: /CI FAILED/ })) !== undefined }
+  await ui.unmount()
+
+  return said
+}
+
+// The pane's gh line, a string a line, and the colour of each part that has one (the rest
+// are dim, `isDim` says).
+type Node = { type: string; props?: Record<string, unknown>; children?: unknown[] }
+const flat = (node: unknown): string => (typeof node === 'string' ? node : ((node as Node).children ?? []).map(flat).join(''))
+
+async function ghFooter($: Parameters<TestBody>[0]) {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = (((await ui.find({ key: 'gh' })) as unknown as Node | undefined)?.children ?? []) as Node[]
+  await ui.unmount()
+  const parts = rows.flatMap(row => (row.children ?? []) as Node[])
+  const lines = rows.map(flat)
+  const tones = Object.fromEntries(parts.filter(part => part.props?.color !== undefined).map(part => [flat(part), part.props?.color]))
+  const isDim = parts.every(part => part.props?.color !== undefined || part.props?.dimColor === true)
+
+  return { lines, tones, isDim }
+}
+
+test("a 502 a retry gets past leaves no trace: one retry, two seconds on", async ($, on) => {
+  const { clock, queries, blips, entry } = await blipSession($, on)
+  queries.length = 0
+  blips.push(BAD_GATEWAY)
+  // The round at 12:00:10 (the lease's 150 ms, then the 502): the retry waits its two seconds.
+  await clock.advance(9_900 + 150 + 1_900)
+  expect(queries).toEqual([[FAILING]])
+  await clock.advance(200)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  expect(entry()).toMatchObject({ at: NOON + 10_000 })
+  expect(entry().error).toBe(undefined)
+  expect(entry().failedSince).toBe(undefined)
+  expect(await blipCard($)).toMatchObject({ warning: null, isFailedShown: true })
+})
+
+test('a refusal or spent points are not asked again, and spent points wait for the reset', async ($, on) => {
+  const { clock, queries, blips, files } = await blipSession($, on)
+  queries.length = 0
+  const reset = Date.parse('2026-10-07T13:00:00Z')
+  blips.push(
+    { stderr: 'gh: Bad credentials (HTTP 401)', body: '{"message":"Bad credentials"}' },
+    {
+      stderr: 'gh: API rate limit already exceeded for user ID 1.',
+      status: 200,
+      headers: ['X-Ratelimit-Remaining: 0', `X-Ratelimit-Reset: ${reset / 1_000}`, 'X-Ratelimit-Resource: graphql'],
+      body: '{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit already exceeded for user ID 1."}]}',
+    },
+  )
+  await clock.advance(13_000)
+  expect(queries).toEqual([[FAILING]])
+  await clock.advance(60_000)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  expect(JSON.parse(files.get(RESULTS)?.text ?? '{}').nextAt).toBe(reset)
+})
+
+const ERRORS_LOG = '/home/me/.cache/pr-watch/errors.log'
+const SECONDARY_LIMIT = {
+  stderr: 'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)',
+  status: 403,
+  headers: ['Retry-After: 120', 'X-Ratelimit-Remaining: 4990', 'X-Ratelimit-Used: 10', 'X-Ratelimit-Resource: graphql'],
+  body: '{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}',
+}
+
+test("a secondary limit is not retried, and holds every session off GitHub for its retry-after", async ($, on) => {
+  const { clock, queries, blips, files, entry } = await blipSession($, on)
+  queries.length = 0
+  blips.push(SECONDARY_LIMIT)
+  await clock.advance(13_000)
+  expect(queries).toEqual([[FAILING]])
+  const held = JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  // Hit at 12:00:10.150, after the lease's wait.
+  expect(held.heldUntil).toBe(NOON + 10_150 + 120_000)
+  expect(held.nextAt).toBe(held.heldUntil)
+  // The card had data: it keeps it, untouched; the gh line says why it's not fresh.
+  expect(entry()).toMatchObject({ at: NOON })
+  expect(entry().failedSince).toBe(undefined)
+  expect(await blipCard($)).toMatchObject({ warning: null, isFailedShown: true })
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 2m'])
+  const line = JSON.parse(files.get(ERRORS_LOG)?.text.trim() ?? '{}')
+  expect(line).toMatchObject({ login: 'me', batch: 1, status: 403, class: 'secondary-limit', retryAfter: '120', remaining: '4990', used: '10', resource: 'graphql' })
+
+  // No round and no Refresh asks until the wait is over.
+  await clock.advance(100_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  await ui.unmount()
+  expect(queries).toEqual([[FAILING]])
+  // Counted down: the Refresh at 12:01:53.1 came 17.05s before the end.
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 18s'])
+  // The tick at 12:02:10 is just inside the wait; the one at 12:02:20 asks.
+  await clock.advance(20_000)
+  expect(queries).toEqual([[FAILING]])
+  await clock.advance(10_000)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  expect(entry().failedSince).toBe(undefined)
+  // The pause is gone with the hold, the budget back in its place.
+  expect((await ghFooter($)).lines).toEqual(['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'])
+})
+
+test('a secondary limit that names no wait holds a minute; a PR never read waits under the pause line, with no error of its own', async ($, on) => {
+  const noWait = { ...SECONDARY_LIMIT, headers: SECONDARY_LIMIT.headers.filter(line => !line.startsWith('Retry-After')) }
+  // The watch's own fetch, at noon, is the one held.
+  const { clock, queries, files, entry } = await blipSession($, on, [noWait])
+  expect(queries).toEqual([[FAILING]])
+  expect(JSON.parse(files.get(RESULTS)?.text ?? '{}').heldUntil).toBe(NOON + 60_000)
+  expect(entry()).toBe(undefined)
+  expect(await blipCard($)).toMatchObject({ warning: null, checked: null })
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 1m'])
+  await clock.advance(55_000)
+  expect(queries).toEqual([[FAILING]])
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 10s'])
+  // The round at 12:01:00 asks, and the card fills.
+  await clock.advance(10_000)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  expect(await blipCard($)).toMatchObject({ warning: null, isFailedShown: true })
+})
+
+test('each failed call goes to errors.log as a line, the last 200 kept', async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  files.set(ERRORS_LOG, { text: Array.from({ length: 200 }, (_, i) => JSON.stringify({ old: i })).join('\n') + '\n', mtimeMs: 0 })
+  const { clock, blips } = await blipSession($, on, [], files)
+  blips.push(BAD_GATEWAY, { stderr: 'Post "https://api.github.com/graphql": EOF' })
+  await clock.advance(13_000)
+  const lines = (files.get(ERRORS_LOG)?.text ?? '').trimEnd().split('\n').map(line => JSON.parse(line))
+  expect(lines).toHaveLength(200)
+  expect(lines[0]).toEqual({ old: 2 })
+  expect(lines.slice(-2)).toMatchObject([
+    { at: '2026-10-07T12:00:10.150Z', login: 'me', batch: 1, status: 502, class: 'timeout', remaining: null, error: 'gh: HTTP 502' },
+    { at: '2026-10-07T12:00:12.150Z', status: null, class: 'timeout', error: 'Post "https://api.github.com/graphql": EOF' },
+  ])
+})
+
+test('a 504 that comes late in the lease is not retried, so the round ends inside it', async ($, on) => {
+  const { clock, queries, blips, entry } = await blipSession($, on)
+  queries.length = 0
+  blips.push({ stderr: 'gh: HTTP 504', afterMs: 25_000 })
+  await clock.advance(40_000)
+  expect(queries).toEqual([[FAILING]])
+  expect(entry().failedSince).toBe(NOON + 10_000)
+})
+
+test('a round whose retry fails too keeps the last data, and the card says nothing yet', async ($, on) => {
+  const { clock, queries, blips, entry } = await blipSession($, on)
+  queries.length = 0
+  blips.push(BAD_GATEWAY, BAD_GATEWAY)
+  await clock.advance(13_000)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  // Its data and time are the watch's, at noon.
+  expect(entry()).toMatchObject({ at: NOON, failedSince: NOON + 10_000 })
+  expect(entry().pr.number).toBe(13)
+  expect(entry().error).toBe(undefined)
+  expect(await blipCard($)).toEqual({ warning: null, checked: ' · checked 12s ago', isFailedShown: true })
+})
+
+test('a failure that lasts two minutes shows on the card, beside how old its data is, and goes once GitHub answers', async ($, on) => {
+  // Three rounds in a row fail, retries and all: 12:00:10, 12:01:10, 12:02:10.
+  const { clock, blips, entry } = await blipSession($, on, [])
+  blips.push(...Array.from({ length: 6 }, () => BAD_GATEWAY))
+  await clock.advance(73_000)
+  expect((await blipCard($)).warning).toBe(null)
+  await clock.advance(60_000)
+  expect(entry()).toMatchObject({ at: NOON, failedSince: NOON + 10_000, error: 'gh: HTTP 502' })
+  expect(await blipCard($)).toEqual({ warning: '⚠ gh: HTTP 502', checked: ' · checked 2m ago', isFailedShown: true })
+
+  // The next round gets through: the error goes, and the data is fresh.
+  await clock.advance(60_000)
+  expect(entry().failedSince).toBe(undefined)
+  expect(await blipCard($)).toMatchObject({ warning: null, checked: ' · checked just now' })
+})
+
+test("a PR whose first fetch fails says so at once, and the next round asks again, with no five-minute skip", async ($, on) => {
+  const { clock, queries, entry } = await blipSession($, on, [BAD_GATEWAY, BAD_GATEWAY])
+  await clock.advance(2_500)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+  expect(entry()).toEqual({ at: NOON, error: 'gh: HTTP 502' })
+  expect((await blipCard($)).warning).toBe('⚠ gh: HTTP 502')
+  // The round at 12:00:10 asks it again, and gets through.
+  await clock.advance(10_000)
+  expect(queries).toEqual([[FAILING], [FAILING], [FAILING]])
+  expect(entry().pr.number).toBe(13)
+  expect(await blipCard($)).toMatchObject({ warning: null, isFailedShown: true })
+})
+
+test('a PR no gh account can see is left out of rounds for five minutes, then asked again', async ($, on) => {
+  const GONE = 'https://github.com/octocat/gone/pull/4'
+  const { clock, queries, files } = await blipSession($, on)
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [GONE] } as never)
+  await clock.advance(100)
+  const gone = () => JSON.parse(files.get(RESULTS)?.text ?? '{}').prs?.[GONE]
+  expect(gone()).toMatchObject({ error: 'Not found, or no gh account can see it', isUnreachable: true })
+  queries.length = 0
+  // Rounds at 12:00:10 … 12:04:10 leave it out; the one at 12:05:10 asks.
+  await clock.advance(4 * 60_000 + 10_000)
+  expect(queries.flat()).not.toContain(GONE)
+  await clock.advance(60_000)
+  expect(queries.at(-1)).toContain(GONE)
+})
+
+test("an older version's failed entry still shows, and a round on top of it is quiet", async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const { clock, blips, entry } = await blipSession($, on, [], files)
+  // A session on a version before this one ran a round that failed: its entry has the error
+  // and the round's time, and no failedSince.
+  const shared = JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  const at = clock.now()
+  const older = { ...shared, fetchedAt: at, nextAt: at + 60_000, prs: { [FAILING]: { ...shared.prs[FAILING], at, error: 'gh: HTTP 502' } } }
+  files.set(RESULTS, { text: JSON.stringify(older), mtimeMs: at })
+  await clock.advance(10_000)
+  expect((await blipCard($)).warning).toBe('⚠ gh: HTTP 502')
+
+  // This version's next round fails too: counted from the older one's failure, a minute is
+  // not yet two, so the card is quiet again.
+  blips.push(BAD_GATEWAY, BAD_GATEWAY)
+  await clock.advance(63_000)
+  expect(entry()).toMatchObject({ at, failedSince: at })
+  expect(entry().error).toBe(undefined)
+  expect((await blipCard($)).warning).toBe(null)
+})
+
+test('a round drops the PRs no live session watches once an hour old; a watch or Refresh drops nothing', async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const old = (hours: number) => ({ at: NOON - hours * 3_600_000, pr: GH[MERGED] })
+  const LIVE_OLD = 'https://github.com/acme/api/pull/1'
+  const DEAD_OLD = 'https://github.com/acme/api/pull/2'
+  const DEAD_RECENT = 'https://github.com/acme/api/pull/3'
+  const UNREACHABLE = 'https://github.com/octocat/gone/pull/4'
+  // Another session, alive, watches a PR that merged three hours ago.
+  files.set('/home/me/.cache/pr-watch/sessions/other.json', { text: JSON.stringify({ urls: [LIVE_OLD] }), mtimeMs: NOON })
+  const prs = { [LIVE_OLD]: old(3), [DEAD_OLD]: old(2), [DEAD_RECENT]: old(0.5), [UNREACHABLE]: { at: NOON - 7_200_000, error: 'Not found, or no gh account can see it' } }
+  files.set(RESULTS, { text: JSON.stringify({ fetchedAt: 0, nextAt: 0, prs, accounts: {}, rate: null }), mtimeMs: NOON })
+  const { clock, queries } = await blipSession($, on, [], files)
+  const kept = () => Object.keys(JSON.parse(files.get(RESULTS)?.text ?? '{}').prs).sort()
+
+  // The watch's own fetch is no round.
+  expect(kept()).toEqual([DEAD_OLD, DEAD_RECENT, FAILING, LIVE_OLD, UNREACHABLE].sort())
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  await ui.unmount()
+  expect(kept()).toEqual([DEAD_OLD, DEAD_RECENT, FAILING, LIVE_OLD, UNREACHABLE].sort())
+
+  queries.length = 0
+  await clock.advance(10_500)
+  // The merged PR is asked nothing, and kept: a live session still shows it.
+  expect(queries).toEqual([[FAILING]])
+  expect(kept()).toEqual([DEAD_RECENT, FAILING, LIVE_OLD].sort())
+})
+
+// ---- The gh line ------------------------------------------------------------------------
+
+test("the gh line: the poll's points at once, REST's requests once a round asks, dim while healthy", async ($, on) => {
+  const { clock, restAsks, files } = await blipSession($, on)
+  // The watch's own fetch said the points, and asked nothing more.
+  expect(restAsks).toEqual([])
+  expect(await ghFooter($)).toEqual({ lines: ['gh  me 4k/5k GraphQL · resets 16:00'], tones: {}, isDim: true })
+  await clock.advance(10_500)
+  expect(restAsks).toEqual(['me'])
+  expect(await ghFooter($)).toEqual({ lines: ['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'], tones: {}, isDim: true })
+  const { rates, rate } = JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  expect(rates.me).toEqual({
+    graphql: { limit: 5_000, remaining: 4_000, resetAt: POINTS_RESET, seenAt: NOON + 10_150 },
+    core: { limit: 5_000, remaining: 4_900, resetAt: REQUESTS_RESET, seenAt: NOON + 10_150 },
+    askedAt: NOON + 10_000,
+  })
+  // What an older version reads.
+  expect(rate).toEqual({ limit: 5_000, remaining: 4_000, resetAt: '2026-10-07T13:00:00.000Z' })
+})
+
+test('REST is asked at most every five minutes per login, and only by a round', async ($, on) => {
+  const { clock, restAsks } = await blipSession($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  await ui.unmount()
+  expect(restAsks).toEqual([])
+  // Rounds at 12:00:10, 12:01:10 … 12:04:10: the first asks.
+  await clock.advance(10_500 + 4 * 60_000)
+  expect(restAsks).toEqual(['me'])
+  // 12:05:10: five minutes on.
+  await clock.advance(60_000)
+  expect(restAsks).toEqual(['me', 'me'])
+})
+
+test('below 20% of the limit a bucket is a warning, below 5% an error, and so is its reset', async ($, on) => {
+  const { clock, budget } = await blipSession($, on)
+  budget.points.me = 900
+  await clock.advance(10_500)
+  expect(await ghFooter($)).toMatchObject({
+    lines: ['gh  me 900/5k GraphQL · 4.9k/5k REST · resets 16:00'],
+    tones: { '900/5k GraphQL': 'warning', 'resets 16:00': 'warning' },
+  })
+  budget.points.me = 4_000
+  budget.requests.me = 200
+  await clock.advance(5 * 60_000)
+  expect(await ghFooter($)).toMatchObject({
+    lines: ['gh  me 4k/5k GraphQL · 200/5k REST · resets 16:30'],
+    tones: { '200/5k REST': 'error', 'resets 16:30': 'error' },
+  })
+})
+
+const SPENT = 'https://github.com/hubot/app/pull/5'
+
+test("one login out of points holds back only its own PRs: the other's are polled as ever", async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  // hubot's owner is read as hubot; acme, by the active login.
+  files.set(RESULTS, { text: JSON.stringify({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: { hubot: 'hubot' }, rate: null }), mtimeMs: NOON })
+  const { clock, queries, restAsks, budget } = await blipSession($, on, [], files, {
+    fixtures: { ...GH, [SPENT]: pr(SPENT, {}) },
+    setup: host => {
+      host.budget.logins = ['octocat', 'hubot']
+      host.budget.points.hubot = 0
+    },
+  })
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [SPENT] } as never)
+  await clock.advance(100)
+  const shared = () => JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  // Read once, its points spent: 0 left until 13:00.
+  expect(shared().prs[SPENT].at).toBe(NOON + 100)
+  queries.length = 0
+  await clock.advance(10_000)
+  // The round at 12:00:10 asks octocat's PR alone, and runs again a minute on, not at 13:00.
+  expect(queries).toEqual([[FAILING]])
+  expect(shared().nextAt).toBe(NOON + 70_000)
+  expect(shared().prs[SPENT]).toMatchObject({ at: NOON + 100 })
+  expect(shared().prs[SPENT].failedSince).toBe(undefined)
+  // REST is asked for both logins, each with its own token.
+  expect(restAsks).toEqual(['octocat', 'hubot'])
+  expect(await ghFooter($)).toMatchObject({
+    lines: ['gh  octocat 4k/5k GraphQL · 4.9k/5k REST', '    hubot 0/5k GraphQL · 4.9k/5k REST · resets 16:00'],
+    tones: { '0/5k GraphQL': 'error', 'resets 16:00': 'error' },
+  })
+  await clock.advance(60_000)
+  expect(queries).toEqual([[FAILING], [FAILING]])
+
+  // Past hubot's reset, its PR is asked again.
+  budget.points.hubot = 5_000
+  await clock.advance(Date.parse('2026-10-07T13:00:10Z') - clock.now() + 500)
+  expect(queries.at(-1)).toContain(SPENT)
+})
+
+test('every login the round needs out of points: the round waits for the first reset', async ($, on) => {
+  const { clock, queries, files } = await blipSession($, on, [], new Map(), { setup: host => void (host.budget.points.me = 100) })
+  queries.length = 0
+  await clock.advance(10_500)
+  // The watch's fetch saw 100 left: the round asks nothing, and waits for 13:00.
+  expect(queries).toEqual([])
+  expect(JSON.parse(files.get(RESULTS)?.text ?? '{}').nextAt).toBe(POINTS_RESET)
+})
+
+test('a round leaves a batch it has no time for to the next round, untouched, and each call takes no more than is left', async ($, on) => {
+  const many = Array.from({ length: 21 }, (_, i) => `https://github.com/acme/app/pull/${200 + i}`)
+  const fixtures = { ...GH, ...Object.fromEntries(many.map(url => [url, pr(url, {})])) }
+  const { clock, queries, files, blips, timeouts } = await blipSession($, on, [], new Map(), { fixtures })
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: many } as never)
+  await clock.advance(100)
+  queries.length = 0
+  timeouts.length = 0
+  // The round at 12:00:10: its first batch fails slowly, twice. Started at 12:00:10.150 it
+  // may take 20s; the retry, at 12:00:30.150, the 8.85s left of the lease; by 12:00:36.150
+  // the 2.85s left are too few for the second batch.
+  blips.push({ ...BAD_GATEWAY, afterMs: 18_000 }, { ...BAD_GATEWAY, afterMs: 6_000 })
+  await clock.advance(30_000)
+  const first = queries[0] ?? []
+  expect(first).toHaveLength(20)
+  expect(queries).toEqual([first, first])
+  expect(timeouts).toEqual([20_000, 8_850])
+  const prs = JSON.parse(files.get(RESULTS)?.text ?? '{}').prs
+  const late = [FAILING, ...many].filter(url => !first.includes(url))
+  expect(late).toHaveLength(2)
+  for (const url of late) {
+    expect(prs[url].pr.number).toBe(Number(url.split('/').pop()))
+    expect(prs[url].failedSince).toBe(undefined)
+  }
+  // The next round, at 12:01:10, asks them first.
+  await clock.advance(40_000)
+  expect(queries[2]?.slice(0, 2)).toEqual(late)
+})
+
+test("an older version's results.json still reads, and its low `rate` holds nothing back", async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const older = { fetchedAt: NOON, nextAt: NOON + 30_000, prs: { [FAILING]: { at: NOON, pr: GH[FAILING] } }, accounts: {}, rate: { remaining: 100, resetAt: '2026-10-07T13:00:00Z' } }
+  files.set(RESULTS, { text: JSON.stringify(older), mtimeMs: NOON })
+  const { clock, queries } = await blipSession($, on, [], files)
+  expect((await blipCard($)).isFailedShown).toBe(true)
+  queries.length = 0
+  // Its round, due at 12:00:30, runs then: not at the old rate's 13:00.
+  await clock.advance(30_500)
+  expect(queries).toEqual([[FAILING]])
+  const shared = JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  expect(shared.rates.me.graphql.remaining).toBe(4_000)
+  expect(shared.rate.remaining).toBe(4_000)
+  expect((await ghFooter($)).lines).toEqual(['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'])
+})
+
 // ---- The band layout ----------------------------------------------------------------------
 
 const BAND = {
@@ -1691,4 +2175,46 @@ test("Fix with Claude in the band drafts the most urgent PR's failure; where it 
   await ui.press({ key: 'band-handoff' })
   expect(opens).toEqual([{ id: 'pr-watch', focus: true }])
   await ui.unmount()
+})
+
+test('the band says the gh budget only once it runs low, short where the line is short', IN_BAND, async ($, on) => {
+  const { budget, clock } = await bandSession($, on, [FAILING])
+  const last = async (bodyColumns = 75) => {
+    const ui = await $.ui.mount({ ...bandAt({ bodyColumns }), surface: 'terminal' })
+    const line = lines(await ui.drawn()).at(-1)
+    await ui.unmount()
+
+    return line
+  }
+  expect(await last()).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude')
+  budget.points.me = 900
+  await clock.advance(10_500)
+  expect(await last()).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18% · resets 16:00')
+  expect(await last(60)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18%')
+  expect(await last(50)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude')
+})
+
+test('a secondary limit: the band says the pause, counted down, and the line goes with the hold', IN_BAND, async ($, on) => {
+  const { blips, clock, queries } = await bandSession($, on, [FAILING])
+  const drawn = async () => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const said = lines(await ui.drawn())
+    await ui.unmount()
+
+    return said
+  }
+  // The round at 12:00:10 hits it, at 12:00:10.150: held until 12:02:10.150.
+  blips.push(SECONDARY_LIMIT)
+  await clock.advance(10_500)
+  // The pause before the hand-off, where both won't fit.
+  expect(await drawn()).toEqual(['✗ #13 Retry uploads with exponential backoff · 1 check failing', 'o: Open pane  r: Refresh  ⏸ GitHub rate limit · polling resumes in 2m'])
+  await clock.advance(30_000)
+  expect((await drawn()).at(-1)).toBe('o: Open pane  r: Refresh  ⏸ GitHub rate limit · polling resumes in 1m 31s')
+  // Gone the moment the hold ends, before any tick; the round at 12:02:20 then asks.
+  queries.length = 0
+  await clock.advance(130_300 - 40_600)
+  expect((await drawn()).at(-1)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude')
+  expect(queries).toEqual([])
+  await clock.advance(10_000)
+  expect(queries).toEqual([[FAILING]])
 })

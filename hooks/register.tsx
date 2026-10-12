@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Busy, HandoffAsk, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
+import type { Busy, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
 import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
 import {
   MERGE_LABEL,
@@ -24,8 +24,8 @@ import {
   stepIndex,
   touched,
 } from './pr'
-import { buildQuery, checksQuery, chunks, parseChecks, parseReply } from './batch'
-import type { RateLimit } from './batch'
+import { appendLog, buildQuery, callBudget, checksQuery, chunks, failureOf, logLine, parseChecks, parseHttp, parseReply, rateOf, retryAfterOf } from './batch'
+import type { CallFailure, CallLog, Http, RateLimit } from './batch'
 import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, threadsQuery } from './address'
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
@@ -33,6 +33,10 @@ import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine 
 import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
+import { NOT_FOUND, failedEntry, isUnreachable, keptEntries } from './cache'
+import type { Entry } from './cache'
+import { bandNote, bucketOf, ghLines, isRestDue, legacyRate, lowUntil, offsetOf, restOf, roundWaitsUntil, withSeen } from './rate'
+import type { Rates } from './rate'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -51,6 +55,8 @@ const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
 // A newer pr-watch than this one, for the footer.
 const newer = atom({ plugin: 'pr-watch', key: 'newer' } as const, null)
+// GitHub's budget per login and a hold, for the gh line.
+const limits = atom({ plugin: 'pr-watch', key: 'limits' } as const, { logins: [], heldUntil: 0 })
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -67,6 +73,8 @@ let isPaneDrawn = false
 // The band's instance, and the PRs whose spinner it last drew, so the animation blits there too.
 let bandId: string | null = null
 const bandSpins = new Set<string>()
+// The end of the hold a timer is set for, so the pause line goes the moment it ends, ticks or not.
+let pauseEndsAt = 0
 
 // Rows kept by an older version of this mod lack the newer fields.
 function full(pr: TrackedPr): TrackedPr {
@@ -87,17 +95,21 @@ const VERDICT_COLOUR: Record<Verdict, 'success' | 'error' | 'suggestion' | undef
 // fetches every live session's PRs in one batched query, and the rest read results.json.
 // So N sessions cost one GitHub call per round, not N.
 
-type Entry = { at: number; pr?: GhPr; error?: string }
 type Shared = {
   fetchedAt: number
   nextAt: number
   prs: Record<string, Entry>
   // Which gh login sees an owner's private repos (a login, never a token).
   accounts: Record<string, string>
+  // What older versions read; this one keeps it as legacyRate says (rate.ts), and reads `rates`.
   rate: RateLimit | null
+  // GitHub's hourly limits per gh login, as the last round and watch saw them (rate.ts).
+  rates: Rates
   // pr-watch's newest version as the last check found it (null: none read yet), and when
   // that check rode a round.
   latest: { version: string | null; checkedAt: number }
+  // Until when a secondary limit holds every session off GitHub (absent: none yet).
+  heldUntil?: number
 }
 
 // How often a round runs while some PR moves, and otherwise: the `poll_active_seconds` and
@@ -113,9 +125,14 @@ const seconds = (value: unknown, fallback: number) =>
 // A session whose file has not been touched for this long has exited.
 const ALIVE_MS = 60_000
 const LEASE_MS = 30_000
-// A PR no account can see is asked about again only this often.
-const UNREACHABLE_MS = 300_000
-const LOW_RATE = 300
+// A batch that failed on GitHub having a moment (a `timeout`, batch.ts) is asked once more,
+// RETRY_MS on, while the lease has time for it (callBudget, as for every call of a round).
+const RETRY_MS = 2_000
+const GH_MS = 20_000
+// /rate_limit answers at once, or not worth waiting for.
+const REST_CALL_MS = 5_000
+// How long every session holds off after a secondary limit that names no retry-after.
+const LIMIT_WAIT_MS = 60_000
 const PRUNE_MS = 86_400_000
 
 // Survives /clear (the module stays loaded), unlike the session id.
@@ -123,12 +140,13 @@ const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(
 let homeDir: string | null | undefined
 let dir: string | null = null
 let loginsCache: Promise<{ active: string; others: string[] }> | null = null
+let zone: { at: number; offset: Promise<number> } | null = null
 const tokens = new Map<string, Promise<string | null>>()
 let prunedAt = 0
 
-const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, latest: { version: null, checkedAt: 0 } })
+const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, rates: {}, latest: { version: null, checkedAt: 0 } })
 
-async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = 20_000) {
+async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = GH_MS) {
   return $.process.run(['gh', ...argv], {
     cwd,
     timeoutMs,
@@ -236,17 +254,129 @@ async function tokenFor($: EngineInterface, login: string): Promise<string | nul
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
-// `withLatest`: the first batch also asks for pr-watch's newest version.
-async function query($: EngineInterface, refs: readonly PrRef[], token: string | null, withLatest = false) {
-  const out = { found: new Map<string, GhPr>(), missing: [] as PrRef[], failed: new Map<string, string>(), rate: null as RateLimit | null, latest: null as string | null }
-  for (const [i, part] of chunks(refs).entries()) {
-    const res = await gh($, ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`], token)
-    const reply = parseReply(res.stdout, res.stderr, part)
-    if (reply.error !== null) for (const ref of part) out.failed.set(ref.url, reply.error)
+// The person's time zone, minutes east of UTC, for the gh line's reset time: `date +%z`,
+// asked again each ZONE_MS, so a session that lives through a clock change follows it; where
+// it won't say, what the runtime thinks.
+const ZONE_MS = 3_600_000
+
+async function zoneOffset($: EngineInterface): Promise<number> {
+  const at = await $.clock.now()
+  const guess = () => -new Date().getTimezoneOffset()
+  if (zone === null || at - zone.at >= ZONE_MS) {
+    zone = {
+      at,
+      offset: $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).then(
+        res => offsetOf(res.stdout) ?? guess(),
+        () => guess(),
+      ),
+    }
+  }
+
+  return zone.offset
+}
+
+// One batch's call, timed, and what GitHub said: the status and headers, and the reply.
+async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string | null, timeoutMs = GH_MS) {
+  const startedAt = await $.clock.now()
+  // A call past its timeout throws: it fails as a timeout, rather than losing the round.
+  const res = await gh($, argv, token, undefined, timeoutMs).catch(() => ({
+    stdout: '',
+    stderr: `gh api graphql did not finish: timeout after ${Math.round(timeoutMs / 1_000)}s`,
+  }))
+  const http = parseHttp(res.stdout)
+
+  return { http, reply: parseReply(http.body, res.stderr, part), ms: (await $.clock.now()) - startedAt }
+}
+
+// Why a failed call failed (null: it didn't), logged to errors.log on the way.
+async function failureIn($: EngineInterface, login: string, size: number, call: { http: Http; reply: { error: string | null }; ms: number }) {
+  if (call.reply.error === null) return null
+  const failure: CallFailure = failureOf(call.reply.error, call.http)
+  await logFailure($, { login: login || (await logins($)).active, size, ms: call.ms, http: call.http, failure, error: call.reply.error })
+
+  return failure
+}
+
+// Best effort: a log that can't be read starts over, and one that can't be written is skipped.
+async function logFailure($: EngineInterface, call: CallLog) {
+  const path = `${await root($)}/errors.log`
+  let log = ''
+  try {
+    log = String(await $.fs.read(path))
+  } catch {
+    // None yet.
+  }
+  try {
+    await $.fs.write(path, appendLog(log, logLine(await $.clock.now(), call)))
+  } catch {
+    // Nothing to do: the log is for the person reading it later.
+  }
+}
+
+// `withLatest`: the first batch also asks for pr-watch's newest version. `until`: when the
+// lease ends (a second kept to write the results). A batch starts only with time left before
+// it and may take no more than is left (callBudget); the rest are `left` for the next round,
+// as they were. A secondary limit stops the asking (`waitMs`: how long every session holds
+// off), and spent points stop this login's. Neither is a card's error: the gh line says it
+// (rate.ts), and the PRs keep what they have.
+async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
+  const token = await tokenFor($, login)
+  const out = {
+    found: new Map<string, GhPr>(),
+    missing: [] as PrRef[],
+    failed: new Map<string, string>(),
+    left: [] as PrRef[],
+    // The points as the last reply said, and when.
+    rate: null as RateLimit | null,
+    rateAt: 0,
+    latest: null as string | null,
+    isLatestAsked: false,
+    waitMs: null as number | null,
+  }
+  const parts = chunks(refs)
+  for (const [i, part] of parts.entries()) {
+    const budget = callBudget(until, await $.clock.now(), GH_MS)
+    if (budget === null) {
+      out.left.push(...parts.slice(i).flat())
+
+      break
+    }
+    const argv = ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`, '-i']
+    out.isLatestAsked ||= withLatest && i === 0
+    let call = await askBatch($, part, argv, token, budget)
+    let failure = await failureIn($, login, part.length, call)
+    if (failure === 'timeout') {
+      const retry = callBudget(until, (await $.clock.now()) + RETRY_MS, GH_MS)
+      if (retry !== null) {
+        await $.clock.sleep(RETRY_MS)
+        call = await askBatch($, part, argv, token, retry)
+        failure = await failureIn($, login, part.length, call)
+      }
+    }
+    const { http, reply } = call
+    const isLimit = failure === 'secondary-limit' || failure === 'primary-limit'
+    if (reply.error !== null && !isLimit) for (const ref of part) out.failed.set(ref.url, reply.error)
     for (const [url, pr] of reply.found) out.found.set(url, pr)
     out.missing.push(...reply.missing)
-    out.rate = reply.rate ?? out.rate
+    const rate = rateOf(http.headers) ?? reply.rate
+    if (rate !== null) {
+      out.rate = rate
+      out.rateAt = await $.clock.now()
+    }
     out.latest = reply.latest ?? out.latest
+    if (failure === 'secondary-limit') {
+      const after = retryAfterOf(http.headers)
+      out.waitMs = after !== null ? after * 1_000 : LIMIT_WAIT_MS
+
+      break
+    }
+    // Spent points: the login's other batches would only be refused the same way. This one
+    // went unanswered too, so it is left as well, never read as "not found".
+    if (failure === 'primary-limit') {
+      out.left.push(...parts.slice(i).flat())
+
+      break
+    }
   }
 
   return out
@@ -254,44 +384,99 @@ async function query($: EngineInterface, refs: readonly PrRef[], token: string |
 
 // One batched query per gh account; PRs the expected account cannot see are retried with
 // each other logged-in account, and the one that sees them is remembered per owner. The
-// newest version, when asked, rides the very first batch only; `asked` says whether it went.
-async function fetchRefs($: EngineInterface, refs: readonly PrRef[], accounts: Record<string, string>, withLatest = false) {
+// newest version, when asked, rides the first batch that goes; `asked` says whether it went.
+// On a round (`isRound`), a login whose points are low (rate.ts) is left out until its reset,
+// its PRs keeping what they have, and the others are asked as ever; a watch or a Refresh, one
+// call the person asked for, still goes. `rates` goes in as known and comes back with
+// the points each login's replies said; `needed`: the logins these PRs are polled as.
+async function fetchRefs(
+  $: EngineInterface,
+  refs: readonly PrRef[],
+  accounts: Record<string, string>,
+  rates: Rates,
+  at: number,
+  until: number,
+  isRound: boolean,
+  withLatest = false,
+) {
   const found = new Map<string, GhPr>()
-  const errors = new Map<string, string>()
-  let rate: RateLimit | null = null
+  const errors = new Map<string, { error: string; isMiss: boolean }>()
+  let seen = rates
   let latest: string | null = null
   let isAsking = withLatest
+  let waitMs: number | null = null
+  const { active, others } = await logins($)
+  // The active account polls the owners no other account was found for.
+  const nameOf = (login: string) => login || active
+  const isLow = (login: string) => isRound && lowUntil(seen, login, at) !== null
+  const saw = (login: string, r: { rate: RateLimit | null; rateAt: number }) => {
+    const graphql = bucketOf(r.rate, r.rateAt)
+    if (graphql !== null) seen = withSeen(seen, nameOf(login), { graphql })
+  }
   const byLogin = new Map<string, PrRef[]>()
   for (const ref of refs) byLogin.set(accounts[ownerOf(ref)] ?? '', [...(byLogin.get(accounts[ownerOf(ref)] ?? '') ?? []), ref])
+  const needed = [...new Set([...byLogin.keys()].map(nameOf))]
 
   let missing: PrRef[] = []
   for (const [login, group] of byLogin) {
-    const r = await query($, group, await tokenFor($, login), isAsking)
-    isAsking = false
+    if (waitMs !== null) break
+    if (isLow(nameOf(login))) continue
+    const r = await query($, group, login, until, isAsking)
+    if (r.isLatestAsked) isAsking = false
+    waitMs = r.waitMs
+    saw(login, r)
     r.found.forEach((pr, url) => found.set(url, pr))
-    r.failed.forEach((err, url) => errors.set(url, err))
+    r.failed.forEach((error, url) => errors.set(url, { error, isMiss: false }))
     missing.push(...r.missing)
-    rate = r.rate ?? rate
     latest = r.latest ?? latest
   }
-  if (missing.length > 0) {
-    const { active, others } = await logins($)
+  if (missing.length > 0 && waitMs === null) {
+    // "Not found" only once every other account was asked and answered: one that failed, ran
+    // out of time or is low on points might see them yet.
+    let isSure = true
     for (const login of [active, ...others]) {
       const untried = missing.filter(ref => (accounts[ownerOf(ref)] ?? '') !== login && (login !== active || ownerOf(ref) in accounts))
       if (untried.length === 0) continue
-      const r = await query($, untried, await tokenFor($, login))
+      if (isLow(login)) {
+        isSure = false
+
+        continue
+      }
+      const r = await query($, untried, login, until)
+      waitMs = r.waitMs
+      saw(login, r)
+      if (r.failed.size > 0 || r.left.length > 0) isSure = false
       r.found.forEach((pr, url) => {
         found.set(url, pr)
         const ref = untried.find(x => x.url === url)
         if (ref !== undefined) accounts[ownerOf(ref)] = login
       })
       missing = missing.filter(ref => !r.found.has(ref.url))
-      if (missing.length === 0) break
+      if (missing.length === 0 || waitMs !== null) break
     }
-    for (const ref of missing) errors.set(ref.url, 'Not found, or no gh account can see it')
+    // Held by a secondary limit, the rest were not all asked: they wait, as they were.
+    if (waitMs === null && isSure) for (const ref of missing) errors.set(ref.url, { error: NOT_FOUND, isMiss: true })
   }
 
-  return { found, errors, rate, latest, asked: withLatest && refs.length > 0 }
+  return { found, errors, rates: seen, needed, latest, waitMs, asked: withLatest && !isAsking }
+}
+
+// GitHub's /rate_limit for each logged-in login once REST_MS is up (rate.ts): REST's requests,
+// and the points again, for the gh line. It counts against no limit. Only a round asks, in
+// what is left of its lease, never every session; asked counts as checked, answered or not.
+async function askRest($: EngineInterface, rates: Rates, at: number, until: number): Promise<Rates> {
+  const { active, others } = await logins($)
+  let seen = rates
+  for (const login of [...new Set([active, ...others])]) {
+    if (!isRestDue(seen, login, at)) continue
+    const budget = callBudget(until, await $.clock.now(), REST_CALL_MS)
+    if (budget === null) break
+    const res = await gh($, ['api', 'rate_limit'], await tokenFor($, login), undefined, budget).catch(() => null)
+    const read = res !== null && res.exitCode === 0 ? restOf(res.stdout, await $.clock.now()) : null
+    seen = withSeen(seen, login, { ...read, askedAt: at })
+  }
+
+  return seen
 }
 
 const refFromUrl = (url: string): PrRef | null => {
@@ -300,29 +485,45 @@ const refFromUrl = (url: string): PrRef | null => {
   return m === null ? null : { url, repo: m[1] ?? '', number: Number(m[2]) }
 }
 
-// Fetches `refs` now and merges them into the shared results, which it returns.
-async function publish($: EngineInterface, refs: readonly PrRef[], at: number, isRound = false): Promise<Shared> {
+// Fetches `refs` now and merges them into the shared results, which it returns. `live`, on a
+// round: the PRs live sessions watch; the round drops the others once they are old.
+async function publish($: EngineInterface, refs: readonly PrRef[], at: number, live?: ReadonlySet<string>): Promise<Shared> {
+  const isRound = live !== undefined
   const before = await readShared($)
+  // Held by a secondary limit: no round, no Refresh, no new watch asks until the wait is over.
+  if ((before.heldUntil ?? 0) > at) return before
+  const until = at + LEASE_MS - 1_000
   // A round asks for the newest version too, once the last check is CHECK_MS old.
   const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
-  const { found, errors, rate, latest, asked } = await fetchRefs($, refs, before.accounts, withLatest)
+  const { found, errors, rates, needed, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, before.rates, at, until, isRound, withLatest)
+  // REST's count rides a round, never a watch or a Refresh, nor a round a limit stopped.
+  const seen = isRound && waitMs === null ? await askRest($, rates, at, until) : rates
   // Re-read: another session may have written while this one was asking GitHub.
   const shared = await readShared($)
   shared.accounts = { ...shared.accounts, ...before.accounts }
   found.forEach((pr, url) => (shared.prs[url] = { at, pr }))
-  errors.forEach((error, url) => (shared.prs[url] = { ...shared.prs[url], at, error }))
-  shared.rate = rate ?? shared.rate
+  // A PR with data keeps it through a failure, and its card says so only once it lasts.
+  errors.forEach(({ error, isMiss }, url) => (shared.prs[url] = failedEntry(shared.prs[url], error, at, isMiss)))
+  // Each login's latest sighting wins, whichever session made it.
+  for (const [login, rate] of Object.entries(seen)) shared.rates = withSeen(shared.rates, login, rate)
+  shared.rate = legacyRate(shared.rates) ?? shared.rate
   // Asked is checked, answered or not: a check that fails waits as long as one that didn't,
   // so it never rides every round. An unanswered one keeps the version known before.
   if (asked) shared.latest = { version: latest ?? shared.latest?.version ?? null, checkedAt: at }
   if (isRound) {
+    shared.prs = keptEntries(shared.prs, live, at)
     const isMoving = [...found.values()].some(pr => derive(pr).isMoving)
     shared.fetchedAt = at
     shared.nextAt = at + (isMoving ? pace.fastMs : pace.slowMs)
-    if (shared.rate !== null && shared.rate.remaining < LOW_RATE) {
-      shared.nextAt = Math.max(shared.nextAt, Date.parse(shared.rate.resetAt) || 0)
-    }
+    // Only once every login the round needs is low does the round itself wait, for the first
+    // reset; one spent login holds back its own PRs alone.
+    const resetAt = roundWaitsUntil(shared.rates, needed, at)
+    if (resetAt !== null) shared.nextAt = Math.max(shared.nextAt, resetAt)
   }
+  // A secondary limit: no round, and no Refresh, until GitHub's wait is over. A hold another
+  // session set while this one asked stands too: this round's nextAt never cuts it short.
+  if (waitMs !== null) shared.heldUntil = Math.max(shared.heldUntil ?? 0, (await $.clock.now()) + waitMs)
+  shared.nextAt = Math.max(shared.nextAt, shared.heldUntil ?? 0)
   await writeJson($, `${await root($)}/results.json`, shared)
 
   return shared
@@ -335,16 +536,19 @@ async function tick($: EngineInterface, own: readonly PrRef[], at: number): Prom
   if (at < shared.nextAt || !(await takeLease($, at))) return shared
   try {
     const urls = new Set([...(await liveUrls($, at)), ...own.map(ref => ref.url)])
-    const due = [...urls].flatMap(url => {
-      const entry = shared.prs[url]
-      const isUnreachable = entry?.error !== undefined && entry.pr === undefined && at - entry.at < UNREACHABLE_MS
-      const isFinished = entry?.pr !== undefined && entry.pr.state !== 'OPEN'
-      const ref = refFromUrl(url)
+    // Longest unasked first, so a batch the last round had no time for goes first in this one.
+    const askedAt = (url: string) => shared.prs[url]?.failedSince ?? shared.prs[url]?.at ?? 0
+    const due = [...urls]
+      .flatMap(url => {
+        const entry = shared.prs[url]
+        const isFinished = entry?.pr !== undefined && entry.pr.state !== 'OPEN'
+        const ref = refFromUrl(url)
 
-      return ref === null || isUnreachable || isFinished ? [] : [ref]
-    })
+        return ref === null || isUnreachable(entry, at) || isFinished ? [] : [ref]
+      })
+      .sort((a, b) => askedAt(a.url) - askedAt(b.url))
 
-    return await publish($, due, at, true)
+    return await publish($, due, at, urls)
   } finally {
     await releaseLease($)
   }
@@ -365,8 +569,12 @@ async function apply($: EngineInterface, shared: Shared) {
   const moved: string[] = []
   const next = list.map(current => {
     const entry = shared.prs[current.url]
-    if (entry === undefined || (current.checkedAt !== null && entry.at <= current.checkedAt)) return current
-    if (entry.pr === undefined) return { ...current, error: entry.error ?? null, checkedAt: current.checkedAt ?? entry.at }
+    if (entry === undefined) return current
+    const error = entry.error ?? null
+    // No newer data, yet the error may have come or gone: a failure that lasted keeps the
+    // entry's time, so "checked 2m ago" stays the age of what the card shows.
+    if (current.checkedAt !== null && entry.at <= current.checkedAt) return error === current.error ? current : { ...current, error }
+    if (entry.pr === undefined) return { ...current, error, checkedAt: current.checkedAt ?? entry.at }
     const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others], entry.pr.author?.login)
     const pr: TrackedPr = {
       ...current,
@@ -378,7 +586,7 @@ async function apply($: EngineInterface, shared: Shared) {
       reviews: reviewsOf(entry.pr) ?? current.reviews,
       reviewSeen: seen,
       checkedAt: entry.at,
-      error: entry.error ?? null,
+      error,
     }
     const said = reviewToasts(fresh, pr.number)
     for (const text of said) $.ui.toast(text)
@@ -392,6 +600,19 @@ async function apply($: EngineInterface, shared: Shared) {
   })
   await update($, prs, () => next)
   await update($, now, () => at)
+  await update($, limits, current => {
+    const shown = limitsOf(shared, [active, ...others])
+
+    return JSON.stringify(current) === JSON.stringify(shown) ? current : shown
+  })
+  const heldUntil = shared.heldUntil ?? 0
+  if (heldUntil > at && heldUntil !== pauseEndsAt) {
+    pauseEndsAt = heldUntil
+    $.clock.after(heldUntil - at, async () => {
+      const ended = await $.clock.now()
+      await update($, now, current => Math.max(current, ended))
+    })
+  }
   // What a hand-off press said belongs to the failure, or the threads, it was about.
   if (moved.length > 0) {
     for (const handoff of HANDOFFS) {
@@ -402,6 +623,23 @@ async function apply($: EngineInterface, shared: Shared) {
   await syncAnimation($)
   // Last, and never thrown: the update notice must not cost a PR result.
   await sayNewer($, shared).catch(() => undefined)
+}
+
+// What the gh line shows: the logged-in logins' buckets, the active one first (every login the
+// results know of, where gh named none), and the hold.
+function limitsOf(shared: Shared, names: readonly string[]): Limits {
+  const { rates } = shared
+  const known = names.filter(name => name !== '')
+  const order = known.length > 0 ? known : Object.keys(rates)
+
+  return {
+    logins: order.flatMap(login => {
+      const { graphql, core } = rates[login] ?? {}
+
+      return graphql !== undefined || core !== undefined ? [{ login, ...(graphql && { graphql }), ...(core && { core }) }] : []
+    }),
+    heldUntil: shared.heldUntil ?? 0,
+  }
 }
 
 // This copy's own version, from its plugin.json (the API names the plugin, not its version).
@@ -449,6 +687,7 @@ async function sayNewer($: EngineInterface, shared: Shared) {
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
 async function fetchNow($: EngineInterface, refs: PrRef[]) {
   if (refs.length === 0) return
+  // Held by a secondary limit, publish asks nothing: the next round does, once the wait is over.
   await apply($, await publish($, refs, await $.clock.now()))
 }
 
@@ -979,6 +1218,9 @@ export const register: Register = (on, options) => {
     const [fixRows, addressRows] = await Promise.all([readRows($, 'fix'), readRows($, 'address')])
     const handoffs = { fix: fixRows, address: addressRows }
     const upgrade = isNoticeOn ? await read($, newer) : null
+    const budget = await read($, limits)
+    const isGhShown = budget.logins.length > 0 || budget.heldUntil > at
+    const offset = isGhShown ? await zoneOffset($) : 0
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding
     const open = list.filter(isActive).length
@@ -1029,6 +1271,22 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    // GitHub's budget per login, dim while healthy, or the pause while a limit holds the poll:
+    // "gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST · resets 13:40".
+    const ghLine = isGhShown && (
+      <Box key="gh" flexDirection="column">
+        {ghLines(budget, at, width, offset).map((line, i) => (
+          <Text key={`gh:${i}`} wrap="truncate-end">
+            {line.map((part, j) => (
+              <Text key={`gh:${i}:${j}`} color={part.tone ?? undefined} dimColor={part.tone === null}>
+                {part.text}
+              </Text>
+            ))}
+          </Text>
+        ))}
+      </Box>
+    )
+
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
@@ -1042,6 +1300,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>or with /pr-watch &lt;url&gt;</Text>
           </Box>
           <Box>{closeButton}</Box>
+          {ghLine}
           {notice}
         </Box>
       )
@@ -1371,6 +1630,7 @@ export const register: Register = (on, options) => {
             <Button key="dismiss-finished" label="Dismiss finished" hotkey="d" plain dimColor onPress={() => dismissFinished($)} />
           )}
         </Box>
+        {ghLine}
         {notice}
       </Box>
     )
@@ -1401,12 +1661,15 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     // Narrowed by the surface, so the terminal's table (the one with a Raster) is resolved there.
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
-    const [at, fixRows, addressRows, upgrade] = await Promise.all([
+    const [at, fixRows, addressRows, upgrade, budget] = await Promise.all([
       read($, now),
       readRows($, 'fix'),
       readRows($, 'address'),
       isNoticeOn ? read($, newer) : null,
+      read($, limits),
     ])
+    // Only the pause, or a bucket below 20%: a healthy budget leaves the line to the buttons.
+    const ghNote = bandNote(budget, at, budget.logins.length > 0 ? await zoneOffset($) : 0)
     const width = Math.max(20, e.props.bodyColumns)
     if (isTerminal) {
       bandId = e.requestId
@@ -1456,6 +1719,7 @@ export const register: Register = (on, options) => {
       plan.more,
       handoff === undefined ? null : isCollecting ? cells(busyText) : buttonCells(handoffKey, handoffLabel),
       upgrade === null ? null : { long: headOf(upgrade.version), short: `↑ ${upgrade.version}` },
+      ghNote,
     )
 
     return (
@@ -1473,6 +1737,11 @@ export const register: Register = (on, options) => {
               <Button key="band-handoff" label={handoffLabel} hotkey={handoffKey} plain dimColor onPress={() => bandHandoff($, handoff.id, top)} />
             ))}
             {actions.notice !== null && <Text dimColor>{actions.notice}</Text>}
+            {actions.gh !== null && (
+              <Text key="band:gh" color={ghNote?.tone ?? undefined} dimColor={(ghNote?.tone ?? null) === null}>
+                {actions.gh}
+              </Text>
+            )}
           </Box>
         )}
         {theirs}

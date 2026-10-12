@@ -155,32 +155,42 @@ export const buttonCells = (hotkey: string, label: string) => cells(hotkey) + 2 
 
 const GAP = 2
 
-export type Actions = { more: string | null; handoff: boolean; notice: string | null }
+export type Actions = { more: string | null; handoff: boolean; notice: string | null; gh: string | null }
 
 // What the action line holds beside its two buttons (`fixed`, their cells), to fit `columns`:
 // "+N more", then the hand-off button (`handoff`, its cells), then the update notice in its
-// long form or its short one. What doesn't fit is left out, in the reverse order.
+// long form or its short one, then the gh note (rate.ts) the same way. What doesn't fit is
+// left out, in the reverse order; a pause, though, comes right after the count.
 export function actionsOf(
   columns: number,
   fixed: number,
   more: number,
   handoff: number | null,
   notice: { long: string; short: string } | null,
+  gh: { long: string; short: string; isPause: boolean } | null = null,
 ): Actions {
   let used = fixed
   const fits = (width: number) => used + GAP + width <= columns
   const take = (width: number) => (used += GAP + width)
-  const out: Actions = { more: null, handoff: false, notice: null }
+  const pick = (text: { long: string; short: string }) => {
+    const said = [text.long, text.short].find(t => fits(cells(t))) ?? null
+    if (said !== null) take(cells(said))
+
+    return said
+  }
+  const out: Actions = { more: null, handoff: false, notice: null, gh: null }
   const tail = more > 0 ? `+${more} more` : null
   if (tail !== null && fits(cells(tail))) {
     out.more = tail
     take(cells(tail))
   }
+  if (gh?.isPause === true) out.gh = pick(gh)
   if (handoff !== null && fits(handoff)) {
     out.handoff = true
     take(handoff)
   }
-  if (notice !== null) out.notice = [notice.long, notice.short].find(text => fits(cells(text))) ?? null
+  if (notice !== null) out.notice = pick(notice)
+  if (gh !== null && !gh.isPause) out.gh = pick(gh)
 
   return out
 }
