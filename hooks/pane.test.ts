@@ -1502,12 +1502,13 @@ async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly st
   const opens: { id: string; focus?: true }[] = []
   const fills: string[] = []
   const blits: { requestId: string; key: string }[] = []
+  const closes: string[] = []
   on('ui.render', { component: 'AbovePrompt' }, () => beneath ?? NOTHING)
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => (fills.push(e.text), fill()))
   on('prompt.submit', ($, e) => ({ text: e.text }))
   on('ui.open', ($, e) => (opens.push({ id: e.id, focus: e.focus }), { value: { isPlaced: true } }))
-  on('ui.close', () => ({ value: undefined }))
+  on('ui.close', ($, e) => (closes.push(e.id), { value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.blit', ($, e) => (blits.push({ requestId: e.requestId, key: e.key }), { value: {} }))
@@ -1519,7 +1520,7 @@ async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly st
   if (urls.length > 0) await $.tool.call({ tool: 'mcp__pr-watch__watch', urls } as never)
   await clock.advance(100)
 
-  return { ...host, clock, opens, fills, blits }
+  return { ...host, clock, opens, fills, blits, closes }
 }
 
 test('the band: a line per PR, most urgent first, then its buttons', IN_BAND, async ($, on) => {
@@ -1643,7 +1644,7 @@ test("beside another plugin's lines, pr-watch keeps them under its own and takes
 
 test('switching the layout in /config applies at once, both ways', async ($, on) => {
   on('config.set', ($, e) => ({ value: e.value }))
-  const { opens } = await bandSession($, on, [FAILING])
+  const { opens, closes } = await bandSession($, on, [FAILING])
   // The pane layout opened the pane for the new PR, and draws nothing in the band.
   expect(opens).toHaveLength(1)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -1651,7 +1652,8 @@ test('switching the layout in /config applies at once, both ways', async ($, on)
 
   await $.config.set({ key: 'pr-watch.layout', value: 'band' } as never)
   expect(lines(await ui.drawn())[0]).toMatch(/^✗ #13 /)
-  // The open pane is left be, and a new PR doesn't open it again.
+  // The pane closes, and a new PR doesn't open it again.
+  expect(closes).toEqual(['pr-watch'])
   await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [RUNNING] } as never)
   expect(opens).toHaveLength(1)
 

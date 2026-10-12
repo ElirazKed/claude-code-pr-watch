@@ -65,7 +65,7 @@ o: Open pane  r: Refresh  f: Fix #13 with Claude
 - **When it's empty:** nothing watched, the band is left empty, and a survey there has it to itself. `ctrl+x ctrl+a` or the band's `[-]` folds it away.
 - **The pane:** new PRs never open it. `/pr-watch` does, and an open pane works as ever.
 
-A change applies at once. Switching to `band` leaves an open pane where it is (Close, `x`, closes it); switching back to `pane` opens the pane.
+A change applies at once. Switching to `band` closes the pane; switching back to `pane` opens it.
 
 ## Reviews
 

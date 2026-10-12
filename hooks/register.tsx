@@ -824,12 +824,13 @@ export const register: Register = (on, options) => {
     if (field === 'poll_active_seconds') pace.fastMs = seconds(done.value, pace.fastMs)
     else if (field === 'poll_idle_seconds') pace.slowMs = seconds(done.value, pace.slowMs)
     else if (field === 'layout') {
-      // The band draws, or stops, at once. A pane already open stays (the person may be reading
-      // it; Close is a key away); back on the pane, it opens as a session start would open it.
+      // The band draws, or stops, at once. On the band the pane closes (the room was wanted
+      // back); back on the pane, it opens as a session start would open it.
       layout = layoutOf(done.value)
       bandSpins.clear()
       $.ui.invalidate('ui.render')
-      if (layout === 'pane' && (await read($, prs)).length > 0) void $.ui.open(OPEN)
+      if (layout === 'band') void $.ui.close({ id: PANE })
+      else if ((await read($, prs)).length > 0) void $.ui.open(OPEN)
     } else {
       isNoticeOn = done.value !== false
       // Off: the footer's note goes now; on, it comes back with the next tick.
