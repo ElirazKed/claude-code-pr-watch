@@ -331,7 +331,7 @@ function tideAt(card: ArtCard, x: number, y: number, frame: number, rows: number
   const phase = card.seed * 0.7 + (card.isMoving ? frame * 0.22 : 0)
   const edge = edgeAt(card.fill, width, y, phase)
   const steps = card.paint.steps?.[card.tone]
-  if (steps !== undefined) return tideStepAt(card, x, y, frame, rows, width, edge, steps.mid)
+  if (steps !== undefined) return tideStepAt(card, x, y, frame, rows, width, edge, phase, steps.mid)
   const depth = clamp01(0.55 * (rows <= 1 ? 1 : y / (rows - 1)) + 0.45 * (1 - (x + 0.5) / Math.max(1, edge)))
   let liquid = lerp(surface, deep, depth)
   // The crest catches the light; full, a glint sweeps across instead while the PR moves.
@@ -354,10 +354,9 @@ function tideAt(card: ArtCard, x: number, y: number, frame: number, rows: number
 // of two layers: `▀`) and swaying while the PR moves; its front, a cell that ends partway along
 // it, lit in the crest's colour. Full and moving, a glint runs across: a slant of cells a layer
 // lighter.
-function tideStepAt(card: ArtCard, x: number, y: number, frame: number, rows: number, width: number, edge: number, mid: Rgb): TideCell {
+function tideStepAt(card: ArtCard, x: number, y: number, frame: number, rows: number, width: number, edge: number, phase: number, mid: Rgb): TideCell {
   const { glass, surface, deep, crest } = card.paint.tones[card.tone]
   const layers = [surface, mid, deep] as const
-  const phase = card.seed * 0.7 + (card.isMoving ? frame * 0.22 : 0)
   const wave = 0.5 * Math.sin(x * 0.42 + phase) + 0.5 * Math.sin(x * 0.17 - phase * 0.6 + 1)
   // The layer at a height, `at` rows down: a word's cell by its middle, unswayed, so the colour
   // behind a word stays put; a half cell swayed.

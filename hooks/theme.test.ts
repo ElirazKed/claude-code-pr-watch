@@ -283,6 +283,8 @@ describe('the gh meter', () => {
         const words = decode(meterCells({ share: 1, health: null }, 16, raster))
         expect(new Set([...Array(16).keys()].map(i => words[i * 3 + 1]))).toEqual(new Set([hex(raster.green[0])]))
         expect(isPalette(raster.green[0]) && isPalette(raster.track)).toBe(true)
+        // Nearly spent, the first cell still shows the red.
+        expect(decode(meterCells({ share: 0.01, health: 'error' }, 16, raster))[1]).toBe(hex(raster.red[0]))
       }
     }
   })

@@ -163,15 +163,14 @@ function lowestIn(buckets: readonly (Bucket | undefined)[], at: number): Bucket 
 
 // One bar of a meter: the share a bucket has left, and how healthy that is.
 export type Bar = { share: number; tone: Tone }
-// One login's meter: GraphQL's bar (the poll's points) and REST's (gh's requests), each null
-// until seen (the pane draws the lower); the lower share as "94%", its tone, and when that bucket refills ("↻42m"), null
-// where neither has a reset ahead (both full).
-export type Meter = { login: string; graphql: Bar | null; core: Bar | null; percent: string; tone: Tone; refill: string | null }
+// One login's meter: the bar of whichever of GraphQL's (the poll's points) and REST's (gh's
+// requests) buckets has less left, of those seen; that share as "94%", its tone, and when that
+// bucket refills ("↻42m"), null where neither has a reset ahead (both full).
+export type Meter = { login: string; bar: Bar; percent: string; tone: Tone; refill: string | null }
 // The pane's gh meter: the hold, while a secondary limit pauses the poll, and a meter per
 // login, the active one first.
 export type GhMeter = { pause: string | null; meters: Meter[] }
 
-const barOf = (bucket: Bucket | undefined): Bar | null => (bucket === undefined ? null : { share: shareOf(bucket), tone: toneOf(bucket) })
 
 // The pane's gh meter at `at`; null with nothing known and nothing held.
 export function ghMeter(limits: Limits, at: number): GhMeter | null {
@@ -183,8 +182,7 @@ export function ghMeter(limits: Limits, at: number): GhMeter | null {
 
     return {
       login: rate.login,
-      graphql: barOf(rate.graphql),
-      core: barOf(rate.core),
+      bar: { share: shareOf(least), tone: toneOf(least) },
       percent: `${Math.floor(shareOf(least) * 100)}%`,
       tone: toneOf(least),
       refill: low === null ? null : refillIn(low.resetAt - at),

@@ -25,6 +25,9 @@ export function hex([r, g, b]: Rgb): number {
   return (r << 16) | (g << 8) | b
 }
 
+// The xterm cube's six levels a channel.
+const LEVELS = [0, 95, 135, 175, 215, 255] as const
+
 // The xterm 256-colour palette's colour `n` (16 to 255: the 6×6×6 cube, then 24 greys), as the
 // terminal paints it. Where Claude Code draws 256 colours (inside tmux, by default) it rounds
 // every colour to one of these; one of them stays itself.
@@ -34,7 +37,6 @@ export function x256(n: number): Rgb {
 
     return [v, v, v]
   }
-  const LEVELS = [0, 95, 135, 175, 215, 255] as const
   const i = Math.max(0, n - 16)
 
   return [LEVELS[Math.floor(i / 36) % 6]!, LEVELS[Math.floor(i / 6) % 6]!, LEVELS[i % 6]!]
@@ -43,7 +45,6 @@ export function x256(n: number): Rgb {
 // The palette colour Claude Code paints `rgb` as in 256 colours: the cube's nearest level on
 // each channel, or the grey ramp's nearest where that is closer (as its painter rounds).
 export function nearest256([r, g, b]: Rgb): Rgb {
-  const LEVELS = [0, 95, 135, 175, 215, 255] as const
   const level = (c: number) => (c < 48 ? 0 : c < 115 ? 1 : c < 155 ? 2 : c < 195 ? 3 : c < 235 ? 4 : 5)
   const cube: Rgb = [LEVELS[level(r)]!, LEVELS[level(g)]!, LEVELS[level(b)]!]
   const grey = 8 + 10 * Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)))
@@ -147,8 +148,9 @@ export function meterCells(bar: { share: number; health: Health } | null, width:
     const filled = clamp01(bar.share) * width
     const colour = lerp(ramp[0], ramp[1], width === 1 ? 1 : i / (width - 1))
 
-    // In palette colours, the cell where the share ends is the bar's or the track's, never between.
-    const part = paint.isPalette === true ? Math.round(clamp01(filled - i)) : clamp01(filled - i)
+    // In palette colours, the cell where the share ends is the bar's or the track's, never between;
+    // any share left keeps its first cell, so a nearly spent budget still shows red.
+    const part = paint.isPalette === true ? (i === 0 && filled > 0 ? 1 : Math.round(clamp01(filled - i))) : clamp01(filled - i)
 
     return [0x2580, hex(lerp(paint.track, colour, part)), DEFAULT_BG]
   }

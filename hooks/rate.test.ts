@@ -106,7 +106,7 @@ describe('the gh meter', () => {
     ])
   })
 
-  test("a meter per login: GraphQL's bar over REST's, the lower share and its refill", async () => {
+  test("a meter per login: the lower bucket's bar, its share and its refill", async () => {
     const two = limits([
       { login: 'octocat', graphql: bucket(4_321), core: bucket(4_900, { resetAt: RESET + 900_000 }) },
       { login: 'hubot', graphql: bucket(4_950), core: bucket(5_000) },
@@ -114,26 +114,26 @@ describe('the gh meter', () => {
     expect(ghMeter(two, T)).toEqual({
       pause: null,
       meters: [
-        { login: 'octocat', graphql: { share: 4_321 / 5_000, tone: null }, core: { share: 0.98, tone: null }, percent: '86%', tone: null, refill: '↻40m' },
-        { login: 'hubot', graphql: { share: 0.99, tone: null }, core: { share: 1, tone: null }, percent: '99%', tone: null, refill: '↻40m' },
+        { login: 'octocat', bar: { share: 4_321 / 5_000, tone: null }, percent: '86%', tone: null, refill: '↻40m' },
+        { login: 'hubot', bar: { share: 0.99, tone: null }, percent: '99%', tone: null, refill: '↻40m' },
       ],
     })
   })
 
   test('the lower bucket sets the percent and its health, whichever of the two it is', async () => {
     const low = limits([{ login: 'octocat', graphql: bucket(4_000), core: bucket(200, { resetAt: RESET + 1_200_000 }) }])
-    expect(ghMeter(low, T)?.meters[0]).toMatchObject({ percent: '4%', tone: 'error', refill: '↻1h', core: { share: 0.04, tone: 'error' } })
+    expect(ghMeter(low, T)?.meters[0]).toMatchObject({ percent: '4%', tone: 'error', refill: '↻1h', bar: { share: 0.04, tone: 'error' } })
     const warn = limits([{ login: 'octocat', graphql: bucket(800), core: bucket(5_000) }])
     expect(ghMeter(warn, T)?.meters[0]).toMatchObject({ percent: '16%', tone: 'warning', refill: '↻40m' })
   })
 
   test('a bucket past its reset reads full again, with no refill to say', async () => {
     const reset = limits([{ login: 'octocat', graphql: bucket(120, { resetAt: T - 1 }), core: bucket(10, { resetAt: T - 1 }) }])
-    expect(ghMeter(reset, T)?.meters[0]).toEqual({ login: 'octocat', graphql: { share: 1, tone: null }, core: { share: 1, tone: null }, percent: '100%', tone: null, refill: null })
+    expect(ghMeter(reset, T)?.meters[0]).toEqual({ login: 'octocat', bar: { share: 1, tone: null }, percent: '100%', tone: null, refill: null })
   })
 
   test('only what is known: GraphQL alone before a round has asked REST; nothing known, no meter', async () => {
-    expect(ghMeter(limits([{ login: 'octocat', graphql: bucket(4_000) }]), T)?.meters[0]).toMatchObject({ graphql: { share: 0.8 }, core: null, percent: '80%' })
+    expect(ghMeter(limits([{ login: 'octocat', graphql: bucket(4_000) }]), T)?.meters[0]).toMatchObject({ bar: { share: 0.8 }, percent: '80%' })
     expect(ghMeter(limits([]), T)).toBe(null)
   })
 

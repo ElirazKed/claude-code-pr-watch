@@ -40,7 +40,7 @@ import type { Layout } from './band'
 import { NOT_FOUND, failedEntry, isUnreachable, keptEntries } from './cache'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
-import type { Bar, Meter, Rates } from './rate'
+import type { Bar, Rates } from './rate'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -1407,15 +1407,13 @@ export const register: Register = (on, options) => {
       const loginW = Math.min(14, Math.max(1, width - 3 - 1 - 4 - 5 - refillW - 3), Math.max(0, ...meter.meters.map(m => m.login.length)))
       // "gh " + login + " " + bar + " 100%" + refill + "  ?"
       const meterW = Math.max(4, Math.min(16, width - 3 - loginW - 1 - 5 - refillW - 3))
-      // The bar is the lower of GraphQL's and REST's shares, the one the % is of.
-      const lower = (m: Meter) => (m.graphql === null || (m.core !== null && m.core.share < m.graphql.share) ? m.core : m.graphql)
-      const health = (bar: Bar | null) => (bar === null ? null : { share: bar.share, health: bar.tone })
-      const textBar = (bar: Bar | null) => {
-        const filled = bar === null ? 0 : Math.round(Math.min(1, bar.share) * meterW)
+      // The bar is the lower of GraphQL's and REST's shares, the one the % is of (rate.ts).
+      const textBar = (bar: Bar) => {
+        const filled = Math.round(Math.min(1, bar.share) * meterW)
 
         return (
           <Text>
-            <Text color={toneInk(bar?.tone ?? null) ?? ink('success')}>{'━'.repeat(filled)}</Text>
+            <Text color={toneInk(bar.tone) ?? ink('success')}>{'━'.repeat(filled)}</Text>
             <Text dimColor>{'─'.repeat(meterW - filled)}</Text>
           </Text>
         )
@@ -1436,9 +1434,9 @@ export const register: Register = (on, options) => {
             <Text dimColor>{i === 0 ? 'gh ' : '   '}</Text>
             <Text dimColor>{(m.login.length > loginW ? `${m.login.slice(0, loginW - 1)}…` : m.login).padEnd(loginW)} </Text>
             {Raster !== null ? (
-              <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells(health(lower(m)), meterW, variant.raster)} />
+              <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells({ share: m.bar.share, health: m.bar.tone }, meterW, variant.raster)} />
             ) : (
-              textBar(lower(m))
+              textBar(m.bar)
             )}
             <Text color={toneInk(m.tone)} dimColor={m.tone === null} bold={m.tone !== null}>
               {` ${m.percent.padStart(4)}`}

@@ -4,7 +4,7 @@
 import type { BoxHoverProps, BoxProps, Color } from 'claude-code'
 import type { Tone } from '../types'
 import type { BarPaint } from './look'
-import { x256 } from './look'
+import { hex, x256 } from './look'
 
 export const THEMES = ['classic', 'solid', 'minimal', 'neon', 'retro', 'tide', 'aurora'] as const
 export type ThemeName = (typeof THEMES)[number]
@@ -766,12 +766,15 @@ export function pillOf(look: Look, tone: Tone, pill: string) {
   }
 }
 
-// What a Raster on a card paints behind its cells: the card's fill, as 0xRRGGBB, or null for
-// the terminal's own background.
+// What a Raster on a card paints behind its cells: the card's fill (hex, or a palette entry
+// `ansi256(n)`), as 0xRRGGBB, or null for the terminal's own background.
 export function rasterBg(look: Look, tone: Tone): number | null {
   const fill = look.variant.tones[tone].fill
+  if (fill === null) return null
+  if (/^#[0-9a-f]{6}$/i.test(fill)) return parseInt(fill.slice(1), 16)
+  const n = /^ansi256\((\d+)\)$/.exec(fill)?.[1]
 
-  return fill === null || !/^#[0-9a-f]{6}$/i.test(fill) ? null : parseInt(fill.slice(1), 16)
+  return n === undefined ? null : hex(x256(Number(n)))
 }
 
 // A card's CI bar: the theme's ramps over the card's fill.
