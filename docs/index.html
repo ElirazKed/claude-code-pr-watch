@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pr-watch — live GitHub PR pane for Claude Code</title>
+<meta name="description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta name="theme-color" content="#0D0E14">
+<link rel="canonical" href="https://elirazked.github.io/claude-code-pr-watch/">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23CBA6F7%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%226%22%20cy%3D%226%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%226%22%20cy%3D%2218%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%2218%22%20cy%3D%2218%22%20r%3D%222.5%22%2F%3E%3Cpath%20d%3D%22M6%208.5v7%22%2F%3E%3Cpath%20d%3D%22M18%2015.5V10a3%203%200%200%200-3-3h-4%22%2F%3E%3Cpath%20d%3D%22M13%204.5%2010.5%207%2013%209.5%22%2F%3E%3C%2Fsvg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="pr-watch">
+<meta property="og:title" content="pr-watch — live GitHub PR pane for Claude Code">
+<meta property="og:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta property="og:url" content="https://elirazked.github.io/claude-code-pr-watch/">
+<meta property="og:image" content="https://elirazked.github.io/claude-code-pr-watch/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pr-watch — live GitHub PR pane for Claude Code">
+<meta name="twitter:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta name="twitter:image" content="https://elirazked.github.io/claude-code-pr-watch/screenshot.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;family=Space+Grotesk:wght@500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0D0E14}
+a{color:#CBA6F7}a:hover{color:#E2CCFF}
+@keyframes sway{0%{transform:translateY(0)}50%{transform:translateY(-14px)}100%{transform:translateY(0)}}
+@keyframes drift{0%{transform:translateX(-6%)}50%{transform:translateX(6%)}100%{transform:translateX(-6%)}}
+@media (prefers-reduced-motion: reduce){*{animation:none !important}}
+
+[hidden]{display:none !important}
+.g>div{display:flex;height:17px}
+.g span{flex:none;white-space:pre}
+.g .c{display:inline-block;transform-origin:0 50%}
+@media (max-width: 640px){.wrap{padding-left:16px !important;padding-right:16px !important}}
+</style>
+</head>
+<body>
+<div style="min-height: 100vh; background: #0D0E14; color: #ECEAF4; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 17px; line-height: 1.6;">
+
+<!-- Nav -->
+<header style="border-bottom: 1px solid #22253A;">
+<nav aria-label="Main" class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 18px 24px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px;">
+<a href="#top" style="display: flex; align-items: center; gap: 10px; text-decoration: none; color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 18px;">
+<svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#CBA6F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="18" r="2.5"></circle><path d="M6 8.5v7"></path><path d="M18 15.5V10a3 3 0 0 0-3-3h-4"></path><path d="M13 4.5 10.5 7 13 9.5"></path></svg>
+pr-watch
+</a>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; font-size: 15px;">
+<a href="#features" style="color: #C9C7DA; text-decoration: none;">Features</a>
+<a href="#polling" style="color: #C9C7DA; text-decoration: none;">How it polls</a>
+<a href="#themes" style="color: #C9C7DA; text-decoration: none;">Themes</a>
+<a href="#install" style="color: #C9C7DA; text-decoration: none;">Install</a>
+<a href="https://github.com/ElirazKed/claude-code-pr-watch" style="display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid #34384F; border-radius: 8px; color: #ECEAF4; text-decoration: none;">
+<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"></path></svg>
+GitHub
+</a>
+</div>
+</nav>
+</header>
+
+<!-- Hero -->
+<section id="top" class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 72px 24px 88px; display: flex; flex-wrap: wrap; align-items: center; gap: 56px;">
+<div style="flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 24px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; letter-spacing: 0.04em; color: #CBA6F7;">A Claude Code mod · MIT</p>
+<h1 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(40px, 6vw, 68px); line-height: 1.02; letter-spacing: -0.025em;">See your PRs go green without asking.</h1>
+<p style="margin: 0; font-size: 19px; color: #C9C7DA; max-width: 34em;">pr-watch keeps a live pane of every GitHub pull request your Claude Code session touches: CI as it runs, reviews as they land, conflicts the moment they appear. When something fails, one button drafts the fix for Claude. When it's ready, merge it from the pane.</p>
+<div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
+<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; overflow-x: auto; white-space: nowrap;"><span style="color: #8A88A0;">&gt;</span> /plugin install pr-watch --marketplace ElirazKed/claude-code-pr-watch</div>
+<p style="margin: 0; font-size: 14px; color: #A9A7BD;">Claude Code 2.1.287 or later, and the GitHub CLI logged in. No restart.</p>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 12px;">
+<a href="#install" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 10px; background: #CBA6F7; color: #15111F; font-weight: 600; text-decoration: none;">Install</a>
+<a href="#features" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 10px; border: 1px solid #34384F; color: #ECEAF4; font-weight: 500; text-decoration: none;">What it does</a>
+</div>
+</div>
+
+<!-- Pane mock -->
+<figure style="flex: 1 1 480px; min-width: 0; margin: 0; position: relative;">
+<div aria-live="polite" style="position: absolute; top: -18px; right: 12px; z-index: 2; min-height: 34px;"><div data-if="hasToast" hidden style="background: #1E2132; border: 1px solid #3A3F58; border-radius: 10px; padding: 6px 12px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; color: #ECEAF4; box-shadow: 0 10px 30px rgba(0,0,0,0.4);"><span data-text="toast"></span></div></div>
+<div role="img" aria-label="The pr-watch pane in the tide theme, drawn cell by cell as the terminal draws it: a card filling as CI runs, a failing card, a ready card, and the gh budget meter" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 14px; box-shadow: 0 30px 80px rgba(0,0,0,0.45); border: 1px solid #2A2E42; border-radius: 12px; overflow-x: auto;"><div class="g" data-grid="pane"><div><span style="background:rgb(16,18,27);color:rgb(246,244,252);font-weight:700"> ⎇ Pull requests                                   2 open </span></div><div><span style="background:rgb(16,18,27);color:rgb(148,226,213)">▅</span><span style="background:rgb(16,18,27);color:rgb(147,224,215)">▆</span><span style="background:rgb(16,18,27);color:rgb(147,221,217)">▆</span><span style="background:rgb(16,18,27);color:rgb(146,219,219)">▇</span><span style="background:rgb(16,18,27);color:rgb(146,216,221)">▇</span><span style="background:rgb(16,18,27);color:rgb(145,214,223)">▇</span><span style="background:rgb(16,18,27);color:rgb(145,211,225)">▇</span><span style="background:rgb(16,18,27);color:rgb(144,209,227)">▇</span><span style="background:rgb(16,18,27);color:rgb(143,207,229)">▆</span><span style="background:rgb(16,18,27);color:rgb(143,204,231)">▆</span><span style="background:rgb(16,18,27);color:rgb(142,202,232)">▅</span><span style="background:rgb(16,18,27);color:rgb(142,199,234)">▄</span><span style="background:rgb(16,18,27);color:rgb(141,197,236)">▄</span><span style="background:rgb(16,18,27);color:rgb(140,195,238)">▃</span><span style="background:rgb(16,18,27);color:rgb(140,192,240)">▃</span><span style="background:rgb(16,18,27);color:rgb(139,190,242)">▂</span><span style="background:rgb(16,18,27);color:rgb(139,187,244)">▂</span><span style="background:rgb(16,18,27);color:rgb(138,185,246)">▂</span><span style="background:rgb(16,18,27);color:rgb(138,182,248)">▃</span><span style="background:rgb(16,18,27);color:rgb(137,180,250)">▃</span><span style="background:rgb(16,18,27);color:rgb(136,181,249)">▃</span><span style="background:rgb(16,18,27);color:rgb(135,182,249)">▄</span><span style="background:rgb(16,18,27);color:rgb(134,183,248)">▄</span><span style="background:rgb(16,18,27);color:rgb(133,184,247)">▄</span><span style="background:rgb(16,18,27);color:rgb(131,185,246)">▅</span><span style="background:rgb(16,18,27);color:rgb(130,186,246)">▅</span><span style="background:rgb(16,18,27);color:rgb(129,187,245)">▅</span><span style="background:rgb(16,18,27);color:rgb(128,188,244)">▄</span><span style="background:rgb(16,18,27);color:rgb(127,189,243)">▄</span><span style="background:rgb(16,18,27);color:rgb(126,190,243)">▃</span><span style="background:rgb(16,18,27);color:rgb(125,191,242)">▃</span><span style="background:rgb(16,18,27);color:rgb(124,192,241)">▂</span><span style="background:rgb(16,18,27);color:rgb(123,193,240)">▂</span><span style="background:rgb(16,18,27);color:rgb(122,194,240)">▂</span><span style="background:rgb(16,18,27);color:rgb(120,195,239)">▂</span><span style="background:rgb(16,18,27);color:rgb(119,196,238)">▂</span><span style="background:rgb(16,18,27);color:rgb(118,197,237)">▂</span><span style="background:rgb(16,18,27);color:rgb(117,198,237)">▂</span><span style="background:rgb(16,18,27);color:rgb(116,199,236)">▃</span><span style="background:rgb(16,18,27);color:rgb(121,197,237)">▃</span><span style="background:rgb(16,18,27);color:rgb(125,196,237)">▄</span><span style="background:rgb(16,18,27);color:rgb(130,194,238)">▅</span><span style="background:rgb(16,18,27);color:rgb(134,192,238)">▅</span><span style="background:rgb(16,18,27);color:rgb(139,190,239)">▆</span><span style="background:rgb(16,18,27);color:rgb(143,189,239)">▆</span><span style="background:rgb(16,18,27);color:rgb(148,187,240)">▇</span><span style="background:rgb(16,18,27);color:rgb(153,185,241)">▇</span><span style="background:rgb(16,18,27);color:rgb(157,183,241)">▇</span><span style="background:rgb(16,18,27);color:rgb(162,182,242)">▆</span><span style="background:rgb(16,18,27);color:rgb(166,180,242)">▆</span><span style="background:rgb(16,18,27);color:rgb(171,178,243)">▅</span><span style="background:rgb(16,18,27);color:rgb(176,176,244)">▅</span><span style="background:rgb(16,18,27);color:rgb(180,175,244)">▄</span><span style="background:rgb(16,18,27);color:rgb(185,173,245)">▄</span><span style="background:rgb(16,18,27);color:rgb(189,171,245)">▄</span><span style="background:rgb(16,18,27);color:rgb(194,169,246)">▃</span><span style="background:rgb(16,18,27);color:rgb(198,168,246)">▃</span><span style="background:rgb(16,18,27);color:rgb(203,166,247)">▃</span></div><div><span style="background:rgb(16,18,27);color:rgb(246,244,252)">                                                          </span></div><div><span style="background:rgb(92,58,8);color:rgb(246,244,252)"> </span><span style="background:rgb(148,117,63);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(75,57,35);color:rgb(246,244,252);font-weight:700">1</span><span style="background:rgb(43,36,36);color:rgb(246,244,252);font-weight:700">2</span><span style="background:rgb(43,36,36);color:rgb(246,244,252)"> </span><span style="background:rgb(28,26,36);color:rgb(246,244,252)">Retry uploads with exponential backoff </span><span style="background:rgb(249,226,175);color:rgb(42,30,5);font-weight:700"> ● CI RUNNING</span><span style="background:rgb(28,26,36);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(85,53,7);color:rgb(201,191,183)"> </span><span style="background:rgb(93,60,10);color:rgb(203,192,184)">a</span><span style="background:rgb(102,66,13);color:rgb(206,194,185)">c</span><span style="background:rgb(154,122,66);color:rgb(220,210,200)">m</span><span style="background:rgb(50,40,36);color:rgb(191,187,192)">e</span><span style="background:rgb(43,36,36);color:rgb(189,186,192)">/a</span><span style="background:rgb(28,26,36);color:rgb(185,183,192)">pp · feat/retry → main  +120 −14          @octocat </span></div><div><span style="background:rgb(78,49,7);color:rgb(246,244,252)"> </span><span style="background:rgb(85,54,9);color:rgb(246,244,252)">⠋</span><span style="background:rgb(93,59,11);color:rgb(246,244,252)"> </span><span style="background:rgb(147,117,65);color:rgb(246,244,252)">Q</span><span style="background:rgb(48,39,36);color:rgb(246,244,252)">u</span><span style="background:rgb(43,36,36);color:rgb(246,244,252)">eu</span><span style="background:rgb(28,26,36);color:rgb(246,244,252)">ed · 5 checks                                  0/5 </span></div><div><span style="background:rgb(71,44,6);color:rgb(246,244,252)"> </span><span style="background:rgb(132,106,61);color:rgb(246,244,252)"> </span><span style="background:rgb(28,26,36);color:rgb(191,143,61)">▌</span><span style="background:rgb(43,36,36);color:rgb(246,244,252)">  </span><span style="background:rgb(28,26,36);color:rgb(246,244,252)">                                                     </span></div><div><span style="background:rgb(34,31,40);color:rgb(201,199,218)"> open #12 ↗ · checked just now                            </span></div><div><span style="background:rgb(16,18,27);color:rgb(246,244,252)">                                                          </span></div><div><span style="background:rgb(86,16,34);color:rgb(246,244,252)"> </span><span style="background:rgb(88,17,35);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(89,17,36);color:rgb(246,244,252);font-weight:700">1</span><span style="background:rgb(91,18,37);color:rgb(246,244,252);font-weight:700">3</span><span style="background:rgb(92,19,37);color:rgb(246,244,252)"> </span><span style="background:rgb(94,19,38);color:rgb(246,244,252)">C</span><span style="background:rgb(95,20,39);color:rgb(246,244,252)">a</span><span style="background:rgb(97,21,40);color:rgb(246,244,252)">c</span><span style="background:rgb(99,21,41);color:rgb(246,244,252)">h</span><span style="background:rgb(100,22,42);color:rgb(246,244,252)">e</span><span style="background:rgb(102,22,42);color:rgb(246,244,252)"> </span><span style="background:rgb(103,23,43);color:rgb(246,244,252)">t</span><span style="background:rgb(105,24,44);color:rgb(246,244,252)">h</span><span style="background:rgb(106,24,45);color:rgb(246,244,252)">e</span><span style="background:rgb(108,25,46);color:rgb(246,244,252)"> </span><span style="background:rgb(110,26,47);color:rgb(246,244,252)">t</span><span style="background:rgb(111,26,47);color:rgb(246,244,252)">h</span><span style="background:rgb(113,27,48);color:rgb(246,244,252)">u</span><span style="background:rgb(114,28,49);color:rgb(246,244,252)">m</span><span style="background:rgb(116,28,50);color:rgb(246,244,252)">b</span><span style="background:rgb(117,29,51);color:rgb(246,244,252)">n</span><span style="background:rgb(119,30,52);color:rgb(246,244,252)">a</span><span style="background:rgb(120,30,53);color:rgb(246,244,252)">i</span><span style="background:rgb(122,31,53);color:rgb(246,244,252)">l</span><span style="background:rgb(124,32,54);color:rgb(246,244,252)"> </span><span style="background:rgb(125,32,55);color:rgb(246,244,252)">r</span><span style="background:rgb(127,33,56);color:rgb(246,244,252)">e</span><span style="background:rgb(128,34,57);color:rgb(246,244,252)">n</span><span style="background:rgb(130,34,58);color:rgb(246,244,252)">d</span><span style="background:rgb(131,35,58);color:rgb(246,244,252)">e</span><span style="background:rgb(133,35,59);color:rgb(246,244,252)">r</span><span style="background:rgb(135,36,60);color:rgb(246,244,252)">s</span><span style="background:rgb(136,37,61);color:rgb(246,244,252)"> </span><span style="background:rgb(138,37,62);color:rgb(246,244,252)"> </span><span style="background:rgb(139,38,63);color:rgb(246,244,252)"> </span><span style="background:rgb(141,39,63);color:rgb(246,244,252)"> </span><span style="background:rgb(142,39,64);color:rgb(246,244,252)"> </span><span style="background:rgb(144,40,65);color:rgb(246,244,252)"> </span><span style="background:rgb(146,41,66);color:rgb(246,244,252)"> </span><span style="background:rgb(147,41,67);color:rgb(246,244,252)"> </span><span style="background:rgb(149,42,68);color:rgb(246,244,252)"> </span><span style="background:rgb(150,43,68);color:rgb(246,244,252)"> </span><span style="background:rgb(152,43,69);color:rgb(246,244,252)"> </span><span style="background:rgb(153,44,70);color:rgb(246,244,252)"> </span><span style="background:rgb(155,45,71);color:rgb(246,244,252)"> </span><span style="background:rgb(243,139,168);color:rgb(42,6,16);font-weight:700"> ✗ CI FAILED</span><span style="background:rgb(30,22,30);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(80,15,31);color:rgb(200,180,190)"> </span><span style="background:rgb(82,16,32);color:rgb(200,180,190)">a</span><span style="background:rgb(83,16,33);color:rgb(200,180,191)">c</span><span style="background:rgb(84,16,33);color:rgb(201,180,191)">m</span><span style="background:rgb(85,17,34);color:rgb(201,180,191)">e</span><span style="background:rgb(87,17,35);color:rgb(201,180,191)">/</span><span style="background:rgb(88,18,36);color:rgb(202,181,192)">a</span><span style="background:rgb(90,19,37);color:rgb(202,181,192)">p</span><span style="background:rgb(90,19,38);color:rgb(202,181,192)">p</span><span style="background:rgb(92,20,38);color:rgb(203,181,192)"> </span><span style="background:rgb(94,20,38);color:rgb(203,181,192)">·</span><span style="background:rgb(95,21,39);color:rgb(204,182,192)"> </span><span style="background:rgb(97,22,40);color:rgb(204,182,193)">p</span><span style="background:rgb(97,22,41);color:rgb(204,182,193)">e</span><span style="background:rgb(99,23,42);color:rgb(205,182,193)">r</span><span style="background:rgb(100,23,42);color:rgb(205,182,193)">f</span><span style="background:rgb(102,23,43);color:rgb(206,182,193)">/</span><span style="background:rgb(103,24,44);color:rgb(206,182,194)">t</span><span style="background:rgb(104,25,45);color:rgb(206,183,194)">h</span><span style="background:rgb(105,25,45);color:rgb(207,183,194)">u</span><span style="background:rgb(107,26,46);color:rgb(207,183,194)">m</span><span style="background:rgb(109,27,46);color:rgb(208,183,194)">b</span><span style="background:rgb(110,27,47);color:rgb(208,183,195)">s</span><span style="background:rgb(111,28,48);color:rgb(208,184,195)"> </span><span style="background:rgb(112,28,49);color:rgb(208,184,195)">→</span><span style="background:rgb(114,29,50);color:rgb(209,184,195)"> </span><span style="background:rgb(115,30,51);color:rgb(209,184,196)">m</span><span style="background:rgb(117,30,51);color:rgb(210,184,196)">a</span><span style="background:rgb(117,30,52);color:rgb(210,184,196)">i</span><span style="background:rgb(119,31,52);color:rgb(210,184,196)">n</span><span style="background:rgb(121,31,53);color:rgb(211,184,196)"> </span><span style="background:rgb(122,32,54);color:rgb(211,185,197)"> </span><span style="background:rgb(124,33,55);color:rgb(212,185,197)">+4</span><span style="background:rgb(126,34,56);color:rgb(212,185,197)">8</span><span style="background:rgb(127,35,57);color:rgb(213,185,197)"> </span><span style="background:rgb(129,35,58);color:rgb(213,185,198)">−</span><span style="background:rgb(130,36,59);color:rgb(214,186,198)">9</span><span style="background:rgb(131,36,59);color:rgb(214,186,198)"> </span><span style="background:rgb(132,37,59);color:rgb(214,186,198)"> </span><span style="background:rgb(134,37,60);color:rgb(215,186,198)"> </span><span style="background:rgb(136,37,61);color:rgb(215,186,199)"> </span><span style="background:rgb(137,38,62);color:rgb(215,186,199)"> </span><span style="background:rgb(138,39,63);color:rgb(216,187,199)"> </span><span style="background:rgb(139,39,64);color:rgb(216,187,199)"> </span><span style="background:rgb(141,40,64);color:rgb(217,187,199)"> </span><span style="background:rgb(174,72,98);color:rgb(226,196,209)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▋</span><span style="background:rgb(44,25,35);color:rgb(189,183,191)"> @</span><span style="background:rgb(30,22,30);color:rgb(186,182,190)">octocat </span></div><div><span style="background:rgb(74,13,29);color:rgb(246,244,252)"> </span><span style="background:rgb(75,14,30);color:rgb(246,244,252)">F</span><span style="background:rgb(76,14,30);color:rgb(246,244,252)">a</span><span style="background:rgb(78,15,31);color:rgb(246,244,252)">i</span><span style="background:rgb(78,16,31);color:rgb(246,244,252)">l</span><span style="background:rgb(80,16,32);color:rgb(246,244,252)">i</span><span style="background:rgb(81,16,33);color:rgb(246,244,252)">n</span><span style="background:rgb(82,17,33);color:rgb(246,244,252)">g</span><span style="background:rgb(84,17,34);color:rgb(246,244,252)">:</span><span style="background:rgb(84,18,35);color:rgb(246,244,252)"> </span><span style="background:rgb(86,19,35);color:rgb(246,244,252)">b</span><span style="background:rgb(87,19,36);color:rgb(246,244,252)">u</span><span style="background:rgb(88,19,36);color:rgb(246,244,252)">i</span><span style="background:rgb(90,20,37);color:rgb(246,244,252)">l</span><span style="background:rgb(90,20,38);color:rgb(246,244,252)">d</span><span style="background:rgb(92,21,39);color:rgb(246,244,252)"> </span><span style="background:rgb(93,21,39);color:rgb(246,244,252)">·</span><span style="background:rgb(94,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(95,22,40);color:rgb(246,244,252)">1</span><span style="background:rgb(96,22,41);color:rgb(246,244,252)"> </span><span style="background:rgb(98,23,42);color:rgb(246,244,252)">c</span><span style="background:rgb(98,24,42);color:rgb(246,244,252)">h</span><span style="background:rgb(100,24,43);color:rgb(246,244,252)">e</span><span style="background:rgb(101,25,44);color:rgb(246,244,252)">c</span><span style="background:rgb(102,25,44);color:rgb(246,244,252)">k</span><span style="background:rgb(104,25,45);color:rgb(246,244,252)"> </span><span style="background:rgb(104,26,45);color:rgb(246,244,252)">f</span><span style="background:rgb(106,27,46);color:rgb(246,244,252)">a</span><span style="background:rgb(107,27,47);color:rgb(246,244,252)">i</span><span style="background:rgb(108,28,48);color:rgb(246,244,252)">l</span><span style="background:rgb(109,28,48);color:rgb(246,244,252)">i</span><span style="background:rgb(110,28,48);color:rgb(246,244,252)">n</span><span style="background:rgb(112,29,49);color:rgb(246,244,252)">g</span><span style="background:rgb(113,30,50);color:rgb(246,244,252)"> </span><span style="background:rgb(114,30,51);color:rgb(246,244,252)"> </span><span style="background:rgb(115,31,51);color:rgb(246,244,252)"> </span><span style="background:rgb(116,31,52);color:rgb(246,244,252)"> </span><span style="background:rgb(117,31,52);color:rgb(246,244,252)"> </span><span style="background:rgb(119,32,53);color:rgb(246,244,252)"> </span><span style="background:rgb(120,33,54);color:rgb(246,244,252)"> </span><span style="background:rgb(121,33,54);color:rgb(246,244,252)"> </span><span style="background:rgb(122,34,55);color:rgb(246,244,252)"> </span><span style="background:rgb(123,34,56);color:rgb(246,244,252)"> </span><span style="background:rgb(125,34,56);color:rgb(246,244,252)"> </span><span style="background:rgb(126,35,57);color:rgb(246,244,252)"> </span><span style="background:rgb(164,68,93);color:rgb(246,244,252)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▋</span><span style="background:rgb(44,25,35);color:rgb(246,244,252)">  </span><span style="background:rgb(30,22,30);color:rgb(246,244,252)">     4/5 </span></div><div><span style="background:rgb(68,12,26);color:rgb(246,244,252)"> </span><span style="background:rgb(69,13,27);color:rgb(246,244,252)"> </span><span style="background:rgb(70,13,28);color:rgb(246,244,252)"> </span><span style="background:rgb(71,13,28);color:rgb(246,244,252)"> </span><span style="background:rgb(71,14,28);color:rgb(246,244,252)"> </span><span style="background:rgb(73,14,29);color:rgb(246,244,252)"> </span><span style="background:rgb(74,15,30);color:rgb(246,244,252)"> </span><span style="background:rgb(75,15,30);color:rgb(246,244,252)"> </span><span style="background:rgb(76,15,31);color:rgb(246,244,252)"> </span><span style="background:rgb(77,16,31);color:rgb(246,244,252)"> </span><span style="background:rgb(78,17,32);color:rgb(246,244,252)"> </span><span style="background:rgb(79,17,33);color:rgb(246,244,252)"> </span><span style="background:rgb(80,17,33);color:rgb(246,244,252)"> </span><span style="background:rgb(81,18,33);color:rgb(246,244,252)"> </span><span style="background:rgb(82,18,34);color:rgb(246,244,252)"> </span><span style="background:rgb(83,18,34);color:rgb(246,244,252)"> </span><span style="background:rgb(84,19,35);color:rgb(246,244,252)"> </span><span style="background:rgb(85,19,36);color:rgb(246,244,252)"> </span><span style="background:rgb(86,20,36);color:rgb(246,244,252)"> </span><span style="background:rgb(87,20,37);color:rgb(246,244,252)"> </span><span style="background:rgb(88,20,37);color:rgb(246,244,252)"> </span><span style="background:rgb(89,21,38);color:rgb(246,244,252)"> </span><span style="background:rgb(90,22,38);color:rgb(246,244,252)"> </span><span style="background:rgb(91,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(92,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(93,23,40);color:rgb(246,244,252)"> </span><span style="background:rgb(94,23,41);color:rgb(246,244,252)"> </span><span style="background:rgb(95,23,41);color:rgb(246,244,252)"> </span><span style="background:rgb(96,24,41);color:rgb(246,244,252)"> </span><span style="background:rgb(97,25,42);color:rgb(246,244,252)"> </span><span style="background:rgb(98,25,43);color:rgb(246,244,252)"> </span><span style="background:rgb(99,25,43);color:rgb(246,244,252)"> </span><span style="background:rgb(100,26,44);color:rgb(246,244,252)"> </span><span style="background:rgb(101,26,44);color:rgb(246,244,252)"> </span><span style="background:rgb(102,26,45);color:rgb(246,244,252)"> </span><span style="background:rgb(103,27,45);color:rgb(246,244,252)"> </span><span style="background:rgb(104,27,46);color:rgb(246,244,252)"> </span><span style="background:rgb(105,28,46);color:rgb(246,244,252)"> </span><span style="background:rgb(106,28,47);color:rgb(246,244,252)"> </span><span style="background:rgb(107,28,47);color:rgb(246,244,252)"> </span><span style="background:rgb(108,29,48);color:rgb(246,244,252)"> </span><span style="background:rgb(109,30,49);color:rgb(246,244,252)"> </span><span style="background:rgb(110,30,49);color:rgb(246,244,252)"> </span><span style="background:rgb(111,30,49);color:rgb(246,244,252)"> </span><span style="background:rgb(154,66,88);color:rgb(246,244,252)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▌</span><span style="background:rgb(44,25,35);color:rgb(246,244,252)">  </span><span style="background:rgb(30,22,30);color:rgb(246,244,252)">          </span></div><div><span style="background:rgb(38,25,33);color:rgb(246,244,252);font-weight:700"> [ Fix with Claude ]                                      </span></div><div><span style="background:rgb(38,25,33);color:rgb(201,199,218)"> open #13 ↗ · checked 20s ago                             </span></div><div><span style="background:rgb(16,18,27);color:rgb(246,244,252)">                                                          </span></div><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> r: Refresh  d: Dismiss  x: Close                         </span></div><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> gh</span><span style="background:rgb(16,18,27);color:rgb(201,199,218)"> octocat </span><span style="background:rgb(141,193,137);color:rgb(170,228,166)">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span><span style="background:rgb(42,46,66);color:rgb(42,46,66)">▀</span><span style="background:rgb(16,18,27);color:rgb(166,227,161)">  94% ↻42m            </span><span style="background:rgb(16,18,27);color:rgb(138,136,160)">? </span></div><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)">   </span><span style="background:rgb(16,18,27);color:rgb(201,199,218)"> hubot   </span><span style="background:rgb(141,193,137);color:rgb(170,228,166)">▀▀▀▀▀▀▀▀▀</span><span style="background:rgb(42,46,66);color:rgb(170,228,166)">▀▀▀▀▀</span><span style="background:rgb(42,46,66);color:rgb(42,46,66)">▀▀▀▀▀▀▀▀</span><span style="background:rgb(16,18,27);color:rgb(166,227,161)">  41% ↻9m             </span><span style="background:rgb(16,18,27);color:rgb(138,136,160)">  </span></div></div></div>
+<figcaption style="margin-top: 14px; font-size: 14px; color: #A9A7BD;">The pane in the <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4;">tide</span> theme, cell for cell as your terminal draws it. Watch #12 go from its first check to merged: the glass fills as CI passes, then review, approval and the merge.</figcaption>
+</figure>
+</section>
+
+<!-- Features -->
+<section id="features" style="border-top: 1px solid #22253A; background: #10121B;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-direction: column; gap: 48px;">
+<div style="display: flex; flex-direction: column; gap: 14px; max-width: 760px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #CBA6F7;">What it does</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(32px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em;">Everything a PR needs from you, in one glance.</h2>
+<p style="margin: 0; color: #C9C7DA;">Each card leads with what matters most: merge conflicts first, then failing or running CI by name, then review, then whether GitHub will let it merge. A toast tells you when that changes.</p>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px;">
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(249,226,175,0.14); color: #F9E2AF; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">⠹</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Live CI, by name</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Which checks run, which wait, which failed, counted by the latest run of each job. The card animates while anything moves.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(243,139,168,0.14); color: #F38BA8; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">✗</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Fix with Claude</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Failing logs, trimmed to the error, drafted in your prompt box for Claude. Nothing is sent until you press Enter.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(203,166,247,0.14); color: #CBA6F7; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">❝</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Address with Claude</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Unresolved review threads by file and line, with replies and who wrote them, drafted the same way.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(166,227,161,0.14); color: #A6E3A1; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">✓</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Merge from the pane</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Squash, rebase or merge in your default method, always confirmed first. Auto-merge while checks are still running.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(137,180,250,0.14); color: #89B4FA; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">↺</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Reviews at a glance</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Who approved, who asked for changes, how many threads are open and outdated. One toast per new review.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(250,179,135,0.14); color: #FAB387; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">⚑</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Conflicts first</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">A merge conflict outranks everything else on the card, so the thing blocking you is the first thing you read.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(148,226,213,0.14); color: #94E2D5; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">◎</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Finds PRs by itself</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">PRs Claude opens, pushes to, reviews or merges are picked up on their own. Paste any PR link or use /pr-watch for the rest.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(186,194,222,0.14); color: #BAC2DE; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">▤</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Pane or band</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">Docked beside the conversation in a wide terminal, or a few lines above the prompt when space is tight.</p>
+</article>
+<article style="background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px;">
+<div style="display: flex; align-items: center; gap: 12px;">
+<span aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 9px; background: rgba(245,194,231,0.14); color: #F5C2E7; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-weight: 700; font-size: 16px;">↑</span>
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;">Tells you about updates</h3>
+</div>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">A quiet line and one toast per new version, checked on the poll it already makes, so it costs no extra request.</p>
+</article>
+</div>
+</div>
+</section>
+
+<!-- Fix with Claude spotlight -->
+<section style="border-top: 1px solid #22253A;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-wrap: wrap; gap: 48px; align-items: center;">
+<div style="flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #F38BA8;">Fix with Claude · Address with Claude</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(30px, 3.6vw, 42px); line-height: 1.1; letter-spacing: -0.02em;">CI failed? The fix is one press away.</h2>
+<p style="margin: 0; color: #C9C7DA;">Press <strong style="color: #ECEAF4;">Fix with Claude</strong> on a failing card and pr-watch collects the failing checks and the failed steps' logs, trims them to the part that matters, and drafts the ask in your prompt box. <strong style="color: #ECEAF4;">Address with Claude</strong> does the same for unresolved review threads, by file and line.</p>
+<p style="margin: 0; color: #C9C7DA;">It's a draft: read it, change it, and nothing reaches Claude until you press Enter. It never asks Claude to push, merge or reply on GitHub for you.</p>
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #F38BA8;">Try it: press Fix with Claude on the card.</p>
+</div>
+<div style="flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 12px;">
+<div style="background: rgb(16,18,27); border: 1px solid #2A2E42; border-radius: 12px; padding: 12px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; overflow-x: auto;"><div class="g" data-grid="fixGrid"><div><span style="background:rgb(86,16,34);color:rgb(246,244,252)"> </span><span style="background:rgb(88,17,35);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(89,17,36);color:rgb(246,244,252);font-weight:700">1</span><span style="background:rgb(91,18,37);color:rgb(246,244,252);font-weight:700">3</span><span style="background:rgb(93,19,38);color:rgb(246,244,252)"> </span><span style="background:rgb(95,20,39);color:rgb(246,244,252)">C</span><span style="background:rgb(96,20,40);color:rgb(246,244,252)">a</span><span style="background:rgb(98,21,41);color:rgb(246,244,252)">c</span><span style="background:rgb(100,22,41);color:rgb(246,244,252)">h</span><span style="background:rgb(102,23,42);color:rgb(246,244,252)">e</span><span style="background:rgb(103,23,43);color:rgb(246,244,252)"> </span><span style="background:rgb(105,24,44);color:rgb(246,244,252)">t</span><span style="background:rgb(107,25,45);color:rgb(246,244,252)">h</span><span style="background:rgb(109,25,46);color:rgb(246,244,252)">e</span><span style="background:rgb(110,26,47);color:rgb(246,244,252)"> </span><span style="background:rgb(112,27,48);color:rgb(246,244,252)">t</span><span style="background:rgb(114,28,49);color:rgb(246,244,252)">h</span><span style="background:rgb(116,28,50);color:rgb(246,244,252)">u</span><span style="background:rgb(117,29,51);color:rgb(246,244,252)">m</span><span style="background:rgb(119,30,52);color:rgb(246,244,252)">b</span><span style="background:rgb(121,30,53);color:rgb(246,244,252)">n</span><span style="background:rgb(123,31,54);color:rgb(246,244,252)">a</span><span style="background:rgb(124,32,55);color:rgb(246,244,252)">i</span><span style="background:rgb(126,33,56);color:rgb(246,244,252)">l</span><span style="background:rgb(128,33,56);color:rgb(246,244,252)"> </span><span style="background:rgb(130,34,57);color:rgb(246,244,252)">r</span><span style="background:rgb(131,35,58);color:rgb(246,244,252)">e</span><span style="background:rgb(133,36,59);color:rgb(246,244,252)">n</span><span style="background:rgb(135,36,60);color:rgb(246,244,252)">d</span><span style="background:rgb(137,37,61);color:rgb(246,244,252)">e</span><span style="background:rgb(138,38,62);color:rgb(246,244,252)">r</span><span style="background:rgb(140,38,63);color:rgb(246,244,252)">s</span><span style="background:rgb(142,39,64);color:rgb(246,244,252)"> </span><span style="background:rgb(144,40,65);color:rgb(246,244,252)"> </span><span style="background:rgb(145,41,66);color:rgb(246,244,252)"> </span><span style="background:rgb(147,41,67);color:rgb(246,244,252)"> </span><span style="background:rgb(149,42,68);color:rgb(246,244,252)"> </span><span style="background:rgb(151,43,69);color:rgb(246,244,252)"> </span><span style="background:rgb(152,44,70);color:rgb(246,244,252)"> </span><span style="background:rgb(243,139,168);color:rgb(42,6,16);font-weight:700"> ✗ CI FAILED</span><span style="background:rgb(30,22,30);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(80,15,31);color:rgb(200,180,190)"> </span><span style="background:rgb(82,16,32);color:rgb(200,180,190)">a</span><span style="background:rgb(83,16,33);color:rgb(200,180,191)">c</span><span style="background:rgb(84,16,34);color:rgb(201,180,191)">m</span><span style="background:rgb(86,17,35);color:rgb(201,180,191)">e</span><span style="background:rgb(88,18,36);color:rgb(202,181,192)">/</span><span style="background:rgb(89,18,37);color:rgb(202,181,192)">a</span><span style="background:rgb(90,19,37);color:rgb(202,181,192)">p</span><span style="background:rgb(92,20,38);color:rgb(203,181,192)">p</span><span style="background:rgb(94,20,38);color:rgb(203,181,192)"> </span><span style="background:rgb(95,21,39);color:rgb(204,182,192)">·</span><span style="background:rgb(97,22,40);color:rgb(204,182,193)"> </span><span style="background:rgb(98,23,41);color:rgb(205,182,193)">p</span><span style="background:rgb(99,23,42);color:rgb(205,182,193)">e</span><span style="background:rgb(101,23,43);color:rgb(205,182,193)">r</span><span style="background:rgb(103,24,44);color:rgb(206,182,194)">f</span><span style="background:rgb(104,24,45);color:rgb(206,182,194)">/</span><span style="background:rgb(105,25,45);color:rgb(207,183,194)">t</span><span style="background:rgb(107,26,46);color:rgb(207,183,194)">h</span><span style="background:rgb(109,27,47);color:rgb(208,183,195)">u</span><span style="background:rgb(110,27,48);color:rgb(208,183,195)">m</span><span style="background:rgb(111,28,48);color:rgb(208,184,195)">b</span><span style="background:rgb(113,29,49);color:rgb(209,184,195)">s</span><span style="background:rgb(115,29,50);color:rgb(209,184,195)"> </span><span style="background:rgb(116,30,51);color:rgb(210,184,196)">→</span><span style="background:rgb(117,30,52);color:rgb(210,184,196)"> </span><span style="background:rgb(119,31,52);color:rgb(210,184,196)">m</span><span style="background:rgb(121,31,53);color:rgb(211,184,196)">a</span><span style="background:rgb(122,32,54);color:rgb(211,185,197)">i</span><span style="background:rgb(124,33,55);color:rgb(212,185,197)">n</span><span style="background:rgb(125,33,56);color:rgb(212,185,197)"> </span><span style="background:rgb(126,34,57);color:rgb(212,185,197)"> </span><span style="background:rgb(128,35,58);color:rgb(213,185,198)">+</span><span style="background:rgb(130,36,59);color:rgb(214,186,198)">4</span><span style="background:rgb(131,36,59);color:rgb(214,186,198)">8</span><span style="background:rgb(132,37,59);color:rgb(214,186,198)"> </span><span style="background:rgb(134,37,60);color:rgb(215,186,198)">−</span><span style="background:rgb(136,37,61);color:rgb(215,186,199)">9</span><span style="background:rgb(138,38,62);color:rgb(216,186,199)"> </span><span style="background:rgb(138,39,63);color:rgb(216,187,199)"> </span><span style="background:rgb(140,40,64);color:rgb(216,187,199)"> </span><span style="background:rgb(174,72,98);color:rgb(226,196,209)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▊</span><span style="background:rgb(44,25,35);color:rgb(189,183,191)">@o</span><span style="background:rgb(30,22,30);color:rgb(186,182,190)">ctocat </span></div><div><span style="background:rgb(74,13,29);color:rgb(246,244,252)"> </span><span style="background:rgb(75,14,30);color:rgb(246,244,252)">F</span><span style="background:rgb(77,14,30);color:rgb(246,244,252)">a</span><span style="background:rgb(78,15,31);color:rgb(246,244,252)">i</span><span style="background:rgb(79,16,32);color:rgb(246,244,252)">l</span><span style="background:rgb(81,16,33);color:rgb(246,244,252)">i</span><span style="background:rgb(82,16,33);color:rgb(246,244,252)">n</span><span style="background:rgb(83,17,34);color:rgb(246,244,252)">g</span><span style="background:rgb(84,18,35);color:rgb(246,244,252)">:</span><span style="background:rgb(86,19,36);color:rgb(246,244,252)"> </span><span style="background:rgb(87,19,36);color:rgb(246,244,252)">b</span><span style="background:rgb(88,19,36);color:rgb(246,244,252)">u</span><span style="background:rgb(90,20,37);color:rgb(246,244,252)">i</span><span style="background:rgb(91,20,38);color:rgb(246,244,252)">l</span><span style="background:rgb(93,21,39);color:rgb(246,244,252)">d</span><span style="background:rgb(93,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(95,22,40);color:rgb(246,244,252)">·</span><span style="background:rgb(96,22,41);color:rgb(246,244,252)"> </span><span style="background:rgb(98,23,42);color:rgb(246,244,252)">1</span><span style="background:rgb(98,24,42);color:rgb(246,244,252)"> </span><span style="background:rgb(100,25,43);color:rgb(246,244,252)">c</span><span style="background:rgb(101,25,44);color:rgb(246,244,252)">h</span><span style="background:rgb(103,25,45);color:rgb(246,244,252)">e</span><span style="background:rgb(104,26,45);color:rgb(246,244,252)">c</span><span style="background:rgb(105,27,46);color:rgb(246,244,252)">k</span><span style="background:rgb(107,27,47);color:rgb(246,244,252)"> </span><span style="background:rgb(108,28,48);color:rgb(246,244,252)">f</span><span style="background:rgb(110,28,48);color:rgb(246,244,252)">ai</span><span style="background:rgb(112,29,49);color:rgb(246,244,252)">l</span><span style="background:rgb(113,30,50);color:rgb(246,244,252)">i</span><span style="background:rgb(115,31,51);color:rgb(246,244,252)">n</span><span style="background:rgb(116,31,51);color:rgb(246,244,252)">g</span><span style="background:rgb(117,31,52);color:rgb(246,244,252)"> </span><span style="background:rgb(119,32,53);color:rgb(246,244,252)"> </span><span style="background:rgb(120,33,54);color:rgb(246,244,252)"> </span><span style="background:rgb(121,33,54);color:rgb(246,244,252)"> </span><span style="background:rgb(122,34,55);color:rgb(246,244,252)"> </span><span style="background:rgb(124,34,56);color:rgb(246,244,252)"> </span><span style="background:rgb(125,34,57);color:rgb(246,244,252)"> </span><span style="background:rgb(163,68,93);color:rgb(246,244,252)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▉</span><span style="background:rgb(44,25,35);color:rgb(246,244,252)">  </span><span style="background:rgb(30,22,30);color:rgb(246,244,252)">    4/5 </span></div><div><span style="background:rgb(68,12,26);color:rgb(246,244,252)"> </span><span style="background:rgb(69,13,27);color:rgb(246,244,252)"> </span><span style="background:rgb(70,13,28);color:rgb(246,244,252)"> </span><span style="background:rgb(71,13,28);color:rgb(246,244,252)"> </span><span style="background:rgb(72,14,29);color:rgb(246,244,252)"> </span><span style="background:rgb(73,15,30);color:rgb(246,244,252)"> </span><span style="background:rgb(75,15,30);color:rgb(246,244,252)"> </span><span style="background:rgb(76,15,31);color:rgb(246,244,252)"> </span><span style="background:rgb(77,16,31);color:rgb(246,244,252)"> </span><span style="background:rgb(78,17,32);color:rgb(246,244,252)"> </span><span style="background:rgb(79,17,33);color:rgb(246,244,252)"> </span><span style="background:rgb(80,17,33);color:rgb(246,244,252)"> </span><span style="background:rgb(81,18,34);color:rgb(246,244,252)"> </span><span style="background:rgb(83,18,34);color:rgb(246,244,252)"> </span><span style="background:rgb(83,19,35);color:rgb(246,244,252)"> </span><span style="background:rgb(85,19,36);color:rgb(246,244,252)"> </span><span style="background:rgb(86,20,36);color:rgb(246,244,252)"> </span><span style="background:rgb(87,20,37);color:rgb(246,244,252)"> </span><span style="background:rgb(88,21,38);color:rgb(246,244,252)"> </span><span style="background:rgb(89,21,38);color:rgb(246,244,252)"> </span><span style="background:rgb(90,22,38);color:rgb(246,244,252)"> </span><span style="background:rgb(91,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(93,23,39);color:rgb(246,244,252)"> </span><span style="background:rgb(94,23,40);color:rgb(246,244,252)"> </span><span style="background:rgb(95,23,41);color:rgb(246,244,252)"> </span><span style="background:rgb(96,24,41);color:rgb(246,244,252)"> </span><span style="background:rgb(97,25,42);color:rgb(246,244,252)"> </span><span style="background:rgb(98,25,43);color:rgb(246,244,252)"> </span><span style="background:rgb(99,25,43);color:rgb(246,244,252)"> </span><span style="background:rgb(101,26,44);color:rgb(246,244,252)">  </span><span style="background:rgb(102,26,45);color:rgb(246,244,252)"> </span><span style="background:rgb(104,27,46);color:rgb(246,244,252)"> </span><span style="background:rgb(105,28,46);color:rgb(246,244,252)"> </span><span style="background:rgb(106,28,47);color:rgb(246,244,252)"> </span><span style="background:rgb(107,28,47);color:rgb(246,244,252)"> </span><span style="background:rgb(108,29,48);color:rgb(246,244,252)"> </span><span style="background:rgb(109,30,49);color:rgb(246,244,252)"> </span><span style="background:rgb(111,30,49);color:rgb(246,244,252)"> </span><span style="background:rgb(154,65,88);color:rgb(246,244,252)"> </span><span style="background:rgb(30,22,30);color:rgb(183,68,96)">▋</span><span style="background:rgb(44,25,35);color:rgb(246,244,252)">  </span><span style="background:rgb(30,22,30);color:rgb(246,244,252)">         </span></div></div><div style="display: flex; flex-wrap: wrap; align-items: center; width: 52ch; background: rgb(38,25,33); color: #D8D2E0; white-space: pre;" data-style="display: flex; flex-wrap: wrap; align-items: center; width: 52ch; background: {{fixTint}}; color: #D8D2E0; white-space: pre;"><button data-if="fixIdle" type="button" data-on="pressFix" style="font: inherit; font-weight: 700; background: transparent; border: 0; padding: 0 1ch; min-height: 30px; cursor: pointer; color: #FFF0F3;">[ Fix with Claude ]</button><span data-if="fixBusy" hidden style="padding: 0 1ch; line-height: 30px; font-weight: 700; color: #9A8F9C;">[ Fix with Claude ]</span><span style="padding: 0 1ch; line-height: 30px;">open #13 ↗ · checked 20s ago</span></div></div>
+<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 12px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; color: #D8D6E6; min-height: 236px; display: flex; flex-direction: column; gap: 8px;" data-style="background: #141622; border: 1px solid {{promptBorder}}; border-radius: 12px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; color: #D8D6E6; min-height: 236px; display: flex; flex-direction: column; gap: 8px;">
+<div style="display: flex; justify-content: space-between; gap: 12px; color: #8A88A0;"><span>❯ prompt box</span><span><span data-text="promptHint">empty</span></span></div>
+<div style="white-space: pre-wrap; overflow-wrap: anywhere;"><span data-text="typed"></span><span style="display: inline-block; width: 8px; height: 15px; background: #CBA6F7; vertical-align: text-bottom;"></span></div>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;"><button type="button" data-on="replayFix" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #34384F; background: transparent; color: #ECEAF4; font: inherit; font-size: 15px; font-weight: 500; cursor: pointer;">Replay</button><span style="color: #A9A7BD; font-size: 15px;"><span data-text="fixNote">Nothing is sent to Claude: the draft waits for your Enter.</span></span></div>
+</div>
+</div>
+</section>
+
+<!-- Merge spotlight -->
+<section style="border-top: 1px solid #22253A; background: #10121B;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-wrap: wrap-reverse; gap: 48px; align-items: center;">
+<div style="flex: 1 1 460px; min-width: 0; display: flex; flex-direction: column; gap: 12px;">
+<div style="background: rgb(16,18,27); border: 1px solid #2A2E42; border-radius: 12px; padding: 12px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; overflow-x: auto;"><div class="g" data-grid="mergeGrid"><div><span style="background:rgb(14,66,42);color:rgb(246,244,252)"> </span><span style="background:rgb(14,67,43);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(15,68,43);color:rgb(246,244,252);font-weight:700">7</span><span style="background:rgb(15,69,44);color:rgb(246,244,252)"> </span><span style="background:rgb(16,70,45);color:rgb(246,244,252);font-weight:700">P</span><span style="background:rgb(16,71,45);color:rgb(246,244,252)">a</span><span style="background:rgb(17,71,46);color:rgb(246,244,252)">g</span><span style="background:rgb(17,72,47);color:rgb(246,244,252)">i</span><span style="background:rgb(17,73,47);color:rgb(246,244,252)">n</span><span style="background:rgb(18,74,48);color:rgb(246,244,252)">a</span><span style="background:rgb(18,75,49);color:rgb(246,244,252)">t</span><span style="background:rgb(19,76,49);color:rgb(246,244,252)">e</span><span style="background:rgb(19,77,50);color:rgb(246,244,252)"> </span><span style="background:rgb(20,78,51);color:rgb(246,244,252)">t</span><span style="background:rgb(20,79,51);color:rgb(246,244,252)">h</span><span style="background:rgb(20,80,52);color:rgb(246,244,252)">e</span><span style="background:rgb(21,81,52);color:rgb(246,244,252)"> </span><span style="background:rgb(21,82,53);color:rgb(246,244,252)">a</span><span style="background:rgb(22,82,54);color:rgb(246,244,252)">u</span><span style="background:rgb(22,83,54);color:rgb(246,244,252)">d</span><span style="background:rgb(23,84,55);color:rgb(246,244,252)">i</span><span style="background:rgb(23,85,56);color:rgb(246,244,252)">t</span><span style="background:rgb(23,86,56);color:rgb(246,244,252)"> </span><span style="background:rgb(24,87,57);color:rgb(246,244,252)">l</span><span style="background:rgb(24,88,58);color:rgb(246,244,252)">o</span><span style="background:rgb(25,89,58);color:rgb(246,244,252)">g</span><span style="background:rgb(25,90,59);color:rgb(246,244,252)"> </span><span style="background:rgb(25,91,60);color:rgb(246,244,252)">e</span><span style="background:rgb(26,92,60);color:rgb(246,244,252)">n</span><span style="background:rgb(26,93,61);color:rgb(246,244,252)">d</span><span style="background:rgb(27,93,62);color:rgb(246,244,252)">p</span><span style="background:rgb(27,94,62);color:rgb(246,244,252)">o</span><span style="background:rgb(28,95,63);color:rgb(246,244,252)">i</span><span style="background:rgb(28,96,64);color:rgb(246,244,252)">n</span><span style="background:rgb(28,97,64);color:rgb(246,244,252)">t</span><span style="background:rgb(29,98,65);color:rgb(246,244,252)"> </span><span style="background:rgb(29,99,66);color:rgb(246,244,252)"> </span><span style="background:rgb(30,100,66);color:rgb(246,244,252)"> </span><span style="background:rgb(30,101,67);color:rgb(246,244,252)"> </span><span style="background:rgb(31,102,68);color:rgb(246,244,252)"> </span><span style="background:rgb(31,103,68);color:rgb(246,244,252)"> </span><span style="background:rgb(31,104,69);color:rgb(246,244,252)"> </span><span style="background:rgb(32,104,69);color:rgb(246,244,252)"> </span><span style="background:rgb(166,227,161);color:rgb(11,42,18);font-weight:700"> ✓ READY</span><span style="background:rgb(36,113,75);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(13,62,39);color:rgb(181,193,192)"> </span><span style="background:rgb(13,63,40);color:rgb(181,193,193)">a</span><span style="background:rgb(14,63,40);color:rgb(181,193,193)">c</span><span style="background:rgb(14,64,41);color:rgb(181,194,193)">m</span><span style="background:rgb(15,65,42);color:rgb(181,194,193)">e</span><span style="background:rgb(15,66,42);color:rgb(181,194,193)">/</span><span style="background:rgb(15,66,43);color:rgb(181,194,193)">a</span><span style="background:rgb(15,67,43);color:rgb(181,194,193)">p</span><span style="background:rgb(15,68,43);color:rgb(181,195,193)">i</span><span style="background:rgb(16,69,44);color:rgb(182,195,194)"> </span><span style="background:rgb(16,70,45);color:rgb(182,195,194)">·</span><span style="background:rgb(17,70,45);color:rgb(182,195,194)"> </span><span style="background:rgb(17,71,46);color:rgb(182,196,194)">f</span><span style="background:rgb(18,72,47);color:rgb(182,196,195)">e</span><span style="background:rgb(18,73,47);color:rgb(182,196,195)">a</span><span style="background:rgb(18,74,48);color:rgb(182,196,195)">t</span><span style="background:rgb(19,75,48);color:rgb(182,197,195)">/</span><span style="background:rgb(19,76,49);color:rgb(182,197,195)">a</span><span style="background:rgb(20,76,50);color:rgb(183,197,195)">u</span><span style="background:rgb(20,77,50);color:rgb(183,197,195)">d</span><span style="background:rgb(21,77,50);color:rgb(183,197,195)">i</span><span style="background:rgb(21,78,51);color:rgb(183,198,196)">t</span><span style="background:rgb(21,79,51);color:rgb(183,198,196)">-</span><span style="background:rgb(22,80,52);color:rgb(183,198,196)">p</span><span style="background:rgb(22,81,53);color:rgb(183,198,196)">a</span><span style="background:rgb(22,82,53);color:rgb(183,199,196)">g</span><span style="background:rgb(22,83,54);color:rgb(183,199,197)">e</span><span style="background:rgb(22,84,55);color:rgb(183,199,197)">s</span><span style="background:rgb(23,84,55);color:rgb(184,199,197)"> </span><span style="background:rgb(23,85,56);color:rgb(184,199,197)">→</span><span style="background:rgb(24,85,57);color:rgb(184,199,197)"> </span><span style="background:rgb(24,86,57);color:rgb(184,200,197)">m</span><span style="background:rgb(25,87,57);color:rgb(184,200,197)">a</span><span style="background:rgb(25,88,58);color:rgb(184,200,198)">i</span><span style="background:rgb(25,89,58);color:rgb(184,201,198)">n</span><span style="background:rgb(26,90,59);color:rgb(184,201,198)"> </span><span style="background:rgb(26,91,60);color:rgb(184,201,198)"> </span><span style="background:rgb(27,91,60);color:rgb(185,201,198)">+</span><span style="background:rgb(27,92,61);color:rgb(185,201,199)">1</span><span style="background:rgb(28,93,62);color:rgb(185,202,199)">2</span><span style="background:rgb(28,94,62);color:rgb(185,202,199)">0</span><span style="background:rgb(28,95,63);color:rgb(185,202,199)"> </span><span style="background:rgb(29,95,63);color:rgb(185,202,199)">−</span><span style="background:rgb(29,96,64);color:rgb(185,203,199)">1</span><span style="background:rgb(29,97,64);color:rgb(185,203,199)">4</span><span style="background:rgb(29,98,64);color:rgb(185,203,199)"> </span><span style="background:rgb(30,98,65);color:rgb(186,203,200)"> </span><span style="background:rgb(30,99,66);color:rgb(186,203,200)"> </span><span style="background:rgb(30,100,66);color:rgb(186,204,200)"> </span><span style="background:rgb(31,101,67);color:rgb(186,204,200)"> </span><span style="background:rgb(31,102,68);color:rgb(186,204,200)"> </span><span style="background:rgb(32,103,68);color:rgb(186,205,200)"> </span></div><div><span style="background:rgb(12,57,36);color:rgb(246,244,252)"> </span><span style="background:rgb(12,58,37);color:rgb(246,244,252)">R</span><span style="background:rgb(12,59,37);color:rgb(246,244,252)">e</span><span style="background:rgb(12,60,38);color:rgb(246,244,252)">a</span><span style="background:rgb(13,60,38);color:rgb(246,244,252)">d</span><span style="background:rgb(13,61,38);color:rgb(246,244,252)">y</span><span style="background:rgb(14,61,39);color:rgb(246,244,252)"> </span><span style="background:rgb(14,62,40);color:rgb(246,244,252)">t</span><span style="background:rgb(14,63,40);color:rgb(246,244,252)">o</span><span style="background:rgb(15,63,41);color:rgb(246,244,252)"> </span><span style="background:rgb(15,64,41);color:rgb(246,244,252)">m</span><span style="background:rgb(15,65,41);color:rgb(246,244,252)">e</span><span style="background:rgb(15,66,42);color:rgb(246,244,252)">r</span><span style="background:rgb(16,66,43);color:rgb(246,244,252)">g</span><span style="background:rgb(16,67,43);color:rgb(246,244,252)">e</span><span style="background:rgb(16,68,44);color:rgb(246,244,252)"> </span><span style="background:rgb(17,69,44);color:rgb(246,244,252)">· </span><span style="background:rgb(18,69,45);color:rgb(246,244,252)">✓</span><span style="background:rgb(18,70,45);color:rgb(246,244,252)"> </span><span style="background:rgb(18,71,46);color:rgb(246,244,252)">h</span><span style="background:rgb(18,72,47);color:rgb(246,244,252)">ub</span><span style="background:rgb(19,73,47);color:rgb(246,244,252)">o</span><span style="background:rgb(19,74,48);color:rgb(246,244,252)">t</span><span style="background:rgb(20,75,48);color:rgb(246,244,252)"> </span><span style="background:rgb(20,75,49);color:rgb(246,244,252)">a</span><span style="background:rgb(20,76,50);color:rgb(246,244,252)">p</span><span style="background:rgb(21,77,50);color:rgb(246,244,252)">p</span><span style="background:rgb(21,78,50);color:rgb(246,244,252)">r</span><span style="background:rgb(21,78,51);color:rgb(246,244,252)">ov</span><span style="background:rgb(22,79,52);color:rgb(246,244,252)">e</span><span style="background:rgb(22,80,53);color:rgb(246,244,252)">d</span><span style="background:rgb(22,81,53);color:rgb(246,244,252)"> </span><span style="background:rgb(23,81,53);color:rgb(246,244,252)"> </span><span style="background:rgb(23,82,54);color:rgb(246,244,252)"> </span><span style="background:rgb(24,83,54);color:rgb(246,244,252)"> </span><span style="background:rgb(24,84,55);color:rgb(246,244,252)"> </span><span style="background:rgb(24,84,56);color:rgb(246,244,252)"> </span><span style="background:rgb(24,85,56);color:rgb(246,244,252)"> </span><span style="background:rgb(24,86,56);color:rgb(246,244,252)"> </span><span style="background:rgb(25,86,56);color:rgb(246,244,252)"> </span><span style="background:rgb(25,87,57);color:rgb(246,244,252)"> </span><span style="background:rgb(26,87,58);color:rgb(246,244,252)"> </span><span style="background:rgb(26,88,58);color:rgb(246,244,252)"> </span><span style="background:rgb(27,89,59);color:rgb(246,244,252)">  </span><span style="background:rgb(27,90,59);color:rgb(246,244,252)">6</span><span style="background:rgb(27,91,60);color:rgb(246,244,252)">/</span><span style="background:rgb(27,92,61);color:rgb(246,244,252)">6</span><span style="background:rgb(28,92,61);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(11,53,33);color:rgb(246,244,252)"> </span><span style="background:rgb(11,54,34);color:rgb(246,244,252)">  </span><span style="background:rgb(11,55,35);color:rgb(246,244,252)"> </span><span style="background:rgb(12,56,35);color:rgb(246,244,252)">  </span><span style="background:rgb(12,56,36);color:rgb(246,244,252)"> </span><span style="background:rgb(12,57,36);color:rgb(246,244,252)">  </span><span style="background:rgb(13,58,37);color:rgb(246,244,252)"> </span><span style="background:rgb(13,59,38);color:rgb(246,244,252)"> </span><span style="background:rgb(14,59,38);color:rgb(246,244,252)"> </span><span style="background:rgb(14,60,38);color:rgb(246,244,252)"> </span><span style="background:rgb(14,61,39);color:rgb(246,244,252)">  </span><span style="background:rgb(14,62,39);color:rgb(246,244,252)"> </span><span style="background:rgb(15,62,39);color:rgb(246,244,252)"> </span><span style="background:rgb(15,63,40);color:rgb(246,244,252)"> </span><span style="background:rgb(16,63,41);color:rgb(246,244,252)"> </span><span style="background:rgb(16,64,41);color:rgb(246,244,252)">  </span><span style="background:rgb(16,65,42);color:rgb(246,244,252)">  </span><span style="background:rgb(17,66,43);color:rgb(246,244,252)"> </span><span style="background:rgb(17,67,43);color:rgb(246,244,252)">  </span><span style="background:rgb(17,68,44);color:rgb(246,244,252)"> </span><span style="background:rgb(17,69,44);color:rgb(246,244,252)"> </span><span style="background:rgb(18,69,44);color:rgb(246,244,252)"> </span><span style="background:rgb(18,70,45);color:rgb(246,244,252)"> </span><span style="background:rgb(19,70,46);color:rgb(246,244,252)">  </span><span style="background:rgb(19,71,46);color:rgb(246,244,252)"> </span><span style="background:rgb(19,72,47);color:rgb(246,244,252)">  </span><span style="background:rgb(20,73,48);color:rgb(246,244,252)"> </span><span style="background:rgb(20,74,48);color:rgb(246,244,252)"> </span><span style="background:rgb(21,74,48);color:rgb(246,244,252)"> </span><span style="background:rgb(21,75,49);color:rgb(246,244,252)">  </span><span style="background:rgb(21,76,49);color:rgb(246,244,252)"> </span><span style="background:rgb(21,77,50);color:rgb(246,244,252)"> </span><span style="background:rgb(22,77,50);color:rgb(246,244,252)"> </span><span style="background:rgb(22,77,51);color:rgb(246,244,252)"> </span><span style="background:rgb(22,78,51);color:rgb(246,244,252)"> </span><span style="background:rgb(22,79,51);color:rgb(246,244,252)"> </span><span style="background:rgb(23,79,52);color:rgb(246,244,252)"> </span><span style="background:rgb(23,80,52);color:rgb(246,244,252)">  </span><span style="background:rgb(24,81,53);color:rgb(246,244,252)"> </span><span style="background:rgb(24,82,54);color:rgb(246,244,252)">  </span></div></div><div style="display: flex; flex-wrap: wrap; align-items: center; width: 52ch; background: rgb(20,46,34); color: #D2E4DA; white-space: pre;" data-style="display: flex; flex-wrap: wrap; align-items: center; width: 52ch; background: {{mergeTint}}; color: #D2E4DA; white-space: pre;"><button data-if="mReady" type="button" data-on="pressMerge" style="font: inherit; font-weight: 700; background: transparent; border: 0; padding: 0 1ch; min-height: 30px; cursor: pointer; color: #F0FFF6;">[ Squash &amp; merge ]</button><span data-if="mReady" style="padding: 0 1ch; line-height: 30px;">⇄ rebase</span><span data-if="mConfirm" hidden style="padding: 0 1ch; line-height: 30px; color: #F9E2AF;">Squash-merge #7 into main?</span><button data-if="mConfirm" hidden type="button" data-on="confirmMerge" style="font: inherit; font-weight: 700; background: transparent; border: 0; padding: 0 1ch; min-height: 30px; cursor: pointer; color: #F0FFF6;">[ y Confirm ]</button><button data-if="mConfirm" hidden type="button" data-on="cancelMerge" style="font: inherit; font-weight: 700; background: transparent; border: 0; padding: 0 1ch; min-height: 30px; cursor: pointer; color: #CDE6D7;">[ n Cancel ]</button><span data-if="mBusy" hidden style="padding: 0 1ch; line-height: 30px; color: #CDE6D7;">Merging…</span><button data-if="mMerged" hidden type="button" data-on="replayMerge" style="font: inherit; font-weight: 700; background: transparent; border: 0; padding: 0 1ch; min-height: 30px; cursor: pointer; color: #F4F0FF;">[ Dismiss ]</button><span style="padding: 0 1ch; line-height: 30px;">open #7 ↗ · checked just now</span></div></div>
+<div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;"><button type="button" data-on="replayMerge" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid #34384F; background: transparent; color: #ECEAF4; font: inherit; font-size: 15px; font-weight: 500; cursor: pointer;">Replay</button><span style="color: #A9A7BD; font-size: 15px;"><span data-text="mergeNote">The method is your GitHub default, or the first the repo allows.</span></span></div>
+</div>
+<div style="flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A6E3A1;">Merge from the pane</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(30px, 3.6vw, 42px); line-height: 1.1; letter-spacing: -0.02em;">Green and approved? Merge it where you are.</h2>
+<p style="margin: 0; color: #C9C7DA;">Once GitHub would merge the PR and your account can write to the repo, the card offers the merge, in your default method or the first the repo allows. It always asks first. Still waiting on checks? Turn on auto-merge instead, and GitHub merges it the moment everything passes.</p>
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A6E3A1;">Try it: press Squash &amp; merge.</p>
+</div>
+</div>
+</section>
+
+<!-- Polling -->
+<section id="polling" style="border-top: 1px solid #22253A;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-direction: column; gap: 44px;">
+<div style="display: flex; flex-direction: column; gap: 14px; max-width: 780px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #94E2D5;">How it polls</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(32px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em;">One poller for every session on the machine.</h2>
+<p style="margin: 0; color: #C9C7DA;">Thirty sessions watching thirty PRs cost about one GitHub call every 20 to 60 seconds, not thirty. Sessions announce what they watch; one of them takes a short lease, asks GitHub for all of it in batched GraphQL, and every session reads the shared result.</p>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px;">
+<div style="flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 8px;">
+<div style="border: 1px solid #2A2E42; border-radius: 10px; padding: 10px 14px; background: #151722;">session A · <span style="color: #A9A7BD;">#12</span></div>
+<div style="border: 1px solid #2A2E42; border-radius: 10px; padding: 10px 14px; background: #151722;">session B · <span style="color: #A9A7BD;">#13 #7</span></div>
+<div style="border: 1px dashed #34384F; border-radius: 10px; padding: 10px 14px; color: #A9A7BD;">…up to 30+</div>
+</div>
+<div aria-hidden="true" style="flex: 0 0 auto; display: flex; align-items: center; color: #6F6D86; font-size: 22px;">→</div>
+<div style="flex: 1 1 200px; min-width: 0; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; background: #151722; display: flex; flex-direction: column; gap: 6px; justify-content: center;">
+<span style="color: #ECEAF4; font-weight: 700;">sessions/*.json</span>
+<span style="color: #A9A7BD; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px;">each lists its PRs; the file's age is its heartbeat</span>
+</div>
+<div aria-hidden="true" style="flex: 0 0 auto; display: flex; align-items: center; color: #6F6D86; font-size: 22px;">→</div>
+<div style="flex: 1 1 200px; min-width: 0; border: 1px solid #4B3F6B; border-radius: 10px; padding: 14px 16px; background: #1A1628; display: flex; flex-direction: column; gap: 6px; justify-content: center;">
+<span style="color: #CBA6F7; font-weight: 700;">one lease holder</span>
+<span style="color: #B9B0D0; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px;">a 30 s lease; batches of 20 PRs, one query each, per gh login</span>
+</div>
+<div aria-hidden="true" style="flex: 0 0 auto; display: flex; align-items: center; color: #6F6D86; font-size: 22px;">→</div>
+<div style="flex: 1 1 200px; min-width: 0; border: 1px solid #2E5A55; border-radius: 10px; padding: 14px 16px; background: #12201F; display: flex; flex-direction: column; gap: 6px; justify-content: center;">
+<span style="color: #94E2D5; font-weight: 700;">results.json</span>
+<span style="color: #B3CFCB; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px;">every session folds it into its cards</span>
+</div>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 16px;">
+<div style="border-top: 2px solid #CBA6F7; padding-top: 16px; display: flex; flex-direction: column; gap: 6px;">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em; color: #ECEAF4;">1 poller</span>
+<span style="color: #C9C7DA; font-size: 16px;">shared by every session on the machine</span>
+</div>
+<div style="border-top: 2px solid #94E2D5; padding-top: 16px; display: flex; flex-direction: column; gap: 6px;">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em; color: #ECEAF4;">20 PRs</span>
+<span style="color: #C9C7DA; font-size: 16px;">per GraphQL query, 1 point of 5,000 an hour</span>
+</div>
+<div style="border-top: 2px solid #F9E2AF; padding-top: 16px; display: flex; flex-direction: column; gap: 6px;">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em; color: #ECEAF4;">20s · 60s</span>
+<span style="color: #C9C7DA; font-size: 16px;">while CI runs, and when nothing moves; both in /config</span>
+</div>
+<div style="border-top: 2px solid #A6E3A1; padding-top: 16px; display: flex; flex-direction: column; gap: 6px;">
+<span style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em; color: #ECEAF4;">2 min</span>
+<span style="color: #C9C7DA; font-size: 16px;">of GitHub hiccups ridden out before a card shows an error</span>
+</div>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 32px; align-items: center; background: #151722; border: 1px solid #262A3E; border-radius: 14px; padding: 24px;">
+<div style="flex: 1 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 10px;">
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 22px;">Your GitHub budget, in plain sight.</h3>
+<p style="margin: 0; color: #C9C7DA; font-size: 16px;">The gh meter under the pane shows how much of the hourly budget each of your gh logins has left, GraphQL on top and REST below, with the time until it refills. Running low, pr-watch backs off that login on its own. Press <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4;">?</span> for what it all means.</p>
+</div>
+<div style="flex: 1 1 380px; min-width: 0;">
+<div role="img" aria-label="The gh meter: two logins, each with a half-block bar, GraphQL on top and REST below" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 12px; border: 1px solid #22253A; border-radius: 12px; overflow-x: auto;"><div class="g" data-grid="meter"><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> gh</span><span style="background:rgb(16,18,27);color:rgb(201,199,218)"> octocat </span><span style="background:rgb(141,193,137);color:rgb(170,228,166)">▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀</span><span style="background:rgb(42,46,66);color:rgb(42,46,66)">▀</span><span style="background:rgb(16,18,27);color:rgb(166,227,161)">  94% ↻42m</span><span style="background:rgb(16,18,27);color:rgb(138,136,160)">? </span></div><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)">   </span><span style="background:rgb(16,18,27);color:rgb(201,199,218)"> hubot   </span><span style="background:rgb(141,193,137);color:rgb(249,227,179)">▀▀▀▀</span><span style="background:rgb(141,193,137);color:rgb(42,46,66)">▀▀▀▀▀▀▀▀▀▀▀▀</span><span style="background:rgb(42,46,66);color:rgb(42,46,66)">▀▀▀▀▀▀</span><span style="background:rgb(16,18,27);color:rgb(249,226,175)">  18% ↻9m </span><span style="background:rgb(16,18,27);color:rgb(138,136,160)">  </span></div></div></div>
+</div>
+</div>
+</div>
+</section>
+
+<!-- Themes -->
+<section id="themes" style="border-top: 1px solid #22253A; background: #10121B;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-direction: column; gap: 40px;">
+<div style="display: flex; flex-direction: column; gap: 14px; max-width: 760px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #CBA6F7;">Themes</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(32px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em;">Seven looks, light and dark.</h2>
+<p style="margin: 0; color: #C9C7DA;">Switch with <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4;">/pr-watch theme tide</span> and every session follows. Each theme has a light and a dark variant that follows Claude Code's own.</p>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 268px), 1fr)); gap: 20px 16px;">
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-0"><div><span style="background:rgb(16,18,27);color:rgb(166,227,161)">╭────────────────────────────╮</span></div><div><span style="background:rgb(16,18,27);color:rgb(166,227,161)">│</span><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span><span style="background:rgb(16,18,27);color:rgb(246,244,252);font-weight:700">#7 </span><span style="background:rgb(16,18,27);color:rgb(246,244,252)">Paginate the a…</span><span style="background:rgb(166,227,161);color:rgb(11,42,18);font-weight:700"> ✓ READY</span><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span><span style="background:rgb(16,18,27);color:rgb(166,227,161)">│</span></div><div><span style="background:rgb(16,18,27);color:rgb(166,227,161)">│</span><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> acme/api · 6/6             </span><span style="background:rgb(16,18,27);color:rgb(166,227,161)">│</span></div><div><span style="background:rgb(16,18,27);color:rgb(166,227,161)">╰────────────────────────────╯</span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">classic</strong> <span style="color: #A9A7BD;">· round borders by state</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-1"><div><span style="background:rgb(29,58,42);color:rgb(246,244,252)">                              </span></div><div><span style="background:rgb(29,58,42);color:rgb(246,244,252)"> </span><span style="background:rgb(29,58,42);color:rgb(246,244,252);font-weight:700">#7 </span><span style="background:rgb(29,58,42);color:rgb(246,244,252)">Paginate the aud…</span><span style="background:rgb(166,227,161);color:rgb(11,42,18);font-weight:700"> ✓ READY</span><span style="background:rgb(29,58,42);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(29,58,42);color:rgb(138,136,160)"> acme/api · 6/6               </span></div><div><span style="background:rgb(29,58,42);color:rgb(246,244,252)">                              </span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">solid</strong> <span style="color: #A9A7BD;">· tiles tinted by state</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-2"><div><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span><span style="background:rgb(16,18,27);color:rgb(246,244,252);font-weight:700">#7 </span><span style="background:rgb(16,18,27);color:rgb(246,244,252)">Paginate the aud…</span><span style="background:rgb(16,18,27);color:rgb(166,227,161);font-weight:700"> ✓ READY</span><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> acme/api · 6/6               </span></div><div><span style="background:rgb(16,18,27);color:rgb(52,56,79)">──────────────────────────────</span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">minimal</strong> <span style="color: #A9A7BD;">· no boxes, quiet colour</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-3"><div><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</span></div><div><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┃</span><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span><span style="background:rgb(16,18,27);color:rgb(246,244,252);font-weight:700">#7 </span><span style="background:rgb(16,18,27);color:rgb(246,244,252)">Paginate the a…</span><span style="background:rgb(57,255,136);color:rgb(0,23,10);font-weight:700"> ✓ READY</span><span style="background:rgb(16,18,27);color:rgb(246,244,252)"> </span><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┃</span></div><div><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┃</span><span style="background:rgb(16,18,27);color:rgb(138,136,160)"> acme/api · 6/6             </span><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┃</span></div><div><span style="background:rgb(16,18,27);color:rgb(57,255,136);font-weight:700">┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">neon</strong> <span style="color: #A9A7BD;">· bold borders that glow</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-4"><div><span style="background:rgb(0,0,0);color:rgb(95,215,95)">╔════════════════════════════╗</span></div><div><span style="background:rgb(0,0,0);color:rgb(95,215,95)">║</span><span style="background:rgb(0,0,0);color:rgb(246,244,252)"> </span><span style="background:rgb(0,0,0);color:rgb(246,244,252);font-weight:700">#7 </span><span style="background:rgb(0,0,0);color:rgb(246,244,252)">Paginate the…</span><span style="background:rgb(0,0,0);color:rgb(95,215,95);font-weight:700"> [✓ READY]</span><span style="background:rgb(0,0,0);color:rgb(246,244,252)"> </span><span style="background:rgb(0,0,0);color:rgb(95,215,95)">║</span></div><div><span style="background:rgb(0,0,0);color:rgb(95,215,95)">║</span><span style="background:rgb(0,0,0);color:rgb(138,136,160)"> acme/api · 6/6             </span><span style="background:rgb(0,0,0);color:rgb(95,215,95)">║</span></div><div><span style="background:rgb(0,0,0);color:rgb(95,215,95)">╚════════════════════════════╝</span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">retro</strong> <span style="color: #A9A7BD;">· double lines, 16 colours</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-5"><div><span style="background:rgb(92,58,8);color:rgb(246,244,252)"> </span><span style="background:rgb(96,61,9);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(101,65,11);color:rgb(246,244,252);font-weight:700">1</span><span style="background:rgb(105,68,12);color:rgb(246,244,252);font-weight:700">2</span><span style="background:rgb(109,71,13);color:rgb(246,244,252)"> </span><span style="background:rgb(114,75,14);color:rgb(246,244,252)">R</span><span style="background:rgb(118,78,16);color:rgb(246,244,252)">e</span><span style="background:rgb(122,81,17);color:rgb(246,244,252)">t</span><span style="background:rgb(127,84,18);color:rgb(246,244,252)">r</span><span style="background:rgb(131,88,20);color:rgb(246,244,252)">y</span><span style="background:rgb(135,91,21);color:rgb(246,244,252)"> </span><span style="background:rgb(140,94,22);color:rgb(246,244,252)">u</span><span style="background:rgb(144,98,24);color:rgb(246,244,252)">p</span><span style="background:rgb(148,101,25);color:rgb(246,244,252)">l</span><span style="background:rgb(153,104,26);color:rgb(246,244,252)">o</span><span style="background:rgb(157,108,27);color:rgb(246,244,252)">a</span><span style="background:rgb(190,148,76);color:rgb(24,20,32)">d</span><span style="background:rgb(87,64,35);color:rgb(246,244,252)">s</span><span style="background:rgb(43,36,36);color:rgb(246,244,252)">…</span><span style="background:rgb(249,226,175);color:rgb(42,30,5);font-weight:700"> ● RUNNING</span><span style="background:rgb(28,26,36);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(82,51,7);color:rgb(200,190,183)"> </span><span style="background:rgb(85,54,8);color:rgb(201,191,184)">a</span><span style="background:rgb(88,56,9);color:rgb(202,191,184)">c</span><span style="background:rgb(91,58,10);color:rgb(203,192,184)">m</span><span style="background:rgb(95,61,11);color:rgb(204,193,185)">e</span><span style="background:rgb(98,63,12);color:rgb(205,193,185)">/</span><span style="background:rgb(101,66,13);color:rgb(205,194,185)">a</span><span style="background:rgb(104,68,14);color:rgb(206,195,185)">p</span><span style="background:rgb(107,71,14);color:rgb(207,196,185)">p</span><span style="background:rgb(110,73,16);color:rgb(208,196,186)"> </span><span style="background:rgb(113,75,17);color:rgb(209,197,186)">·</span><span style="background:rgb(117,78,18);color:rgb(210,198,186)"> </span><span style="background:rgb(120,80,18);color:rgb(211,198,186)">3</span><span style="background:rgb(123,83,19);color:rgb(212,199,187)">/</span><span style="background:rgb(126,85,20);color:rgb(212,199,187)">5</span><span style="background:rgb(130,88,22);color:rgb(214,200,188)"> </span><span style="background:rgb(133,90,22);color:rgb(214,201,188)"> </span><span style="background:rgb(136,92,23);color:rgb(215,201,188)"> </span><span style="background:rgb(174,137,72);color:rgb(226,214,202)"> </span><span style="background:rgb(28,26,36);color:rgb(191,143,61)">▎</span><span style="background:rgb(43,36,36);color:rgb(189,186,192)">  </span><span style="background:rgb(28,26,36);color:rgb(185,183,192)">        </span></div><div><span style="background:rgb(71,44,6);color:rgb(246,244,252)"> </span><span style="background:rgb(74,46,7);color:rgb(246,244,252)"> </span><span style="background:rgb(76,48,7);color:rgb(246,244,252)"> </span><span style="background:rgb(79,50,9);color:rgb(246,244,252)"> </span><span style="background:rgb(81,52,9);color:rgb(246,244,252)"> </span><span style="background:rgb(84,54,10);color:rgb(246,244,252)"> </span><span style="background:rgb(86,55,10);color:rgb(246,244,252)"> </span><span style="background:rgb(89,57,11);color:rgb(246,244,252)"> </span><span style="background:rgb(91,59,12);color:rgb(246,244,252)"> </span><span style="background:rgb(93,61,13);color:rgb(246,244,252)"> </span><span style="background:rgb(96,63,14);color:rgb(246,244,252)"> </span><span style="background:rgb(98,65,14);color:rgb(246,244,252)"> </span><span style="background:rgb(101,67,15);color:rgb(246,244,252)"> </span><span style="background:rgb(103,69,15);color:rgb(246,244,252)"> </span><span style="background:rgb(106,70,16);color:rgb(246,244,252)"> </span><span style="background:rgb(108,72,17);color:rgb(246,244,252)"> </span><span style="background:rgb(111,74,18);color:rgb(246,244,252)"> </span><span style="background:rgb(113,76,19);color:rgb(246,244,252)"> </span><span style="background:rgb(159,125,69);color:rgb(246,244,252)"> </span><span style="background:rgb(28,26,36);color:rgb(191,143,61)">▎</span><span style="background:rgb(43,36,36);color:rgb(246,244,252)">  </span><span style="background:rgb(28,26,36);color:rgb(246,244,252)">        </span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">tide</strong> <span style="color: #A9A7BD;">· fills like a glass as CI runs</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
+<div aria-hidden="true" style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; line-height: 17px; background: rgb(16,18,27); padding: 10px; border: 1px solid #22253A; border-radius: 10px; overflow-x: auto;"><div class="g" data-grid="tile-6"><div><span style="background:rgb(45,40,67);color:rgb(246,244,252)"> </span><span style="background:rgb(58,51,82);color:rgb(246,244,252);font-weight:700">#</span><span style="background:rgb(73,63,99);color:rgb(246,244,252);font-weight:700">5</span><span style="background:rgb(89,75,117);color:rgb(246,244,252)"> </span><span style="background:rgb(105,89,136);color:rgb(246,244,252);font-weight:700">D</span><span style="background:rgb(121,101,154);color:rgb(246,244,252)">r</span><span style="background:rgb(135,112,170);color:rgb(246,244,252)">o</span><span style="background:rgb(146,121,182);color:rgb(246,244,252)">p</span><span style="background:rgb(153,126,190);color:rgb(246,244,252)"> </span><span style="background:rgb(156,128,193);color:rgb(246,244,252)">t</span><span style="background:rgb(154,127,191);color:rgb(246,244,252)">h</span><span style="background:rgb(147,122,184);color:rgb(246,244,252)">e</span><span style="background:rgb(137,113,172);color:rgb(246,244,252)"> </span><span style="background:rgb(123,103,156);color:rgb(246,244,252)">l</span><span style="background:rgb(108,90,138);color:rgb(246,244,252)">e</span><span style="background:rgb(91,77,120);color:rgb(246,244,252)">g</span><span style="background:rgb(75,64,101);color:rgb(246,244,252)">a</span><span style="background:rgb(60,52,84);color:rgb(246,244,252)">c</span><span style="background:rgb(46,42,69);color:rgb(246,244,252)">y</span><span style="background:rgb(36,33,56);color:rgb(246,244,252)">…</span><span style="background:rgb(203,166,247);color:rgb(30,11,51);font-weight:700"> ✓ MERGED</span><span style="background:rgb(14,16,32);color:rgb(246,244,252)"> </span></div><div><span style="background:rgb(93,91,125);color:rgb(203,201,216)"> </span><span style="background:rgb(101,91,133);color:rgb(205,201,219)">a</span><span style="background:rgb(109,95,141);color:rgb(208,202,221)">c</span><span style="background:rgb(117,98,150);color:rgb(210,203,223)">m</span><span style="background:rgb(122,102,155);color:rgb(211,204,225)">e</span><span style="background:rgb(124,103,157);color:rgb(212,205,225)">/</span><span style="background:rgb(122,102,155);color:rgb(211,204,225)">a</span><span style="background:rgb(117,98,149);color:rgb(210,203,223)">p</span><span style="background:rgb(109,91,140);color:rgb(208,201,221)">i</span><span style="background:rgb(98,83,128);color:rgb(205,199,217)"> </span><span style="background:rgb(86,73,114);color:rgb(201,196,213)">·</span><span style="background:rgb(74,65,100);color:rgb(198,194,209)"> </span><span style="background:rgb(64,58,89);color:rgb(195,192,206)">2</span><span style="background:rgb(56,56,82);color:rgb(193,191,204)">h</span><span style="background:rgb(53,60,79);color:rgb(192,192,204)"> </span><span style="background:rgb(52,66,81);color:rgb(192,194,204)">a</span><span style="background:rgb(54,73,84);color:rgb(192,196,205)">g</span><span style="background:rgb(55,76,86);color:rgb(193,197,206)">o</span><span style="background:rgb(52,73,82);color:rgb(192,196,204)"> </span><span style="background:rgb(45,64,74);color:rgb(190,194,202)"> </span><span style="background:rgb(36,51,62);color:rgb(187,190,199)"> </span><span style="background:rgb(28,38,51);color:rgb(185,186,196)"> </span><span style="background:rgb(21,27,41);color:rgb(183,183,193)"> </span><span style="background:rgb(17,20,36);color:rgb(182,181,192)"> </span><span style="background:rgb(15,17,33);color:rgb(181,180,191)"> </span><span style="background:rgb(14,16,32);color:rgb(181,180,190)">  </span><span style="background:rgb(14,16,33);color:rgb(181,180,191)"> </span><span style="background:rgb(15,17,33);color:rgb(181,180,191)"> </span><span style="background:rgb(16,17,34);color:rgb(182,180,191)"> </span></div><div><span style="background:rgb(91,77,119);color:rgb(246,244,252)"> </span><span style="background:rgb(92,78,121);color:rgb(246,244,252)"> </span><span style="background:rgb(91,77,119);color:rgb(246,244,252)"> </span><span style="background:rgb(87,74,115);color:rgb(246,244,252)"> </span><span style="background:rgb(81,69,108);color:rgb(246,244,252)"> </span><span style="background:rgb(73,63,100);color:rgb(246,244,252)"> </span><span style="background:rgb(66,57,91);color:rgb(246,244,252)"> </span><span style="background:rgb(59,54,83);color:rgb(246,244,252)"> </span><span style="background:rgb(55,56,80);color:rgb(246,244,252)"> </span><span style="background:rgb(56,67,85);color:rgb(246,244,252)"> </span><span style="background:rgb(64,86,98);color:rgb(246,244,252)"> </span><span style="background:rgb(76,108,114);color:rgb(246,244,252)"> </span><span style="background:rgb(86,126,128);color:rgb(246,244,252)"> </span><span style="background:rgb(89,133,133);color:rgb(246,244,252)"> </span><span style="background:rgb(84,125,126);color:rgb(246,244,252)"> </span><span style="background:rgb(71,105,109);color:rgb(246,244,252)"> </span><span style="background:rgb(53,78,85);color:rgb(246,244,252)"> </span><span style="background:rgb(37,52,63);color:rgb(246,244,252)"> </span><span style="background:rgb(25,33,47);color:rgb(246,244,252)"> </span><span style="background:rgb(18,22,38);color:rgb(246,244,252)"> </span><span style="background:rgb(15,18,33);color:rgb(246,244,252)"> </span><span style="background:rgb(14,16,32);color:rgb(246,244,252)">  </span><span style="background:rgb(15,16,33);color:rgb(246,244,252)"> </span><span style="background:rgb(15,17,34);color:rgb(246,244,252)"> </span><span style="background:rgb(17,18,35);color:rgb(246,244,252)"> </span><span style="background:rgb(18,19,37);color:rgb(246,244,252)"> </span><span style="background:rgb(21,22,39);color:rgb(246,244,252)"> </span><span style="background:rgb(23,26,43);color:rgb(246,244,252)"> </span><span style="background:rgb(26,29,47);color:rgb(246,244,252)"> </span></div></div></div>
+<div style="font-size: 15px;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">aurora</strong> <span style="color: #A9A7BD;">· northern lights by state</span></div>
+</div>
+<div style="display: flex; flex-direction: column; justify-content: center; gap: 8px; border: 1px dashed #34384F; border-radius: 10px; padding: 16px; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px; color: #C9C7DA;">
+<span>Short on room? Set <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4;">layout: band</span> for a few lines above the prompt instead of a pane.</span>
+</div>
+</div>
+</div>
+</section>
+
+<!-- Install -->
+<section id="install" style="border-top: 1px solid #22253A;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-wrap: wrap; gap: 48px;">
+<div style="flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 18px;">
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #CBA6F7;">Install</p>
+<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(32px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em;">Running in under a minute.</h2>
+<p style="margin: 0; color: #C9C7DA;">Needs Claude Code 2.1.287 or later and the <a href="https://cli.github.com">GitHub CLI</a> logged in (<span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">gh auth login</span>). In Claude Code, run:</p>
+<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; overflow-x: auto; white-space: nowrap;">/plugin install pr-watch --marketplace ElirazKed/claude-code-pr-watch</div>
+<p style="margin: 0; color: #C9C7DA;">Answer <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">y</span> to add the marketplace and press Enter for user scope. It's active at once. Then open a PR as usual, or watch any PR with:</p>
+<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; overflow-x: auto; white-space: nowrap;">/pr-watch https://github.com/owner/repo/pull/123</div>
+</div>
+<div style="flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; gap: 14px;">
+<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 22px;">Settings in /config</h3>
+<div style="overflow-x: auto; border: 1px solid #262A3E; border-radius: 12px;">
+<table style="width: 100%; border-collapse: collapse; font-size: 15px;">
+<thead>
+<tr style="background: #151722; text-align: left;"><th scope="col" style="padding: 12px 16px; font-weight: 600;">Setting</th><th scope="col" style="padding: 12px 16px; font-weight: 600;">What it does</th><th scope="col" style="padding: 12px 16px; font-weight: 600;">Default</th></tr>
+</thead>
+<tbody>
+<tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">theme</td><td style="padding: 12px 16px; color: #C9C7DA;">classic, solid, minimal, neon, retro, tide or aurora</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">classic</td></tr>
+<tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">layout</td><td style="padding: 12px 16px; color: #C9C7DA;">pane beside the conversation, or a band above the prompt</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">pane</td></tr>
+<tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">poll_active_seconds</td><td style="padding: 12px 16px; color: #C9C7DA;">how often GitHub is asked while CI runs</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">20</td></tr>
+<tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">poll_idle_seconds</td><td style="padding: 12px 16px; color: #C9C7DA;">how often when nothing is moving</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">60</td></tr>
+<tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">update_notice</td><td style="padding: 12px 16px; color: #C9C7DA;">say when a new version is out</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">on</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</section>
+
+<!-- Footer -->
+<footer style="border-top: 1px solid #22253A;">
+<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 32px 24px 48px; display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; color: #A9A7BD; font-size: 15px;">
+<span><span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4; font-weight: 700;">pr-watch</span> · a <a href="https://code.claude.com/docs/en/plugins/mods/overview">Claude Code mod</a> · MIT licensed</span>
+<span style="display: flex; flex-wrap: wrap; gap: 20px;"><a href="https://github.com/ElirazKed/claude-code-pr-watch">Source on GitHub</a><a href="https://github.com/ElirazKed/claude-code-pr-watch/blob/main/README.md">Full README</a><a href="https://github.com/ElirazKed/claude-code-pr-watch/issues">Report an issue</a></span>
+</div>
+</footer>
+
+</div>
+<script>
+(function () {
+'use strict';
+// The painters below are the design's own, unchanged: each grid is a list of
+// rows, each row a list of runs of cells sharing one colour and weight.
+var PG = [16, 18, 27];
+var LIGHT = [246, 244, 252];
+var DARK = [24, 20, 32];
+var MUTED = [138, 136, 160];
+var SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+var PART = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+var TONES = {
+  amber: { deep: [92, 58, 8], bright: [176, 122, 33], abyss: [38, 22, 3], crest: [249, 226, 175], glass: [28, 26, 36], badge: [249, 226, 175], bfg: [42, 30, 5], tint: [34, 31, 40] },
+  red: { deep: [86, 16, 34], bright: [168, 50, 78], abyss: [38, 6, 14], crest: [243, 139, 168], glass: [30, 22, 30], badge: [243, 139, 168], bfg: [42, 6, 16], tint: [38, 25, 33] },
+  green: { deep: [14, 66, 42], bright: [40, 122, 82], abyss: [5, 32, 19], crest: [166, 227, 161], glass: [22, 30, 28], badge: [166, 227, 161], bfg: [11, 42, 18], tint: [20, 46, 34] },
+  blue: { deep: [22, 50, 98], bright: [52, 96, 170], abyss: [8, 20, 46], crest: [137, 180, 250], glass: [22, 26, 38], badge: [137, 180, 250], bfg: [8, 22, 52], tint: [24, 32, 52] },
+  mauve: { deep: [60, 32, 104], bright: [112, 72, 176], abyss: [26, 12, 50], crest: [203, 166, 247], glass: [28, 24, 40], badge: [203, 166, 247], bfg: [30, 11, 51], tint: [38, 30, 58] }
+};
+
+function clamp01(t) { return Math.max(0, Math.min(1, t)); }
+function mix(a, b, t) { var k = clamp01(t); return [0, 1, 2].map(function (i) { return Math.round(a[i] + (b[i] - a[i]) * k); }); }
+function css(c) { return 'rgb(' + c.join(',') + ')'; }
+function lum(c) { var f = function (v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+function inkOn(bg) { return lum(bg) > 0.3 ? DARK : LIGHT; }
+
+// One row of W cells: a space, the left text cut to fit, padding, the right text, a space.
+function line(W, l, r) {
+  var rr = Array.from(r || '');
+  var room = W - 2 - (rr.length ? rr.length + 1 : 0);
+  var lc = Array.from(l || '');
+  if (lc.length > room) lc = lc.slice(0, Math.max(0, room - 1)).concat(['…']);
+  var gap = Math.max(0, W - 2 - lc.length - rr.length);
+  return { chars: [' '].concat(lc, new Array(gap).fill(' '), rr, [' ']), rStart: W - 1 - rr.length, rEnd: W - 1, lEnd: 1 + lc.length };
+}
+
+// Groups neighbouring cells of one colour and weight into a run.
+function runsOf(cells) {
+  var runs = [];
+  cells.forEach(function (c) {
+    var fg = css(c.fg), bg = css(c.bg), w = c.b ? '700' : '400';
+    var last = runs[runs.length - 1];
+    if (last && last.fg === fg && last.bg === bg && last.w === w) last.t += c.ch;
+    else runs.push({ t: c.ch, fg: fg, bg: bg, w: w });
+  });
+  return { runs: runs };
+}
+
+function plain(W, l, r, fg, bg, bold) {
+  var L = line(W, l, r);
+  return runsOf(L.chars.map(function (ch) { return { ch: ch, fg: fg, bg: bg, b: !!bold }; }));
+}
+
+// The tide: liquid up to a wavy front, deeper toward the bottom and the left.
+function tideAt(s, W, H, ph) {
+  return function (x, y) {
+    var front;
+    if (s.fill >= 1) front = W + 3;
+    else if (s.fill <= 0) front = -2;
+    else {
+      var sway = s.moving ? Math.sin(y * 1.15 + ph) * 1.6 + Math.sin(y * 0.55 - ph * 0.6) * 0.7 : Math.sin(y * 1.15 + 0.6) * 1.2;
+      front = Math.max(1, s.fill * W + sway);
+    }
+    var t = s.tone, depth = H > 1 ? y / (H - 1) : 0, fx = Math.floor(front);
+    if (x < fx) {
+      var bg = mix(t.deep, t.bright, Math.min(1, x / Math.max(8, front)) * 0.9);
+      bg = mix(bg, t.abyss, depth * 0.38);
+      if (x === fx - 1) bg = mix(bg, t.crest, 0.32);
+      if (s.fill >= 1 && s.moving) {
+        var gp = (ph * 5) % (W + H * 2 + 12) - 6, d = Math.abs(x - y * 2 - gp);
+        if (d < 3) bg = mix(bg, [255, 255, 255], 0.2 * (1 - d / 3));
+      }
+      return { bg: bg };
+    }
+    if (x === fx) {
+      var fr = front - fx;
+      return { bg: t.glass, g: PART[Math.min(6, Math.floor(fr * 7))], gf: mix(t.bright, t.crest, 0.2), tb: mix(t.glass, t.bright, fr) };
+    }
+    return { bg: x - front < 2 ? mix(t.glass, t.bright, 0.1) : t.glass };
+  };
+}
+
+// The aurora: a night sky with two layers of curtains in the state's colours.
+function auroraAt(s, W, H, ph) {
+  return function (x, y) {
+    var u = x / W, v = H > 1 ? y / (H - 1) : 0;
+    var c1 = Math.sin(u * 5.2 + ph * 0.35 + v * 1.4) * 0.5 + 0.5;
+    var c2 = Math.sin(u * 9.1 - ph * 0.22 + v * 2.6 + 1.3) * 0.5 + 0.5;
+    var fade = clamp01((s.reach - u) * 3 + 0.25);
+    var bg = mix(s.night, s.c1, Math.pow(c1, 2.2) * 0.75 * fade * (0.55 + 0.45 * (1 - v)));
+    bg = mix(bg, s.c2, Math.pow(c2, 3) * 0.55 * fade * v);
+    return { bg: bg };
+  };
+}
+
+// A painted card: each text row over the art, a pill on the right where asked.
+function painted(W, rows, at, s) {
+  return rows.map(function (row, y) {
+    var L = line(W, row.l, row.r);
+    return runsOf(L.chars.map(function (ch, x) {
+      var p = at(x, y), bg = p.bg, fg, b = false;
+      if (row.pill && x >= L.rStart - 1 && x < L.rEnd) return { ch: x === L.rStart - 1 ? ' ' : ch, fg: s.tone.bfg, bg: s.tone.badge, b: true };
+      if (p.g && ch === ' ') { ch = p.g; fg = p.gf; }
+      else {
+        if (p.g) bg = p.tb;
+        fg = inkOn(bg);
+        if (row.dim) fg = mix(fg, bg, 0.28);
+        if (y === 0 && x < L.lEnd && x > 0 && ch !== ' ' && x < 5) b = true;
+      }
+      return { ch: ch, fg: fg, bg: bg, b: b };
+    }));
+  });
+}
+
+function tideCard(W, tone, fill, moving, rows, ph) {
+  var s = { tone: TONES[tone], fill: fill, moving: moving };
+  return painted(W, rows, tideAt(s, W, rows.length, ph), s);
+}
+
+function auroraCard(W, tone, reach, rows, ph) {
+  var t = TONES[tone];
+  var s = { tone: t, night: [14, 16, 32], c1: t.crest, c2: [148, 226, 213], reach: reach };
+  return painted(W, rows, auroraAt(s, W, rows.length, ph), s);
+}
+
+// A bordered card (classic, neon, retro) or a borderless one (solid, minimal).
+function framed(W, kind, rows, o) {
+  var sets = { classic: '╭─╮│╰╯', neon: '┏━┓┃┗┛', retro: '╔═╗║╚╝' };
+  var out = [];
+  var bg = o.bg || PG, bold = kind === 'neon';
+  if (sets[kind]) {
+    var c = Array.from(sets[kind]);
+    out.push(runsOf(Array.from(c[0] + c[1].repeat(W - 2) + c[2]).map(function (ch) { return { ch: ch, fg: o.border, bg: bg, b: bold }; })));
+    rows.forEach(function (row) {
+      var L = line(W - 2, row.l, row.r);
+      var cells = [{ ch: c[3], fg: o.border, bg: bg, b: bold }].concat(L.chars.map(function (ch, x) {
+        var pill = row.pill && x >= L.rStart - 1 && x < L.rEnd;
+        var fg = row.fg || (row.dim ? MUTED : LIGHT);
+        if (pill && o.pill) return { ch: x === L.rStart - 1 ? ' ' : ch, fg: o.pillFg, bg: o.pill, b: true };
+        if (pill) return { ch: ch, fg: o.border, bg: bg, b: true };
+        return { ch: ch, fg: fg, bg: bg, b: x > 0 && x < 4 && !row.dim && !row.fg };
+      }), [{ ch: c[5 - 2], fg: o.border, bg: bg, b: bold }]);
+      out.push(runsOf(cells));
+    });
+    out.push(runsOf(Array.from(c[4] + c[1].repeat(W - 2) + c[5]).map(function (ch) { return { ch: ch, fg: o.border, bg: bg, b: bold }; })));
+    return out;
+  }
+  if (kind === 'solid') out.push(plain(W, '', '', LIGHT, o.bg));
+  rows.forEach(function (row) {
+    var L = line(W, row.l, row.r);
+    out.push(runsOf(L.chars.map(function (ch, x) {
+      var pill = row.pill && x >= L.rStart - 1 && x < L.rEnd;
+      if (pill && o.pill) return { ch: x === L.rStart - 1 ? ' ' : ch, fg: o.pillFg, bg: o.pill, b: true };
+      if (pill) return { ch: ch, fg: o.border, bg: bg, b: true };
+      return { ch: ch, fg: row.dim ? MUTED : LIGHT, bg: bg, b: x > 0 && x < 4 && !row.dim };
+    })));
+  });
+  if (kind === 'solid') out.push(plain(W, '', '', LIGHT, o.bg));
+  if (kind === 'minimal') out.push(runsOf(Array.from('─'.repeat(W)).map(function (ch) { return { ch: ch, fg: [52, 56, 79], bg: PG, b: false }; })));
+  return out;
+}
+
+// The header rule: a wave of block heights in an ocean gradient.
+function waveRule(W, ph) {
+  var stops = [[148, 226, 213], [137, 180, 250], [116, 199, 236], [203, 166, 247]];
+  var glyphs = Array.from('▁▂▃▄▅▆▇');
+  var cells = [];
+  for (var x = 0; x < W; x++) {
+    var v = Math.sin(x / 3.2 + ph * 0.6) * 0.5 + Math.sin(x / 7.5 + 1 + ph * 0.3) * 0.35;
+    var g = glyphs[Math.max(0, Math.min(6, Math.round((v + 0.85) / 1.7 * 6)))];
+    var span = x / (W - 1) * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(span));
+    cells.push({ ch: g, fg: mix(stops[i], stops[i + 1], span - i), bg: PG, b: false });
+  }
+  return runsOf(cells);
+}
+
+// One gh meter row: the login, a bar of ▀ (GraphQL on top, REST below), the share and its refill.
+function meterRow(W, login, gq, rest, label, tone) {
+  var BAR = 22, track = [42, 46, 66];
+  var col = function (share) { return share < 0.05 ? [243, 139, 168] : share < 0.2 ? [249, 226, 175] : [166, 227, 161]; };
+  var head = Array.from((' ' + login).padEnd(12, ' ').slice(0, 12));
+  var cells = head.map(function (ch, x) { return { ch: ch, fg: x < 3 ? MUTED : [201, 199, 218], bg: PG, b: false }; });
+  for (var x = 0; x < BAR; x++) {
+    var top = x < Math.round(gq * BAR) ? mix(col(gq), [255, 255, 255], 0.05) : track;
+    var bot = x < Math.round(rest * BAR) ? mix(col(rest), [0, 0, 0], 0.15) : track;
+    cells.push({ ch: '▀', fg: top, bg: bot, b: false });
+  }
+  var tail = Array.from(('  ' + label).padEnd(W - 12 - BAR - 2, ' '));
+  tail.forEach(function (ch) { cells.push({ ch: ch, fg: tone, bg: PG, b: false }); });
+  cells.push({ ch: login === 'gh octocat' ? '?' : ' ', fg: MUTED, bg: PG, b: false }, { ch: ' ', fg: MUTED, bg: PG, b: false });
+  return runsOf(cells);
+}
+
+// The hero's story for #12, one frame per tick (about 5.5 a second).
+var STORY = [
+  { n: 6, k: 'queued' }, { n: 44, k: 'running' }, { n: 16, k: 'review' }, { n: 18, k: 'ready' },
+  { n: 12, k: 'confirm' }, { n: 10, k: 'merging' }, { n: 24, k: 'merged' }
+];
+var STORY_LEN = STORY.reduce(function (a, s) { return a + s.n; }, 0);
+var TOASTS = { review: '✓ CI passed on #12', ready: '✓ hubot approved #12', merged: '✓ #12 merged into main' };
+
+function storyAt(tick) {
+  var t = tick % STORY_LEN;
+  for (var i = 0; i < STORY.length; i++) {
+    if (t < STORY[i].n) return { k: STORY[i].k, i: t, n: STORY[i].n };
+    t -= STORY[i].n;
+  }
+  return { k: 'queued', i: 0, n: 1 };
+}
+
+var DRAFT = 'CI failed on acme/app#13 "Cache the thumbnail renders"\n(perf/thumbs → main) https://github.com/acme/app/pull/13\n\n✗ build · failure\n  Failed step: Run tests\n  FAIL src/thumbs.test.ts › caches one render per size\n    Expected calls: 1   Received: 2\n\nFind the cause and fix it on this branch. If this repo\nor branch isn\'t checked out here, say so first.';
+
+// A tiny stand-in for the design tool's component base: setState merges the
+// update into state and repaints every bound element on the page.
+function DCLogic() { this.props = {}; this.state = {}; }
+DCLogic.prototype.setState = function (u) {
+  var p = typeof u === 'function' ? u(this.state) : u;
+  for (var k in p) this.state[k] = p[k];
+  if (this.paint) this.paint();
+};
+
+class Component extends DCLogic {
+  componentDidMount() {
+    var reduce = false;
+    try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { reduce = false; }
+    this.setState({ tick: reduce ? 30 : 0, fixAt: -1, mergeStage: 'ready', mergeAt: 0 });
+    var self = this;
+    if (!reduce) this.timer = setInterval(function () { self.setState(function (s) { return { tick: ((s && s.tick) || 0) + 1 }; }); }, 180);
+  }
+  componentWillUnmount() { clearInterval(this.timer); }
+
+  renderVals() {
+    var self = this;
+    var st = this.state || {};
+    var tick = st.tick || 0, ph = tick * 0.35, W = 58, CW = 52;
+    var spin = SPIN[tick % SPIN.length];
+
+    // Hero
+    var at = storyAt(tick), card, acts = [], tone, tint;
+    if (at.k === 'queued' || at.k === 'running') {
+      var f = at.k === 'queued' ? 0.04 : 0.04 + 0.96 * (at.i / at.n);
+      var passed = at.k === 'queued' ? 0 : Math.min(4, Math.floor(f * 5));
+      card = tideCard(W, 'amber', f, true, [
+        { l: '#12 Retry uploads with exponential backoff', r: '● CI RUNNING', pill: true },
+        { l: 'acme/app · feat/retry → main  +120 −14', r: '@octocat', dim: true },
+        { l: at.k === 'queued' ? spin + ' Queued · 5 checks' : spin + ' Running build, e2e · ' + passed + '/5 passed', r: passed + '/5' },
+        { l: '' }
+      ], ph);
+      tone = 'amber'; acts = ['open #12 ↗ · checked just now'];
+    } else if (at.k === 'review') {
+      card = tideCard(W, 'blue', 0.85, false, [
+        { l: '#12 Retry uploads with exponential backoff', r: '◷ IN REVIEW', pill: true },
+        { l: 'acme/app · feat/retry → main  +120 −14', r: '@octocat', dim: true },
+        { l: 'Waiting for review · ◷ hubot requested', r: '5/5' },
+        { l: '' }
+      ], ph);
+      tone = 'blue'; acts = ['open #12 ↗ · checked just now'];
+    } else if (at.k === 'ready' || at.k === 'confirm' || at.k === 'merging') {
+      card = tideCard(W, 'green', 1, at.k === 'merging', [
+        { l: '#12 Retry uploads with exponential backoff', r: '✓ READY', pill: true },
+        { l: 'acme/app · feat/retry → main  +120 −14', r: '@octocat', dim: true },
+        { l: at.k === 'merging' ? spin + ' Merging…' : 'Ready to merge · ✓ hubot approved', r: '5/5' },
+        { l: '' }
+      ], ph);
+      tone = 'green';
+      acts = at.k === 'ready' ? ['[ Squash & merge ]  ⇄ rebase', 'open #12 ↗ · checked just now']
+        : at.k === 'confirm' ? ['Squash-merge #12 into main?  [ y Confirm ]  [ n Cancel ]', 'open #12 ↗ · checked just now']
+        : ['open #12 ↗ · checked just now'];
+    } else {
+      card = tideCard(W, 'mauve', 1, false, [
+        { l: '#12 Retry uploads with exponential backoff', r: '✓ MERGED', pill: true },
+        { l: 'acme/app · feat/retry → main  +120 −14', r: '@octocat', dim: true },
+        { l: 'Merged · just now', r: '' },
+        { l: '' }
+      ], ph);
+      tone = 'mauve'; acts = ['[ Dismiss ]', 'open #12 ↗ · checked just now'];
+    }
+    tint = TONES[tone].tint;
+    var pane = [
+      plain(W, '⎇ Pull requests', '2 open', LIGHT, PG, true),
+      waveRule(W, ph),
+      plain(W, '', '', LIGHT, PG)
+    ].concat(card, acts.map(function (a) { return plain(W, a, '', a.charAt(0) === '[' || a.indexOf('?') > 0 ? LIGHT : [201, 199, 218], tint, a.charAt(0) === '['); }), [
+      plain(W, '', '', LIGHT, PG)
+    ], tideCard(W, 'red', 0.8, false, [
+      { l: '#13 Cache the thumbnail renders', r: '✗ CI FAILED', pill: true },
+      { l: 'acme/app · perf/thumbs → main  +48 −9', r: '@octocat', dim: true },
+      { l: 'Failing: build · 1 check failing', r: '4/5' },
+      { l: '' }
+    ], ph), [
+      plain(W, '[ Fix with Claude ]', '', LIGHT, TONES.red.tint, true),
+      plain(W, 'open #13 ↗ · checked 20s ago', '', [201, 199, 218], TONES.red.tint),
+      plain(W, '', '', LIGHT, PG),
+      plain(W, 'r: Refresh  d: Dismiss  x: Close', '', MUTED, PG),
+      meterRow(W, 'gh octocat', 0.94, 0.97, '94% ↻42m', [166, 227, 161]),
+      meterRow(W, '   hubot', 0.62, 0.41, '41% ↻9m', [166, 227, 161])
+    ]);
+    var toast = TOASTS[at.k] && at.i < 14 ? TOASTS[at.k] : '';
+
+    // Fix with Claude demo
+    var fixAt = st.fixAt == null ? -1 : st.fixAt;
+    var fdt = fixAt < 0 ? -1 : tick - fixAt;
+    var fixStage = fdt < 0 ? 'idle' : fdt < 9 ? 'collecting' : 'typing';
+    var typedLen = fixStage === 'typing' ? Math.min(DRAFT.length, (fdt - 9) * 16) : 0;
+    if (fixStage === 'typing' && typedLen >= DRAFT.length) fixStage = 'drafted';
+    var fixGrid = tideCard(CW, 'red', 0.8, false, [
+      { l: '#13 Cache the thumbnail renders', r: '✗ CI FAILED', pill: true },
+      { l: 'acme/app · perf/thumbs → main  +48 −9', r: '@octocat', dim: true },
+      { l: fixStage === 'collecting' ? spin + ' Collecting logs…' : fixStage === 'idle' ? 'Failing: build · 1 check failing' : '✓ Drafted in your prompt box', r: '4/5' },
+      { l: '' }
+    ], ph);
+
+    // Merge demo
+    var mStage = st.mergeStage || 'ready';
+    var mdt = tick - (st.mergeAt || 0);
+    if (mStage === 'merging' && mdt >= 10) mStage = 'merged';
+    var mTone = mStage === 'merged' ? 'mauve' : 'green';
+    var mergeGrid = tideCard(CW, mTone, 1, mStage === 'merging', [
+      { l: '#7 Paginate the audit log endpoint', r: mStage === 'merged' ? '✓ MERGED' : '✓ READY', pill: true },
+      { l: 'acme/api · feat/audit-pages → main  +120 −14', r: '', dim: true },
+      { l: mStage === 'merging' ? spin + ' Merging…' : mStage === 'merged' ? 'Merged · just now' : 'Ready to merge · ✓ hubot approved', r: '6/6' },
+      { l: '' }
+    ], ph);
+
+    // Theme tiles
+    var TW = 30;
+    var tileRows = [{ l: '#7 Paginate the audit…', r: '✓ READY', pill: true }, { l: 'acme/api · 6/6', dim: true }];
+    var tiles = [
+      { name: 'classic', desc: 'round borders by state', grid: framed(TW, 'classic', tileRows, { border: [166, 227, 161], pill: [166, 227, 161], pillFg: [11, 42, 18] }) },
+      { name: 'solid', desc: 'tiles tinted by state', grid: framed(TW, 'solid', tileRows, { bg: [29, 58, 42], pill: [166, 227, 161], pillFg: [11, 42, 18] }) },
+      { name: 'minimal', desc: 'no boxes, quiet colour', grid: framed(TW, 'minimal', tileRows, { border: [166, 227, 161] }) },
+      { name: 'neon', desc: 'bold borders that glow', grid: framed(TW, 'neon', tileRows, { border: [57, 255, 136], pill: [57, 255, 136], pillFg: [0, 23, 10] }) },
+      { name: 'retro', desc: 'double lines, 16 colours', grid: framed(TW, 'retro', [{ l: '#7 Paginate the…', r: '[✓ READY]', pill: true }, { l: 'acme/api · 6/6', dim: true }], { border: [95, 215, 95], bg: [0, 0, 0] }) },
+      { name: 'tide', desc: 'fills like a glass as CI runs', grid: tideCard(TW, 'amber', 0.58, true, [{ l: '#12 Retry uploads…', r: '● RUNNING', pill: true }, { l: 'acme/app · 3/5', dim: true }, { l: '' }], ph) },
+      { name: 'aurora', desc: 'northern lights by state', grid: auroraCard(TW, 'mauve', 1, [{ l: '#5 Drop the legacy…', r: '✓ MERGED', pill: true }, { l: 'acme/api · 2h ago', dim: true }, { l: '' }], ph) }
+    ];
+
+    return {
+      accent: this.props.accent ?? '#CBA6F7',
+      pane: pane,
+      tiles: tiles,
+      hasToast: toast !== '',
+      toast: toast,
+      cardW: CW + 'ch',
+      fixGrid: fixGrid,
+      fixTint: css(TONES.red.tint),
+      fixIdle: fixStage === 'idle',
+      fixBusy: fixStage !== 'idle',
+      typed: DRAFT.slice(0, typedLen),
+      promptBorder: fixStage === 'drafted' ? '#CBA6F7' : '#2A2E42',
+      promptHint: fixStage === 'drafted' ? 'Enter to send' : fixStage === 'idle' ? 'empty' : 'drafting…',
+      fixNote: fixStage === 'idle' ? 'Nothing is sent to Claude: the draft waits for your Enter.' : fixStage === 'collecting' ? 'Fetching the failing job\'s log with gh…' : fixStage === 'typing' ? 'Trimmed to the last lines, where the error is.' : 'Read it, change it, press Enter. Or don\'t.',
+      pressFix: function () { self.setState({ fixAt: tick }); },
+      replayFix: function () { self.setState({ fixAt: -1 }); },
+      mergeGrid: mergeGrid,
+      mergeTint: css(TONES[mTone].tint),
+      mReady: mStage === 'ready',
+      mConfirm: mStage === 'confirm',
+      mBusy: mStage === 'merging',
+      mMerged: mStage === 'merged',
+      mergeNote: mStage === 'ready' ? 'The method is your GitHub default, or the first the repo allows.' : mStage === 'confirm' ? 'Nothing runs until you confirm.' : mStage === 'merging' ? 'gh pr merge --squash, as the account that can see the repo.' : '✓ Merged. The card stays until you dismiss it.',
+      pressMerge: function () { self.setState({ mergeStage: 'confirm' }); },
+      confirmMerge: function () { self.setState({ mergeStage: 'merging', mergeAt: tick }); },
+      cancelMerge: function () { self.setState({ mergeStage: 'ready' }); },
+      replayMerge: function () { self.setState({ mergeStage: 'ready' }); },
+      meter: [
+        meterRow(46, 'gh octocat', 0.94, 0.97, '94% ↻42m', [166, 227, 161]),
+        meterRow(46, '   hubot', 0.18, 0.72, '18% ↻9m', [249, 226, 175])
+      ],
+    };
+  }
+}
+
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+// A grid as HTML: one flex row per row, one pre span per run. cellOf(ch, w),
+// when given, returns a style that fits a glyph the font draws off-cell back
+// into one cell, or '' when it already fits.
+function gridHTML(grid, cellOf) {
+  return grid.map(function (row) {
+    return '<div>' + row.runs.map(function (r) {
+      var text = cellOf ? Array.from(r.t).map(function (ch) {
+        var fix = cellOf(ch, r.w);
+        return fix ? '<span class="c" style="' + fix + '">' + esc(ch) + '</span>' : esc(ch);
+      }).join('') : esc(r.t);
+      return '<span style="background:' + r.bg + ';color:' + r.fg + (r.w === '700' ? ';font-weight:700' : '') + '">' + text + '</span>';
+    }).join('') + '</div>';
+  }).join('');
+}
+
+function gridOf(v, name) {
+  var m = /^tile-(\d+)$/.exec(name);
+  return m ? v.tiles[+m[1]].grid : v[name];
+}
+
+function fill(tmpl, v) { return tmpl.replace(/\{\{(\w+)\}\}/g, function (_, k) { return v[k]; }); }
+
+var api = { Component: Component, gridHTML: gridHTML, gridOf: gridOf, fill: fill, esc: esc, DRAFT: DRAFT, STORY_LEN: STORY_LEN };
+if (typeof document === 'undefined') { globalThis.prWatchSite = api; return; }
+
+function boot() {
+  var c = new Component();
+  c.props = { accent: '#CBA6F7' };
+  var vals = null, last = new WeakMap();
+  var q = function (sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); };
+  var grids = q('[data-grid]'), texts = q('[data-text]'), ifs = q('[data-if]'), styles = q('[data-style]');
+  // Touch the DOM only where this frame differs from the last one.
+  var once = function (el, value, apply) { if (last.get(el) !== value) { last.set(el, value); apply(value); } };
+
+  // Box, block and braille glyphs come from whatever fallback font a system
+  // has, and some draw wider or narrower than a cell. Measure each glyph once
+  // per weight and squeeze or centre the odd ones so every row stays W cells.
+  var probe = null, cell = 0, fits = {};
+  var widthOf = function (text, w) {
+    probe.style.fontWeight = w; probe.textContent = text;
+    return probe.getBoundingClientRect().width / Array.from(text).length;
+  };
+  var cellOf = function (ch, w) {
+    if (ch <= '~' || !probe) return '';
+    var key = w + ch;
+    if (!(key in fits)) {
+      var gw = widthOf(ch.repeat(8), w), d = gw - cell;
+      fits[key] = Math.abs(d) < 0.01 ? ''
+        : d > 0 ? 'transform:scaleX(' + (cell / gw).toFixed(4) + ');margin-right:' + (-d).toFixed(3) + 'px'
+        : 'width:' + cell.toFixed(3) + 'px;text-align:center';
+    }
+    return fits[key];
+  };
+  var remeasure = function () {
+    if (!grids.length) return;
+    if (!probe) {
+      var box = document.createElement('div');
+      box.className = 'g'; box.setAttribute('aria-hidden', 'true');
+      box.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden';
+      box.style.font = getComputedStyle(grids[0]).font;
+      probe = box.appendChild(document.createElement('span'));
+      document.body.appendChild(box);
+    }
+    cell = widthOf('0000000000', '400'); fits = {};
+    last = new WeakMap();
+    if (vals) c.paint();
+  };
+
+  c.paint = function () {
+    vals = c.renderVals();
+    grids.forEach(function (el) { once(el, gridHTML(gridOf(vals, el.dataset.grid), cellOf), function (h) { el.innerHTML = h; }); });
+    texts.forEach(function (el) { once(el, String(vals[el.dataset.text]), function (t) { el.textContent = t; }); });
+    ifs.forEach(function (el) { el.hidden = !vals[el.dataset.if]; });
+    styles.forEach(function (el) { once(el, fill(el.dataset.style, vals), function (s) { el.style.cssText = s; }); });
+  };
+
+  q('[data-on]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      var name = el.dataset.on;
+      if (vals && typeof vals[name] === 'function') vals[name]();
+      // With reduced motion the clock is stopped, so a started demo would wait
+      // forever; step the clock straight to where that demo comes to rest.
+      if (c.timer == null) {
+        var t = c.state.tick || 0;
+        if (name === 'pressFix') c.setState({ tick: t + 9 + Math.ceil(DRAFT.length / 16) });
+        if (name === 'confirmMerge') c.setState({ tick: t + 10 });
+      }
+      // A pressed control that just hid itself hands focus to the next one in its
+      // row, or else to its demo's Replay.
+      if (el.hidden) {
+        var shown = function (root) { return Array.prototype.filter.call(root.querySelectorAll('button'), function (b) { return !b.hidden; })[0]; };
+        var next = shown(el.parentNode) || shown(el.closest('section') || document.body);
+        if (next) next.focus();
+      }
+    });
+  });
+
+  remeasure();
+  c.componentDidMount();
+  if (document.fonts) {
+    document.fonts.ready.then(remeasure);
+    document.fonts.addEventListener('loadingdone', remeasure);
+  }
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+else boot();
+})();
+
+</script>
+</body>
+</html>
