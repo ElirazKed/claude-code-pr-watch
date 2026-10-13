@@ -75,7 +75,7 @@ o: Open pane  r: Refresh  f: Fix #13 with Claude
 ```
 
 - **What it shows:** a line per PR, most urgent first (conflicts, failing CI, changes requested, comments to address, then what can merge, what waits, what's done), with the card's icon and spinner, the title cut to fit, and the state in a few words. Five lines at most, the buttons included; past that, *+3 more* on the buttons' line. It takes two lines when another mod draws in the band too, and keeps theirs below.
-- **Buttons:** **Open pane** (`o`) opens the full pane at any width, with the keys. **Refresh** (`r`) asks GitHub now. The most urgent PR's **Fix with Claude** or **Address with Claude** (`f`, `a`) drafts in the prompt box as a card's does; where it would ask first, or the draft goes wrong, the pane opens with the keys to show that card's question or error. The keys work once the band has them: `ctrl+x tab`, or a click. Merging, dismissing and stopping stay in the pane.
+- **Buttons:** **Open pane** (`o`) opens the full pane at any width, with the keys. **Refresh** (`r`) asks GitHub now. The most urgent PR's hand-off, **Resolve with Claude** (`c`) where its branch conflicts, else **Fix with Claude** or **Address with Claude** (`f`, `a`), drafts in the prompt box as a card's does; where it would ask first, or the draft goes wrong, the pane opens with the keys to show that card's question or error. The keys work once the band has them: `ctrl+x tab`, or a click. Merging, dismissing and stopping stay in the pane.
 - **When it's empty:** nothing watched, the band is left empty, and a survey there has it to itself. `ctrl+x ctrl+a` or the band's `[-]` folds it away.
 - **The pane:** new PRs never open it. `/pr-watch` does, and an open pane works as ever.
 - **The gh budget:** the band mentions it only once some bucket is below 20%, at the end of the buttons' line, in the meter's words (*gh 12% ↻42m*, or *gh 12%*), and drops it first where the line is short. A secondary limit's pause (*⏸ GitHub rate limit · resumes in 45s*) shows there at once, ahead of the hand-off button.
@@ -156,7 +156,15 @@ A card with unresolved review threads has an **Address with Claude** button, bes
 - **Threads:** one `gh api graphql` query for that PR alone, on the press: its newest 100 threads and the first 10 comments of each. The poll never asks what a thread says.
 - **Trimmed:** each comment loses the HTML comments review apps keep notes in and is clipped at 1,000 characters, each thread at 3,000, and all the threads together stay under about 12 KB. Threads that don't fit are counted, and the draft points to the PR's files tab.
 - **Which account, while it reads, no prompt box:** as for Fix with Claude. The card says *Reading review threads…*, a second press does nothing, and where the box won't take a draft it asks *Send review comments of #12 to Claude?* first.
-- **Both at once:** each button's draft replaces only its own earlier draft for that PR, so the other one, and what you typed before them, stay in the box.
+- **Several at once:** each button's draft replaces only its own earlier draft for that PR, so the others, and what you typed before them, stay in the box.
+
+## Resolve with Claude
+
+A card whose branch conflicts with its base (*⚠ CONFLICTS*, or *Draft · merge conflicts* on a draft) has a **Resolve with Claude** button, first of the hand-offs, since a conflict blocks the merge whatever CI and review say. It drafts the ask in your prompt box the same way: read it, change it if you like, and press Enter. Nothing reaches Claude until you do.
+
+- **What's in it:** the PR (repo, number, title, link, head branch → base), that GitHub can't merge it cleanly, and the ask: fetch and merge `origin/<base>` into the branch rather than rebase it, so no history is rewritten and no force-push is needed (where the branch or repo clearly works by rebase, Claude says so and asks first); resolve each conflict keeping what both sides meant, and ask you where the intent is unclear; run the project's checks and tests; commit the merge. Or say first if the repo or branch isn't checked out here. It doesn't ask Claude to push or merge: the push stays your call.
+- **Nothing to fetch:** GitHub doesn't say which files conflict, so the press asks GitHub nothing; git finds them once the base is merged in. Where the card's latest round shows no conflict any more, it drafts nothing and asks GitHub again.
+- **A second press, no prompt box:** as for Fix with Claude. A double press drafts once, a later one replaces its own draft, and where the box won't take a draft it asks *Send merge conflicts of #12 to Claude?* first.
 
 ## How it polls
 
