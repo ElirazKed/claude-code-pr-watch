@@ -4,29 +4,24 @@ import type { Bucket, Limits } from '../types'
 import {
   LOW_RATE,
   REST_MS,
+  GH_HELP,
   bandNote,
   bucketOf,
-  clockAt,
   countdown,
-  ghLines,
+  ghMeter,
   isRestDue,
-  kilo,
   legacyRate,
   lowUntil,
-  offsetOf,
+  refillIn,
   restOf,
   roundWaitsUntil,
   toneOf,
   withSeen,
 } from './rate'
-import type { GhLine } from './rate'
 
 const T = Date.parse('2026-10-07T12:00:00Z')
 const RESET = Date.parse('2026-10-07T12:40:00Z')
-// Jerusalem in summer: 12:40Z reads 15:40.
-const ZONE = 180
 const bucket = (remaining: number, extra: Partial<Bucket> = {}): Bucket => ({ limit: 5_000, remaining, resetAt: RESET, seenAt: T, ...extra })
-const text = (line: GhLine) => line.map(part => part.text).join('')
 const limits = (logins: Limits['logins'], heldUntil = 0): Limits => ({ logins, heldUntil })
 
 describe('what GitHub said', () => {
@@ -93,81 +88,87 @@ describe('backing off, per login', () => {
   })
 })
 
-describe('the gh line', () => {
-  test('thousands rounded down to a tenth: never more left than there is', async () => {
-    expect([kilo(4_321), kilo(5_000), kilo(4_999), kilo(1_000), kilo(999), kilo(0), kilo(12_500)]).toEqual(['4.3k', '5k', '4.9k', '1k', '999', '0', '12.5k'])
-  })
-
+describe('the gh meter', () => {
   test('dim while healthy, a warning below 20% of the limit, an error below 5%', async () => {
     expect([toneOf(bucket(1_000)), toneOf(bucket(999)), toneOf(bucket(250)), toneOf(bucket(249)), toneOf(bucket(0))]).toEqual([null, 'warning', 'warning', 'error', 'error'])
   })
 
-  test('the reset in the local time, and a wait counted down', async () => {
-    expect([clockAt(RESET, ZONE), clockAt(RESET, 0), clockAt(RESET, -330)]).toEqual(['15:40', '12:40', '07:10'])
-    expect([offsetOf('+0300\n'), offsetOf('-0530'), offsetOf('+0000'), offsetOf('IDT')]).toEqual([180, -330, 0, null])
+  test('a wait counted down, and a refill rounded up to the minute', async () => {
     expect([countdown(45_000), countdown(44_001), countdown(120_000), countdown(90_000), countdown(-5)]).toEqual(['45s', '45s', '2m', '1m 30s', '0s'])
+    expect([refillIn(45_000), refillIn(60_000), refillIn(2_460_000), refillIn(2_401_000), refillIn(3_590_000), refillIn(3_900_000), refillIn(-1)]).toEqual([
+      '↻45s',
+      '↻1m',
+      '↻41m',
+      '↻41m',
+      '↻1h',
+      '↻1h 5m',
+      '↻0s',
+    ])
   })
 
-  test('a line per login: points for GraphQL, requests for REST, and the lowest bucket\'s reset', async () => {
+  test("a meter per login: GraphQL's bar over REST's, the lower share and its refill", async () => {
     const two = limits([
       { login: 'octocat', graphql: bucket(4_321), core: bucket(4_900, { resetAt: RESET + 900_000 }) },
       { login: 'hubot', graphql: bucket(4_950), core: bucket(5_000) },
     ])
-    expect(ghLines(two, T, 60, ZONE).map(text)).toEqual(['gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST · resets 15:40', '    hubot 4.9k/5k GraphQL · 5k/5k REST'])
-    // Healthy: every part dim.
-    expect(ghLines(two, T, 60, ZONE).flat().every(part => part.tone === null)).toBe(true)
+    expect(ghMeter(two, T)).toEqual({
+      pause: null,
+      meters: [
+        { login: 'octocat', graphql: { share: 4_321 / 5_000, tone: null }, core: { share: 0.98, tone: null }, percent: '86%', tone: null, refill: '↻40m' },
+        { login: 'hubot', graphql: { share: 0.99, tone: null }, core: { share: 1, tone: null }, percent: '99%', tone: null, refill: '↻40m' },
+      ],
+    })
   })
 
-  test('where the reset does not fit beside its login, it goes on a line of its own', async () => {
-    const two = limits([
-      { login: 'octocat', graphql: bucket(4_321), core: bucket(4_900) },
-      { login: 'hubot', graphql: bucket(800), core: bucket(5_000) },
-    ])
-    const lines = ghLines(two, T, 46, ZONE)
-    expect(lines.map(text)).toEqual(['gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST', '    hubot 800/5k GraphQL · 5k/5k REST', '    resets 15:40'])
-    for (const line of lines) expect(text(line).length).toBeLessThanOrEqual(46)
-    // The low bucket and its reset say so; the rest stays dim.
-    expect(lines.flat().filter(part => part.tone !== null)).toEqual([
-      { text: '800/5k GraphQL', tone: 'warning' },
-      { text: 'resets 15:40', tone: 'warning' },
-    ])
+  test('the lower bucket sets the percent and its health, whichever of the two it is', async () => {
+    const low = limits([{ login: 'octocat', graphql: bucket(4_000), core: bucket(200, { resetAt: RESET + 1_200_000 }) }])
+    expect(ghMeter(low, T)?.meters[0]).toMatchObject({ percent: '4%', tone: 'error', refill: '↻1h', core: { share: 0.04, tone: 'error' } })
+    const warn = limits([{ login: 'octocat', graphql: bucket(800), core: bucket(5_000) }])
+    expect(ghMeter(warn, T)?.meters[0]).toMatchObject({ percent: '16%', tone: 'warning', refill: '↻40m' })
   })
 
-  test('a bucket under 5% is an error; one past its reset reads full again, with no reset to say', async () => {
-    const spent = limits([{ login: 'octocat', graphql: bucket(120), core: bucket(10, { resetAt: T - 1 }) }])
-    expect(ghLines(spent, T, 60, ZONE).map(text)).toEqual(['gh  octocat 120/5k GraphQL · 5k/5k REST · resets 15:40'])
-    expect(ghLines(spent, T, 60, ZONE)[0]?.find(part => part.text.includes('GraphQL'))?.tone).toBe('error')
+  test('a bucket past its reset reads full again, with no refill to say', async () => {
+    const reset = limits([{ login: 'octocat', graphql: bucket(120, { resetAt: T - 1 }), core: bucket(10, { resetAt: T - 1 }) }])
+    expect(ghMeter(reset, T)?.meters[0]).toEqual({ login: 'octocat', graphql: { share: 1, tone: null }, core: { share: 1, tone: null }, percent: '100%', tone: null, refill: null })
   })
 
-  test('only what is known: GraphQL alone before a round has asked REST; nothing known, no line', async () => {
-    expect(ghLines(limits([{ login: 'octocat', graphql: bucket(4_000) }]), T, 60, ZONE).map(text)).toEqual(['gh  octocat 4k/5k GraphQL · resets 15:40'])
-    expect(ghLines(limits([]), T, 60, ZONE)).toEqual([])
+  test('only what is known: GraphQL alone before a round has asked REST; nothing known, no meter', async () => {
+    expect(ghMeter(limits([{ login: 'octocat', graphql: bucket(4_000) }]), T)?.meters[0]).toMatchObject({ graphql: { share: 0.8 }, core: null, percent: '80%' })
+    expect(ghMeter(limits([]), T)).toBe(null)
   })
 
-  test('while a secondary limit holds, the pause line instead, counted down', async () => {
+  test('while a secondary limit holds, the pause above the meters, counted down', async () => {
     const held = limits([{ login: 'octocat', graphql: bucket(4_000) }], T + 45_000)
-    expect(ghLines(held, T, 46, ZONE)).toEqual([[{ text: '⏸ GitHub rate limit · polling resumes in 45s', tone: 'warning' }]])
-    expect(ghLines(held, T + 45_000, 46, ZONE).map(text)).toEqual(['gh  octocat 4k/5k GraphQL · resets 15:40'])
+    expect(ghMeter(held, T)).toMatchObject({ pause: '⏸ GitHub rate limit · resumes in 45s', meters: [{ login: 'octocat' }] })
+    expect(ghMeter(held, T + 45_000)?.pause).toBe(null)
+    expect(ghMeter(limits([], T + 45_000), T)).toEqual({ pause: '⏸ GitHub rate limit · resumes in 45s', meters: [] })
+  })
+
+  test('the `?` says it in two to four plain lines', async () => {
+    expect(GH_HELP.length).toBeGreaterThanOrEqual(2)
+    expect(GH_HELP.length).toBeLessThanOrEqual(4)
+    const all = GH_HELP.join(' ')
+    for (const word of ['hourly', 'GraphQL', 'REST', 'per login', 'every session', 'stops polling', '⏸', '↻']) expect(all).toContain(word)
   })
 })
 
 describe("the band's gh note", () => {
   test('nothing while every bucket has 20% or more', async () => {
-    expect(bandNote(limits([{ login: 'octocat', graphql: bucket(1_000), core: bucket(5_000) }]), T, ZONE)).toBe(null)
-    expect(bandNote(limits([]), T, ZONE)).toBe(null)
+    expect(bandNote(limits([{ login: 'octocat', graphql: bucket(1_000), core: bucket(5_000) }]), T)).toBe(null)
+    expect(bandNote(limits([]), T)).toBe(null)
   })
 
-  test("below 20%, the lowest bucket's share and reset, whichever login it is", async () => {
+  test("below 20%, the lowest bucket's share and refill, whichever login it is, in the meter's words", async () => {
     const low = limits([
       { login: 'octocat', graphql: bucket(4_000) },
       { login: 'hubot', graphql: bucket(600), core: bucket(200) },
     ])
-    expect(bandNote(low, T, ZONE)).toEqual({ long: 'gh 4% · resets 15:40', short: 'gh 4%', tone: 'error', isPause: false })
+    expect(bandNote(low, T)).toEqual({ long: 'gh 4% ↻40m', short: 'gh 4%', tone: 'error', isPause: false })
   })
 
   test('the pause, whatever the buckets', async () => {
-    expect(bandNote(limits([], T + 45_000), T, ZONE)).toEqual({
-      long: '⏸ GitHub rate limit · polling resumes in 45s',
+    expect(bandNote(limits([], T + 45_000), T)).toEqual({
+      long: '⏸ GitHub rate limit · resumes in 45s',
       short: '⏸ resumes in 45s',
       tone: 'warning',
       isPause: true,

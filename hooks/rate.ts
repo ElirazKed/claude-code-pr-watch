@@ -1,4 +1,4 @@
-// The gh line: how much of GitHub's hourly budget each gh login has left, so the person can
+// The gh meter: how much of GitHub's hourly budget each gh login has left, so the person can
 // put off heavy gh work before it runs out, and what holds the poll back. GraphQL counts
 // points (the poll's own replies say how many are left, for free); REST counts requests
 // (GitHub's /rate_limit, which costs nothing, asked by the round at most every REST_MS per
@@ -6,7 +6,6 @@
 // only that one holds the poll once it does.
 import type { Bucket, Limits, LoginRates } from '../types'
 import type { RateLimit } from './batch'
-import { cells } from './review'
 
 // By login, as gh names it.
 export type Rates = Record<string, LoginRates>
@@ -103,7 +102,7 @@ export function legacyRate(rates: Rates): RateLimit | null {
   return best === undefined ? null : { limit: best.limit, remaining: best.remaining, resetAt: new Date(best.resetAt).toISOString() }
 }
 
-// ---- The line -----------------------------------------------------------------------------
+// ---- The meter -----------------------------------------------------------------------------
 
 export type Tone = 'warning' | 'error' | null
 
@@ -119,30 +118,6 @@ export function toneOf(bucket: Bucket): Tone {
   return share < ERROR_SHARE ? 'error' : share < WARN_SHARE ? 'warning' : null
 }
 
-// 4321 → "4.3k", 5000 → "5k", 812 → "812": rounded down, so the line never says more is left
-// than is.
-export function kilo(n: number): string {
-  if (n < 1_000) return String(Math.max(0, Math.floor(n)))
-  const k = Math.floor(n / 100) / 10
-
-  return `${Number.isInteger(k) ? k : k.toFixed(1)}k`
-}
-
-// "13:40" in the person's time zone; `offsetMin` is minutes east of UTC.
-export function clockAt(ms: number, offsetMin: number): string {
-  const local = new Date(ms + offsetMin * 60_000)
-  const two = (n: number) => String(n).padStart(2, '0')
-
-  return `${two(local.getUTCHours())}:${two(local.getUTCMinutes())}`
-}
-
-// `date +%z`'s "+0300" or "-0530" as minutes east of UTC; null where it says nothing like it.
-export function offsetOf(text: string): number | null {
-  const m = text.trim().match(/^([+-])(\d{2})(\d{2})$/)
-
-  return m === null ? null : (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
-}
-
 // "45s", "2m", "1m 30s": a wait, rounded up to the second.
 export function countdown(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1_000))
@@ -152,17 +127,16 @@ export function countdown(ms: number): string {
   return s % 60 === 0 ? `${m}m` : `${m}m ${s % 60}s`
 }
 
-export const pauseText = (heldUntil: number, at: number) => `⏸ GitHub rate limit · polling resumes in ${countdown(heldUntil - at)}`
+// "↻42m": how long until GitHub fills a bucket again, rounded up; "↻1h 5m" past the hour.
+export function refillIn(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1_000))
+  if (s < 60) return `↻${s}s`
+  const m = Math.ceil(s / 60)
 
-export type Segment = { text: string; tone: Tone }
-export type GhLine = Segment[]
+  return m < 60 ? `↻${m}m` : m % 60 === 0 ? `↻${m / 60}h` : `↻${Math.floor(m / 60)}h ${m % 60}m`
+}
 
-const seg = (text: string, tone: Tone = null): Segment => ({ text, tone })
-const widthOf = (line: GhLine) => line.reduce((n, s) => n + cells(s.text), 0)
-
-const PREFIX = 'gh  '
-const INDENT = ' '.repeat(PREFIX.length)
-const SEP = ' · '
+export const pauseText = (heldUntil: number, at: number) => `⏸ GitHub rate limit · resumes in ${countdown(heldUntil - at)}`
 
 type Shown = { login: string; graphql?: Bucket; core?: Bucket }
 
@@ -176,63 +150,70 @@ function shownOf(limits: Limits, at: number): Shown[] {
   })
 }
 
-// The bucket with the least share left that has a reset ahead (one past it is full again),
-// and the line of the login it belongs to.
-function lowestOf(shown: readonly Shown[], at: number): { bucket: Bucket; index: number } | null {
-  let low: { bucket: Bucket; index: number } | null = null
-  for (const [index, rate] of shown.entries()) {
-    for (const bucket of [rate.graphql, rate.core]) {
-      if (bucket === undefined || bucket.resetAt <= at) continue
-      if (low === null || shareOf(bucket) < shareOf(low.bucket)) low = { bucket, index }
-    }
+// The bucket with the least share left that has a reset ahead (one past it is full again).
+function lowestIn(buckets: readonly (Bucket | undefined)[], at: number): Bucket | null {
+  let low: Bucket | null = null
+  for (const bucket of buckets) {
+    if (bucket === undefined || bucket.resetAt <= at) continue
+    if (low === null || shareOf(bucket) < shareOf(low)) low = bucket
   }
 
   return low
 }
 
-// The pane's gh line, to fit `columns`: a line per login, the active one first,
-//   gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST · resets 13:40
-//       hubot 4.9k/5k GraphQL · 5k/5k REST
-// and the reset time of the lowest bucket at the end of its login's line, or on a line of its
-// own where it won't fit there. While a secondary limit holds, the pause line instead. None
-// known yet: no line.
-export function ghLines(limits: Limits, at: number, columns: number, offsetMin: number): GhLine[] {
-  if (limits.heldUntil > at) return [[seg(pauseText(limits.heldUntil, at), 'warning')]]
-  const shown = shownOf(limits, at)
-  const lines = shown.map((rate, i) => {
-    const line: GhLine = [seg(i === 0 ? PREFIX : INDENT)]
-    if (rate.login !== '') line.push(seg(`${rate.login} `))
-    const parts = [
-      ...(rate.graphql !== undefined ? [seg(`${kilo(rate.graphql.remaining)}/${kilo(rate.graphql.limit)} GraphQL`, toneOf(rate.graphql))] : []),
-      ...(rate.core !== undefined ? [seg(`${kilo(rate.core.remaining)}/${kilo(rate.core.limit)} REST`, toneOf(rate.core))] : []),
-    ]
-    parts.forEach((part, j) => line.push(...(j > 0 ? [seg(SEP)] : []), part))
+// One bar of a meter: the share a bucket has left, and how healthy that is.
+export type Bar = { share: number; tone: Tone }
+// One login's meter: GraphQL's bar (the poll's points) over REST's (gh's requests), each null
+// until seen; the lower share as "94%", its tone, and when that bucket refills ("↻42m"), null
+// where neither has a reset ahead (both full).
+export type Meter = { login: string; graphql: Bar | null; core: Bar | null; percent: string; tone: Tone; refill: string | null }
+// The pane's gh meter: the hold, while a secondary limit pauses the poll, and a meter per
+// login, the active one first.
+export type GhMeter = { pause: string | null; meters: Meter[] }
 
-    return line
+const barOf = (bucket: Bucket | undefined): Bar | null => (bucket === undefined ? null : { share: shareOf(bucket), tone: toneOf(bucket) })
+
+// The pane's gh meter at `at`; null with nothing known and nothing held.
+export function ghMeter(limits: Limits, at: number): GhMeter | null {
+  const pause = limits.heldUntil > at ? pauseText(limits.heldUntil, at) : null
+  const meters = shownOf(limits, at).map((rate): Meter => {
+    const known = [rate.graphql, rate.core].filter((b): b is Bucket => b !== undefined)
+    const least = known.reduce((a, b) => (shareOf(b) < shareOf(a) ? b : a))
+    const low = lowestIn(known, at)
+
+    return {
+      login: rate.login,
+      graphql: barOf(rate.graphql),
+      core: barOf(rate.core),
+      percent: `${Math.floor(shareOf(least) * 100)}%`,
+      tone: toneOf(least),
+      refill: low === null ? null : refillIn(low.resetAt - at),
+    }
   })
-  const low = lowestOf(shown, at)
-  const line = low === null ? undefined : lines[low.index]
-  if (low !== null && line !== undefined) {
-    const reset = seg(`resets ${clockAt(low.bucket.resetAt, offsetMin)}`, toneOf(low.bucket))
-    if (widthOf(line) + cells(SEP) + cells(reset.text) <= columns) line.push(seg(SEP), reset)
-    else lines.push([seg(INDENT), reset])
-  }
 
-  return lines
+  return pause === null && meters.length === 0 ? null : { pause, meters }
 }
+
+// The `?` under the meter: what the budget is, in plain words.
+export const GH_HELP = [
+  "GitHub's hourly budget per gh login: GraphQL points on top (the poll's), REST requests below (gh's). The % is the lower.",
+  'It is per login, so every session on this machine signed in as it shares it.',
+  "Running low, pr-watch stops polling that login's PRs; ⏸ means GitHub asked everyone to wait.",
+  '↻ is how long until it refills.',
+] as const
 
 export type GhNote = { long: string; short: string; tone: Tone; isPause: boolean }
 
-// The band's gh note, for its action line: the pause while a hold lasts; otherwise only while
-// some bucket is below WARN_SHARE, the share it has left, "gh 12% · resets 13:40", or short
-// "gh 12%". Healthy: nothing.
-export function bandNote(limits: Limits, at: number, offsetMin: number): GhNote | null {
+// The band's gh note, for its action line, in the meter's words: the pause while a hold lasts;
+// otherwise only while some bucket is below WARN_SHARE, the share it has left, "gh 12% ↻42m",
+// or short "gh 12%". Healthy: nothing.
+export function bandNote(limits: Limits, at: number): GhNote | null {
   if (limits.heldUntil > at) {
     return { long: pauseText(limits.heldUntil, at), short: `⏸ resumes in ${countdown(limits.heldUntil - at)}`, tone: 'warning', isPause: true }
   }
-  const low = lowestOf(shownOf(limits, at), at)
-  if (low === null || shareOf(low.bucket) >= WARN_SHARE) return null
-  const share = `gh ${Math.floor(shareOf(low.bucket) * 100)}%`
+  const low = lowestIn(shownOf(limits, at).flatMap(rate => [rate.graphql, rate.core]), at)
+  if (low === null || shareOf(low) >= WARN_SHARE) return null
+  const share = `gh ${Math.floor(shareOf(low) * 100)}%`
 
-  return { long: `${share} · resets ${clockAt(low.bucket.resetAt, offsetMin)}`, short: share, tone: toneOf(low.bucket), isPause: false }
+  return { long: `${share} ${refillIn(low.resetAt - at)}`, short: share, tone: toneOf(low), isPause: false }
 }

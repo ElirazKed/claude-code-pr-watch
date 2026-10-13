@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { barCells, fullBarCells, ruleCells, spinnerCell } from './look'
+import { barCells, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
 import {
   MODES,
   THEME,
@@ -8,6 +8,7 @@ import {
   TONES,
   barPaint,
   cardBox,
+  hexOf,
   inkOf,
   lookOf,
   modeOf,
@@ -26,6 +27,7 @@ const KEYS = new Set(['text', 'inverseText', 'inactive', 'subtle', 'suggestion',
 // by number. (A tree refuses `ansi:red`, and the terminal paints nothing for a bare `red`.)
 const paints = (colour: unknown) =>
   typeof colour === 'string' && (KEYS.has(colour) || /^#[0-9a-f]{6}$/i.test(colour) || /^ansi256\(([0-9]|1[0-5])\)$/.test(colour))
+const decode = (cells: string) => new Uint32Array(Uint8Array.from(atob(cells), c => c.charCodeAt(0)).buffer)
 const isRgb = (rgb: readonly number[]) => rgb.length === 3 && rgb.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
 
 describe('the themes', () => {
@@ -48,7 +50,9 @@ describe('the themes', () => {
         expect(rule.length).toBeGreaterThanOrEqual(2)
       }
       expect(THEME[name].spin.length).toBeGreaterThan(0)
-      expect([...THEME[name].rule]).toHaveLength(1)
+      // One glyph, or a pattern of them, each a single cell.
+      expect([...THEME[name].rule].length).toBeGreaterThan(0)
+      for (const glyph of THEME[name].rule) expect(glyph.codePointAt(0)!).toBeLessThan(0x10000)
     }
   })
 
@@ -68,7 +72,7 @@ describe('the themes', () => {
     expect(optionTheme('Solid')).toBe('solid')
     expect(optionTheme('sparkly')).toBe('classic')
     expect(optionTheme(undefined)).toBe('classic')
-    expect(unknownTheme('sparkly')).toBe('No theme "sparkly". Themes: classic, solid, minimal, neon, retro.')
+    expect(unknownTheme('sparkly')).toBe('No theme "sparkly". Themes: classic, solid, minimal, neon, retro, tide, aurora.')
   })
 
   test('the listing names every theme and marks the current one', async () => {
@@ -196,5 +200,73 @@ describe('the other looks', () => {
     expect(pillOf(look, 'success', '✓ READY')).toMatchObject({ open: '[', close: ']', props: { color: 'ansi256(2)' } })
     expect(look.theme.spin).toEqual(['|', '/', '-', '\\'])
     expect(look.theme.rule).toBe('═')
+  })
+})
+
+describe('the banner looks', () => {
+  test('tide and aurora paint banner cards; every other theme stacks its cards', async () => {
+    for (const name of THEMES) {
+      const theme = THEME[name]
+      const isBanner = name === 'tide' || name === 'aurora'
+      expect(theme.layout).toBe(isBanner ? 'banner' : 'stack')
+      expect(theme.art).toBe(isBanner ? name : null)
+      for (const mode of MODES) {
+        const variant = theme[mode]
+        expect(variant.art !== null).toBe(isBanner)
+        expect(variant.panel).toMatch(/^#[0-9a-f]{6}$/)
+        expect(isRgb(variant.raster.track)).toBe(true)
+      }
+    }
+  })
+
+  test('a banner theme paints every tone in light and in dark: glass, liquid or curtains, crest, badge and accent', async () => {
+    for (const name of ['tide', 'aurora'] as const) {
+      for (const mode of MODES) {
+        const art = THEME[name][mode].art!
+        expect(Object.keys(art.tones).sort()).toEqual([...TONES].sort())
+        for (const tone of TONES) {
+          const { glass, surface, deep, crest, badge, ink } = art.tones[tone]
+          for (const rgb of [glass, surface, deep, crest, badge, ink]) expect(isRgb(rgb)).toBe(true)
+          // The text keys the band and the rows under a card use: the accent, on the glass.
+          expect(THEME[name][mode].tones[tone]).toEqual({ ink: hexOf(ink), border: null, fill: hexOf(glass), glow: null })
+        }
+        expect(isRgb(art.light) && isRgb(art.dark)).toBe(true)
+      }
+      // Each mode its own paint.
+      expect(THEME[name].light.art).not.toEqual(THEME[name].dark.art)
+      expect(THEME[name].card.border).toBeNull()
+    }
+    expect(lookOf('tide', 'dark').theme.rule).toBe('▁▂▃▄▅▄▃▂')
+  })
+
+  test("the header's rule repeats a pattern of glyphs across, through the gradient", async () => {
+    const words = decode(ruleCells(10, [[0, 0, 0], [255, 255, 255]], '▁▂▃'))
+    expect([0, 3, 6, 9, 12, 15, 18, 21, 24, 27].map(i => String.fromCodePoint(words[i]!)).join('')).toBe('▁▂▃▁▂▃▁▂▃▁')
+    expect(ruleText(7, '▁▂▃')).toBe('▁▂▃▁▂▃▁')
+  })
+})
+
+describe('the gh meter', () => {
+  const paint = lookOf('classic', 'dark').variant.raster
+  test("a row of ▀: GraphQL's share on the top half, REST's on the bottom, over the track", async () => {
+    const words = decode(meterCells({ share: 0.5, health: null }, { share: 1, health: 'error' }, 10, paint))
+    expect(words).toHaveLength(30)
+    const cell = (i: number) => ({ cp: words[i * 3]!, top: words[i * 3 + 1]!, bottom: words[i * 3 + 2]! })
+    expect(new Set([...Array(10).keys()].map(i => cell(i).cp))).toEqual(new Set([0x2580]))
+    const hex = ([r, g, b]: readonly number[]) => (r! << 16) | (g! << 8) | b!
+    // Half full: the first five cells in the green ramp, the rest the track.
+    expect(cell(0).top).toBe(hex(paint.green[0]))
+    expect([5, 6, 9].map(i => cell(i).top)).toEqual([hex(paint.track), hex(paint.track), hex(paint.track)])
+    // Full and spent, the bottom ends in red.
+    expect(cell(9).bottom).toBe(hex(paint.red[1]))
+  })
+
+  test('a half not known yet is the terminal\'s own background; a share between cells blends the cell', async () => {
+    const words = decode(meterCells({ share: 0.25, health: 'warning' }, null, 10, paint))
+    expect(words[2]).toBe(0x01000000)
+    // 2.5 cells: the third cell is half filled.
+    const third = words[2 * 3 + 1]!
+    expect(third).not.toBe(words[1 * 3 + 1])
+    expect(third).not.toBe(words[3 * 3 + 1])
   })
 })

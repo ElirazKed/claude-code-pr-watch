@@ -1,6 +1,6 @@
 {
   "name": "pr-watch",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
   "types": "./types/index.d.ts",
   "author": {
@@ -42,8 +42,8 @@
     "theme": {
       "type": "string",
       "title": "How the PRs look",
-      "description": "classic: round borders coloured by state. solid: borderless tiles tinted by state. minimal: no boxes, a thin rule between PRs. neon: bold vivid borders that glow on hover. retro: double borders in the 16 terminal colours. Follows a light or dark Claude Code theme; /pr-watch theme <name> switches too.",
-      "options": ["classic", "solid", "minimal", "neon", "retro"],
+      "description": "classic: round borders coloured by state. solid: borderless tiles tinted by state. minimal: no boxes, a thin rule between PRs. neon: bold vivid borders that glow on hover. retro: double borders in the 16 terminal colours. tide: each card fills like a glass as its PR moves on, behind a wavy front. aurora: each card a sky of soft northern lights in its state. Follows a light or dark Claude Code theme; /pr-watch theme <name> switches too.",
+      "options": ["classic", "solid", "minimal", "neon", "retro", "tide", "aurora"],
       "default": "classic"
     }
   }

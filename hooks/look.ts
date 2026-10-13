@@ -4,25 +4,26 @@
 import type { Checks } from '../types'
 import type { Ramp, RasterPaint, Rgb } from './theme'
 
-type Cell = readonly [codePoint: number, fg: number, bg: number]
+export type Cell = readonly [codePoint: number, fg: number, bg: number]
 
-const DEFAULT_BG = 0x01000000
+// A cell's colour for the terminal's own background (or foreground).
+export const DEFAULT_BG = 0x01000000
 
 // What a CI bar is painted with: the theme's ramps, and the card's fill behind (null: the
 // terminal's own background).
 export type BarPaint = Pick<RasterPaint, 'green' | 'red' | 'amber' | 'shine'> & { bg: number | null }
 
-function lerp(a: Rgb, b: Rgb, t: number): Rgb {
+export function lerp(a: Rgb, b: Rgb, t: number): Rgb {
   const k = Math.min(1, Math.max(0, t))
 
   return [0, 1, 2].map(i => Math.round(a[i]! + (b[i]! - a[i]!) * k)) as unknown as Rgb
 }
 
-function hex([r, g, b]: Rgb): number {
+export function hex([r, g, b]: Rgb): number {
   return (r << 16) | (g << 8) | b
 }
 
-function gradientAt(stops: readonly Rgb[], t: number): Rgb {
+export function gradientAt(stops: readonly Rgb[], t: number): Rgb {
   const span = (stops.length - 1) * Math.min(1, Math.max(0, t))
   const i = Math.min(stops.length - 2, Math.floor(span))
 
@@ -87,9 +88,37 @@ export function fullBarCells(width: number, colours: Ramp, bg: number | null = n
   return encode(Array.from({ length: width }, (_, i) => cell('━', lerp(colours[0], colours[1], i / Math.max(1, width - 1)), bg)))
 }
 
-// The header's rule: `glyph` across, through the theme's gradient stops.
-export function ruleCells(width: number, stops: readonly Rgb[], glyph: string): string {
-  return encode(Array.from({ length: width }, (_, i) => cell(glyph, gradientAt(stops, i / Math.max(1, width - 1)))))
+// The header's rule: the theme's `glyphs` repeated across (one, or a pattern such as a wave's
+// heights), through its gradient stops.
+export function ruleCells(width: number, stops: readonly Rgb[], glyphs: string): string {
+  const pattern = [...glyphs]
+
+  return encode(Array.from({ length: width }, (_, i) => cell(pattern[i % pattern.length]!, gradientAt(stops, i / Math.max(1, width - 1)))))
+}
+
+// The rule as text, `width` cells of the pattern, where no Raster draws.
+export const ruleText = (width: number, glyphs: string) => Array.from({ length: width }, (_, i) => [...glyphs][i % [...glyphs].length]).join('')
+
+// The gh meter's paint: a ramp per health (look.ts's green, amber and red), and the track.
+export type MeterPaint = Pick<RasterPaint, 'green' | 'amber' | 'red' | 'track'>
+export type Health = 'warning' | 'error' | null
+
+// One login's budget as one row of `▀`: the top half of each cell is GraphQL's share left, the
+// bottom half REST's (each null where it isn't known yet: the terminal's own background), each
+// coloured by its health over the track, the cell where a share ends blended by how much of it
+// is filled.
+export function meterCells(top: { share: number; health: Health } | null, bottom: { share: number; health: Health } | null, width: number, paint: MeterPaint): string {
+  const ramp = (health: Health) => (health === 'error' ? paint.red : health === 'warning' ? paint.amber : paint.green)
+  const half = (bar: { share: number; health: Health } | null, i: number): number => {
+    if (bar === null) return DEFAULT_BG
+    const filled = Math.min(1, Math.max(0, bar.share)) * width
+    const [from, to] = ramp(bar.health)
+    const colour = lerp(from, to, width === 1 ? 1 : i / (width - 1))
+
+    return hex(lerp(paint.track, colour, Math.min(1, Math.max(0, filled - i))))
+  }
+
+  return encode(Array.from({ length: width }, (_, i) => [0x2580, half(top, i), half(bottom, i)] as const))
 }
 
 // One frame of the spinner: the theme's `glyphs` in turn, pulsing between its two colours.

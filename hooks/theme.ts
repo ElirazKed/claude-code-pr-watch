@@ -5,7 +5,7 @@ import type { BoxHoverProps, BoxProps, Color } from 'claude-code'
 import type { Tone } from '../types'
 import type { BarPaint } from './look'
 
-export const THEMES = ['classic', 'solid', 'minimal', 'neon', 'retro'] as const
+export const THEMES = ['classic', 'solid', 'minimal', 'neon', 'retro', 'tide', 'aurora'] as const
 export type ThemeName = (typeof THEMES)[number]
 export type Mode = 'light' | 'dark'
 export const MODES: readonly Mode[] = ['light', 'dark']
@@ -37,6 +37,38 @@ export type RasterPaint = {
   shine: Rgb
   rule: readonly Rgb[]
   spinner: Ramp
+  // The empty part of the gh meter's bars.
+  track: Rgb
+}
+
+// How a card is laid out. stack: a framed box of text rows, a CI bar and a stepper. banner: a
+// painted card (art.ts), the text drawn into its cells, its progress the art itself, and the
+// links and buttons on rows of their own under it.
+export type CardLayout = 'stack' | 'banner'
+// What a banner card's cells are painted with: a liquid that advances with the PR's progress
+// behind a wavy front, or soft curtains of light.
+export type ArtKind = 'tide' | 'aurora'
+
+// One tone's paint on a banner card.
+export type ArtTone = {
+  // The card where the art hasn't reached: tide's empty glass, aurora's sky.
+  glass: Rgb
+  // Tide: the liquid at its surface and deep down, and the light on its crest. Aurora: the
+  // curtains' colours, across the card.
+  surface: Rgb
+  deep: Rgb
+  crest: Rgb
+  // The state badge's chip.
+  badge: Rgb
+  // The tone's text accents on the art (each kept only where it reads, art.ts).
+  ink: Rgb
+}
+
+export type ArtPaint = {
+  tones: Record<Tone, ArtTone>
+  // The two text colours, whichever reads better on a cell's background is drawn there.
+  light: Rgb
+  dark: Rgb
 }
 
 export type Variant = {
@@ -44,6 +76,10 @@ export type Variant = {
   // The pill's text where the pill is filled with the tone.
   pillText: Color
   raster: RasterPaint
+  // A banner card's paint (null: the theme stacks its cards).
+  art: ArtPaint | null
+  // Behind a note drawn over the pane (the gh meter's explanation under the pointer).
+  panel: `#${string}`
 }
 
 // The accents a quiet theme leaves uncoloured.
@@ -53,6 +89,9 @@ export type Theme = {
   name: ThemeName
   // One line for the theme listing.
   blurb: string
+  layout: CardLayout
+  // What a banner card is painted with (null for a stacked one).
+  art: ArtKind | null
   card: {
     // A terminal border style (single, double, round, bold, classic…), or none.
     border: string | null
@@ -67,7 +106,7 @@ export type Theme = {
   }
   // `open` and `close` go around the pill's text; filled, the tone is its background.
   pill: { open: string; close: string; isFilled: boolean }
-  // The header rule's glyph, and the spinner's frames.
+  // The header rule's glyphs, repeated across, and the spinner's frames.
   rule: string
   spin: readonly string[]
   muted: readonly Role[]
@@ -76,6 +115,9 @@ export type Theme = {
 }
 
 const BRAILLE = [...'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏']
+
+// Behind a note drawn over the pane, by mode.
+const PANEL = { light: '#f3f4f8', dark: '#1c1f2b' } as const
 
 // Today's paint, Catppuccin-flavoured, a shade deeper so it still reads on a light terminal:
 // one for both modes.
@@ -92,6 +134,7 @@ const CATPPUCCIN: RasterPaint = {
     [245, 194, 231],
   ],
   spinner: [[223, 142, 29], [249, 226, 175]],
+  track: [108, 112, 134],
 }
 
 // The person's own theme colours: they follow light, dark and daltonized by themselves.
@@ -107,13 +150,15 @@ const KEYED: Record<Tone, ToneLook> = {
 const classic: Theme = {
   name: 'classic',
   blurb: 'round borders coloured by state, a filled pill',
+  layout: 'stack',
+  art: null,
   card: { border: 'round', isDim: true, padY: 0, gap: 1, separator: null },
   pill: { open: ' ', close: ' ', isFilled: true },
   rule: '─',
   spin: BRAILLE,
   muted: [],
-  light: { tones: KEYED, pillText: 'inverseText', raster: CATPPUCCIN },
-  dark: { tones: KEYED, pillText: 'inverseText', raster: CATPPUCCIN },
+  light: { tones: KEYED, pillText: 'inverseText', raster: CATPPUCCIN, art: null, panel: PANEL.light },
+  dark: { tones: KEYED, pillText: 'inverseText', raster: CATPPUCCIN, art: null, panel: PANEL.dark },
 }
 
 // A soft tint per state, the theme's own keys for the text on it. Neutral where nothing is
@@ -131,6 +176,8 @@ const solid: Theme = {
   name: 'solid',
   blurb: 'no borders: each card a tile tinted by its state',
   // A row of padding each side stands for the border's rows, so a card keeps its size.
+  layout: 'stack',
+  art: null,
   card: { border: null, isDim: false, padY: 1, gap: 1, separator: null },
   pill: { open: ' ', close: ' ', isFilled: true },
   rule: '─',
@@ -139,11 +186,15 @@ const solid: Theme = {
   light: {
     tones: tile({ green: '#e1f3e4', red: '#fae1e5', amber: '#faefd6', purple: '#ece3f9', neutral: '#eaecf1' }),
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.light,
     raster: CATPPUCCIN,
   },
   dark: {
     tones: tile({ green: '#1d3524', red: '#3d1f26', amber: '#3a3020', purple: '#2e2442', neutral: '#272a33' }),
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.dark,
     raster: CATPPUCCIN,
   },
 }
@@ -154,6 +205,8 @@ const BARE = Object.fromEntries(TONES.map(tone => [tone, { ...KEYED[tone], borde
 const minimal: Theme = {
   name: 'minimal',
   blurb: 'no boxes, a thin rule between PRs, colour on the pill and headline only',
+  layout: 'stack',
+  art: null,
   card: { border: null, isDim: false, padY: 0, gap: 1, separator: '─' },
   pill: { open: '', close: '', isFilled: false },
   rule: '─',
@@ -162,6 +215,8 @@ const minimal: Theme = {
   light: {
     tones: BARE,
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.light,
     raster: {
       green: [[78, 138, 88], [104, 158, 112]],
       red: [[176, 70, 88], [196, 104, 118]],
@@ -170,11 +225,14 @@ const minimal: Theme = {
       shine: [236, 236, 244],
       rule: [[176, 179, 192], [176, 179, 192]],
       spinner: [[120, 120, 140], [70, 70, 90]],
+      track: [214, 216, 224],
     },
   },
   dark: {
     tones: BARE,
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.dark,
     raster: {
       green: [[86, 140, 96], [124, 172, 132]],
       red: [[170, 80, 96], [204, 124, 136]],
@@ -183,6 +241,7 @@ const minimal: Theme = {
       shine: [214, 214, 226],
       rule: [[88, 91, 112], [88, 91, 112]],
       spinner: [[140, 140, 160], [200, 200, 216]],
+      track: [58, 60, 74],
     },
   },
 }
@@ -193,6 +252,8 @@ const vivid = (inks: Record<Tone, readonly [ink: `#${string}`, glow: `#${string}
 const neon: Theme = {
   name: 'neon',
   blurb: 'bold borders in vivid colour that glow under the pointer, a bright gradient rule',
+  layout: 'stack',
+  art: null,
   card: { border: 'bold', isDim: false, padY: 0, gap: 1, separator: null },
   pill: { open: ' ', close: ' ', isFilled: true },
   rule: '━',
@@ -209,6 +270,8 @@ const neon: Theme = {
       suggestion: ['#0077d6', '#1f9bff'],
     }),
     pillText: '#ffffff',
+    art: null,
+    panel: PANEL.light,
     raster: {
       green: [[0, 150, 56], [0, 212, 82]],
       red: [[214, 0, 111], [255, 43, 147]],
@@ -222,6 +285,7 @@ const neon: Theme = {
         [214, 130, 0],
       ],
       spinner: [[0, 119, 214], [196, 0, 196]],
+      track: [222, 222, 236],
     },
   },
   // Full strength on a dark one; the pill's text near-black.
@@ -235,6 +299,8 @@ const neon: Theme = {
       suggestion: ['#00f0ff', '#b0fcff'],
     }),
     pillText: '#0b0b16',
+    art: null,
+    panel: PANEL.dark,
     raster: {
       green: [[57, 255, 20], [176, 255, 150]],
       red: [[255, 32, 121], [255, 140, 186]],
@@ -248,6 +314,7 @@ const neon: Theme = {
         [255, 211, 0],
       ],
       spinner: [[0, 240, 255], [255, 0, 255]],
+      track: [44, 44, 70],
     },
   },
 }
@@ -270,6 +337,8 @@ const flat = (rgb: Rgb): Ramp => [rgb, rgb]
 const retro: Theme = {
   name: 'retro',
   blurb: 'double borders, the 16 terminal colours, [bracketed] pills: an old TUI',
+  layout: 'stack',
+  art: null,
   card: { border: 'double', isDim: true, padY: 0, gap: 1, separator: null },
   pill: { open: '[', close: ']', isFilled: false },
   rule: '═',
@@ -278,6 +347,8 @@ const retro: Theme = {
   light: {
     tones: SIXTEEN,
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.light,
     raster: {
       green: flat([0, 140, 0]),
       red: flat([180, 0, 0]),
@@ -286,11 +357,14 @@ const retro: Theme = {
       shine: [255, 255, 255],
       rule: [[0, 128, 128], [0, 128, 128]],
       spinner: flat([0, 128, 128]),
+      track: [192, 192, 192],
     },
   },
   dark: {
     tones: SIXTEEN,
     pillText: 'inverseText',
+    art: null,
+    panel: PANEL.dark,
     raster: {
       green: flat([0, 205, 0]),
       red: flat([205, 0, 0]),
@@ -299,11 +373,155 @@ const retro: Theme = {
       shine: [255, 255, 255],
       rule: [[0, 205, 205], [0, 205, 205]],
       spinner: flat([0, 205, 205]),
+      track: [96, 96, 96],
     },
   },
 }
 
-export const THEME: Record<ThemeName, Theme> = { classic, solid, minimal, neon, retro }
+// ---- Banner themes: painted cards (art.ts) ------------------------------------------------
+
+export const hexOf = ([r, g, b]: Rgb): `#${string}` => `#${[r, g, b].map(n => n.toString(16).padStart(2, '0')).join('')}`
+
+// The text keys of a banner theme: each tone's accent as hex, its glass behind the card's rows of
+// links and buttons.
+const painted = (art: ArtPaint): Record<Tone, ToneLook> =>
+  Object.fromEntries(
+    TONES.map(tone => [tone, { ink: hexOf(art.tones[tone].ink), border: null, fill: hexOf(art.tones[tone].glass), glow: null }]),
+  ) as Record<Tone, ToneLook>
+
+// A night sea: the liquid deep and dark enough under light text, its crest lit.
+const TIDE_DARK: ArtPaint = {
+  light: [246, 249, 252],
+  dark: [8, 10, 14],
+  tones: {
+    success: { glass: [17, 29, 26], surface: [24, 100, 72], deep: [8, 58, 48], crest: [96, 214, 160], badge: [72, 214, 150], ink: [132, 240, 186] },
+    error: { glass: [33, 19, 23], surface: [146, 36, 62], deep: [84, 14, 36], crest: [244, 128, 150], badge: [255, 104, 132], ink: [255, 154, 172] },
+    warning: { glass: [33, 28, 17], surface: [126, 80, 14], deep: [84, 46, 8], crest: [240, 190, 96], badge: [255, 192, 72], ink: [255, 212, 124] },
+    merged: { glass: [26, 21, 40], surface: [92, 54, 172], deep: [48, 24, 106], crest: [186, 150, 255], badge: [178, 136, 255], ink: [204, 176, 255] },
+    subtle: { glass: [23, 26, 33], surface: [64, 72, 94], deep: [36, 42, 58], crest: [150, 162, 188], badge: [152, 164, 192], ink: [178, 188, 210] },
+    suggestion: { glass: [17, 27, 39], surface: [28, 88, 156], deep: [12, 48, 98], crest: [120, 190, 250], badge: [98, 178, 255], ink: [144, 204, 255] },
+  },
+}
+
+// A day sea: pale water deepening to colour, under dark text.
+const TIDE_LIGHT: ArtPaint = {
+  light: [255, 255, 255],
+  dark: [26, 29, 36],
+  tones: {
+    success: { glass: [236, 246, 240], surface: [160, 226, 192], deep: [92, 190, 146], crest: [226, 255, 240], badge: [22, 128, 82], ink: [10, 98, 60] },
+    error: { glass: [251, 237, 240], surface: [246, 180, 192], deep: [226, 120, 142], crest: [255, 232, 237], badge: [190, 30, 66], ink: [150, 20, 50] },
+    warning: { glass: [251, 245, 231], surface: [248, 212, 140], deep: [226, 166, 70], crest: [255, 243, 210], badge: [168, 98, 0], ink: [124, 74, 0] },
+    merged: { glass: [243, 238, 252], surface: [206, 186, 248], deep: [158, 126, 230], crest: [240, 232, 255], badge: [110, 56, 200], ink: [86, 36, 168] },
+    subtle: { glass: [239, 241, 246], surface: [206, 212, 224], deep: [160, 170, 190], crest: [247, 249, 253], badge: [84, 94, 116], ink: [64, 74, 94] },
+    suggestion: { glass: [235, 244, 252], surface: [170, 210, 248], deep: [104, 166, 230], crest: [228, 242, 255], badge: [20, 100, 190], ink: [8, 78, 160] },
+  },
+}
+
+// Ocean water for the gh meter and the header's wave.
+const tideRaster = (mode: Mode): RasterPaint =>
+  mode === 'dark'
+    ? {
+        green: [[24, 150, 104], [96, 224, 168]],
+        red: [[196, 44, 76], [255, 128, 150]],
+        amber: [[196, 128, 20], [255, 204, 110]],
+        mauve: [[110, 66, 200], [186, 150, 255]],
+        shine: [230, 248, 255],
+        rule: [[22, 70, 132], [28, 140, 168], [104, 214, 200], [28, 140, 168]],
+        spinner: [[96, 214, 200], [144, 204, 255]],
+        track: [40, 50, 66],
+      }
+    : {
+        green: [[26, 150, 98], [92, 200, 150]],
+        red: [[196, 36, 70], [232, 110, 134]],
+        amber: [[190, 120, 10], [232, 170, 70]],
+        mauve: [[110, 56, 200], [158, 126, 230]],
+        shine: [255, 255, 255],
+        rule: [[30, 96, 170], [26, 150, 170], [84, 190, 170], [26, 150, 170]],
+        spinner: [[20, 110, 190], [26, 150, 170]],
+        track: [214, 224, 234],
+      }
+
+const tide: Theme = {
+  name: 'tide',
+  blurb: 'each card fills like a glass as its PR moves on, a wave on the front; links on their own row',
+  layout: 'banner',
+  art: 'tide',
+  // The painted rows are the card's whole width: no frame, no padding.
+  card: { border: null, isDim: false, padY: 0, gap: 1, separator: null },
+  pill: { open: ' ', close: ' ', isFilled: true },
+  rule: '▁▂▃▄▅▄▃▂',
+  spin: BRAILLE,
+  muted: [],
+  light: { tones: painted(TIDE_LIGHT), pillText: '#ffffff', raster: tideRaster('light'), art: TIDE_LIGHT, panel: '#eef5fb' },
+  dark: { tones: painted(TIDE_DARK), pillText: '#0d1117', raster: tideRaster('dark'), art: TIDE_DARK, panel: '#111b27' },
+}
+
+// A polar night: curtains of colour over a deep sky, kept dim enough under light text.
+const AURORA_DARK: ArtPaint = {
+  light: [240, 244, 250],
+  dark: [10, 12, 20],
+  tones: {
+    success: { glass: [10, 18, 26], surface: [40, 150, 190], deep: [20, 120, 100], crest: [60, 200, 110], badge: [92, 226, 150], ink: [140, 244, 190] },
+    error: { glass: [22, 12, 24], surface: [220, 110, 50], deep: [150, 26, 96], crest: [226, 50, 90], badge: [255, 112, 140], ink: [255, 160, 178] },
+    warning: { glass: [22, 18, 14], surface: [210, 80, 110], deep: [176, 104, 16], crest: [226, 166, 36], badge: [255, 196, 80], ink: [255, 214, 130] },
+    merged: { glass: [16, 12, 30], surface: [226, 86, 176], deep: [80, 46, 196], crest: [156, 76, 228], badge: [190, 146, 255], ink: [210, 182, 255] },
+    subtle: { glass: [14, 16, 24], surface: [80, 96, 130], deep: [54, 64, 96], crest: [96, 110, 140], badge: [156, 168, 196], ink: [182, 192, 214] },
+    suggestion: { glass: [10, 14, 30], surface: [126, 86, 228], deep: [26, 84, 196], crest: [36, 166, 226], badge: [110, 186, 255], ink: [150, 208, 255] },
+  },
+}
+
+// Dawn: the same curtains in pastel over a pale sky.
+const AURORA_LIGHT: ArtPaint = {
+  light: [255, 255, 255],
+  dark: [24, 26, 36],
+  tones: {
+    success: { glass: [244, 248, 250], surface: [160, 214, 244], deep: [140, 222, 200], crest: [172, 236, 168], badge: [20, 126, 86], ink: [10, 96, 62] },
+    error: { glass: [251, 244, 247], surface: [252, 196, 150], deep: [240, 160, 200], crest: [250, 160, 176], badge: [186, 28, 72], ink: [148, 20, 54] },
+    warning: { glass: [251, 248, 240], surface: [248, 174, 190], deep: [248, 206, 130], crest: [252, 226, 140], badge: [166, 96, 0], ink: [122, 72, 0] },
+    merged: { glass: [247, 244, 252], surface: [246, 176, 222], deep: [180, 166, 246], crest: [212, 170, 248], badge: [108, 54, 198], ink: [84, 34, 166] },
+    subtle: { glass: [244, 245, 249], surface: [204, 212, 228], deep: [192, 198, 216], crest: [214, 220, 232], badge: [84, 94, 116], ink: [64, 74, 94] },
+    suggestion: { glass: [243, 246, 253], surface: [206, 186, 248], deep: [160, 196, 246], crest: [158, 226, 246], badge: [20, 100, 190], ink: [8, 78, 160] },
+  },
+}
+
+const auroraRaster = (mode: Mode): RasterPaint =>
+  mode === 'dark'
+    ? {
+        green: [[20, 140, 120], [80, 226, 150]],
+        red: [[176, 30, 100], [250, 110, 120]],
+        amber: [[200, 120, 20], [250, 200, 90]],
+        mauve: [[90, 56, 210], [220, 110, 200]],
+        shine: [240, 250, 255],
+        rule: [[40, 200, 120], [36, 166, 226], [126, 86, 228], [226, 86, 176]],
+        spinner: [[60, 200, 140], [156, 76, 228]],
+        track: [36, 40, 58],
+      }
+    : {
+        green: [[20, 140, 110], [80, 196, 150]],
+        red: [[186, 28, 80], [236, 110, 140]],
+        amber: [[186, 112, 0], [232, 172, 60]],
+        mauve: [[108, 54, 198], [200, 100, 190]],
+        shine: [255, 255, 255],
+        rule: [[40, 170, 110], [30, 140, 200], [110, 80, 210], [200, 70, 160]],
+        spinner: [[30, 140, 200], [110, 80, 210]],
+        track: [222, 224, 236],
+      }
+
+const aurora: Theme = {
+  name: 'aurora',
+  blurb: 'each card a sky of soft northern lights in its state, brighter as its PR moves on',
+  layout: 'banner',
+  art: 'aurora',
+  card: { border: null, isDim: false, padY: 0, gap: 1, separator: null },
+  pill: { open: ' ', close: ' ', isFilled: true },
+  rule: '━',
+  spin: BRAILLE,
+  muted: [],
+  light: { tones: painted(AURORA_LIGHT), pillText: '#ffffff', raster: auroraRaster('light'), art: AURORA_LIGHT, panel: '#f5f3fb' },
+  dark: { tones: painted(AURORA_DARK), pillText: '#0a0c14', raster: auroraRaster('dark'), art: AURORA_DARK, panel: '#141426' },
+}
+
+export const THEME: Record<ThemeName, Theme> = { classic, solid, minimal, neon, retro, tide, aurora }
 
 // A theme by its name, in any case; null for a name no theme has.
 export function themeOf(value: unknown): ThemeName | null {
