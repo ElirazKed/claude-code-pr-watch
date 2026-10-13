@@ -1,30 +1,16 @@
 // The pane's true-colour paint: gradient bars, a shimmer over pending checks and a
-// hue-cycling spinner, all packed as Raster cells so the animation can blit frames.
+// hue-cycling spinner, all packed as Raster cells so the animation can blit frames. The
+// colours, glyphs and the background behind the cells are the theme's (theme.ts).
 import type { Checks } from '../types'
+import type { Ramp, RasterPaint, Rgb } from './theme'
 
-type Rgb = readonly [number, number, number]
 type Cell = readonly [codePoint: number, fg: number, bg: number]
 
 const DEFAULT_BG = 0x01000000
 
-// Catppuccin-flavoured, a shade deeper so they still read on a light terminal.
-export const PALETTE = {
-  green: [[64, 160, 43], [166, 227, 161]],
-  red: [[210, 15, 57], [243, 139, 168]],
-  amber: [[223, 142, 29], [249, 226, 175]],
-  mauve: [[136, 57, 239], [203, 166, 247]],
-  track: [[88, 91, 112], [88, 91, 112]],
-} as const satisfies Record<string, readonly [Rgb, Rgb]>
-
-const SHINE: Rgb = [255, 248, 220]
-const RULE: readonly Rgb[] = [
-  [203, 166, 247],
-  [137, 180, 250],
-  [148, 226, 213],
-  [245, 194, 231],
-]
-
-const SPIN = [...'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏']
+// What a CI bar is painted with: the theme's ramps, and the card's fill behind (null: the
+// terminal's own background).
+export type BarPaint = Pick<RasterPaint, 'green' | 'red' | 'amber' | 'shine'> & { bg: number | null }
 
 function lerp(a: Rgb, b: Rgb, t: number): Rgb {
   const k = Math.min(1, Math.max(0, t))
@@ -53,7 +39,7 @@ export function encode(cells: readonly Cell[]): string {
   return btoa(binary)
 }
 
-const cell = (glyph: string, rgb: Rgb): Cell => [glyph.codePointAt(0)!, hex(rgb), DEFAULT_BG]
+const cell = (glyph: string, rgb: Rgb, bg: number | null = null): Cell => [glyph.codePointAt(0)!, hex(rgb), bg ?? DEFAULT_BG]
 
 // Splits `width` cells among the counts, every non-zero count keeping at least one.
 export function allot(counts: readonly number[], width: number): number[] {
@@ -80,36 +66,38 @@ export function allot(counts: readonly number[], width: number): number[] {
 }
 
 // One row of `━`: passed, failed, then pending (with a light sweeping across it).
-export function barCells(checks: Checks, width: number, frame: number): string {
+export function barCells(checks: Checks, width: number, frame: number, paint: BarPaint): string {
   const [passed = 0, failed = 0, pending = 0] = allot([checks.passed, checks.failed, checks.pending], width)
   const cells: Cell[] = []
-  const run = (n: number, [from, to]: readonly [Rgb, Rgb], shine?: number) => {
+  const run = (n: number, [from, to]: Ramp, shine?: number) => {
     for (let i = 0; i < n; i++) {
       let rgb = lerp(from, to, n === 1 ? 1 : i / (n - 1))
-      if (shine !== undefined) rgb = lerp(rgb, SHINE, Math.max(0, 1 - Math.abs(i - shine) / 3) * 0.85)
-      cells.push(cell('━', rgb))
+      if (shine !== undefined) rgb = lerp(rgb, paint.shine, Math.max(0, 1 - Math.abs(i - shine) / 3) * 0.85)
+      cells.push(cell('━', rgb, paint.bg))
     }
   }
-  run(passed, PALETTE.green)
-  run(failed, PALETTE.red)
-  run(pending, PALETTE.amber, (frame % (pending + 8)) - 4)
+  run(passed, paint.green)
+  run(failed, paint.red)
+  run(pending, paint.amber, (frame % (pending + 8)) - 4)
 
   return encode(cells)
 }
 
-export function fullBarCells(width: number, colours: readonly [Rgb, Rgb]): string {
-  return encode(Array.from({ length: width }, (_, i) => cell('━', lerp(colours[0], colours[1], i / Math.max(1, width - 1)))))
+export function fullBarCells(width: number, colours: Ramp, bg: number | null = null): string {
+  return encode(Array.from({ length: width }, (_, i) => cell('━', lerp(colours[0], colours[1], i / Math.max(1, width - 1)), bg)))
 }
 
-export function ruleCells(width: number): string {
-  return encode(Array.from({ length: width }, (_, i) => cell('─', gradientAt(RULE, i / Math.max(1, width - 1)))))
+// The header's rule: `glyph` across, through the theme's gradient stops.
+export function ruleCells(width: number, stops: readonly Rgb[], glyph: string): string {
+  return encode(Array.from({ length: width }, (_, i) => cell(glyph, gradientAt(stops, i / Math.max(1, width - 1)))))
 }
 
-export function spinnerCell(frame: number, colours: readonly [Rgb, Rgb] = PALETTE.amber): string {
-  const glyph = SPIN[frame % SPIN.length]!
+// One frame of the spinner: the theme's `glyphs` in turn, pulsing between its two colours.
+export function spinnerCell(frame: number, colours: Ramp, glyphs: readonly string[], bg: number | null = null): string {
+  const glyph = glyphs[frame % glyphs.length]!
   const pulse = (Math.sin(frame / 3) + 1) / 2
 
-  return encode([cell(glyph, lerp(colours[0], colours[1], pulse))])
+  return encode([cell(glyph, lerp(colours[0], colours[1], pulse), bg)])
 }
 
 // Text fallback for surfaces without Raster: the same bar as coloured runs.

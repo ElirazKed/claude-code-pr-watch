@@ -79,6 +79,20 @@ o: Open pane  r: Refresh  f: Fix #13 with Claude
 
 A change applies at once. Switching to `band` closes the pane; switching back to `pane` opens it.
 
+## Themes
+
+`theme` in `/config` sets how the cards look:
+
+- **`classic`** (the default): round borders coloured by the PR's state, dim until the pointer is on the card, and a filled status pill.
+- **`solid`**: no borders. Each card is a tile with a soft tint for its state: green ready, red failing, amber running or waiting on you, purple merged, neutral otherwise.
+- **`minimal`**: no boxes, just a thin rule between PRs. Only the status pill and the headline are coloured.
+- **`neon`**: bold borders in vivid colour that glow brighter under the pointer, with a saturated gradient rule and spinner.
+- **`retro`**: double borders in the terminal's own 16 colours, `[bracketed]` pills, a `═` rule and a `|/-\` spinner, like an old TUI.
+
+`/pr-watch theme <name>` switches at once (any case: `/pr-watch theme Neon`) and saves the choice in `/config`, so every session uses it. Where `/config` has no row for it, the choice lasts for that session only, and the reply says so. `/pr-watch theme` lists the themes and marks the current one.
+
+Themes follow Claude Code's light or dark theme. The tinted and vivid ones have a light and a dark variant. If Claude Code's theme is `auto`, the terminal's `COLORFGBG` decides where it's set, and dark otherwise. The band uses the theme's colours too.
+
 ## Reviews
 
 A card says who reviewed and what is left to address:
