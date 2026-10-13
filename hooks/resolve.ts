@@ -23,7 +23,8 @@ export function resolvePrompt(pr: PrFacts): string {
     `GitHub says ${branch} can't be merged cleanly into ${base}.`,
     '',
     `Bring ${base} into this branch (${branch}): fetch, then merge ${origin} into it, so no history is rewritten and ` +
-      `no force-push is needed. If the branch or repo clearly works by rebase instead, say so and ask me first. ` +
+      `no force-push is needed. If origin isn't ${pr.repo} (a fork's clone), merge ${base} from the remote that is. ` +
+      `If the branch or repo clearly works by rebase instead, say so and ask me first. ` +
       `If ${pr.repo} or ${branch} isn't checked out here, say so first.`,
     "Resolve each conflict keeping what both sides meant; where a side's intent is unclear, ask me rather than pick one. " +
       "Then run the project's checks and tests, and commit the merge.",

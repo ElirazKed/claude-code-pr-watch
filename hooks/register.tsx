@@ -612,11 +612,21 @@ async function apply($: EngineInterface, shared: Shared) {
       await update($, now, current => Math.max(current, ended))
     })
   }
-  // What a hand-off press said belongs to the failure, or the threads, it was about.
-  if (moved.length > 0) {
-    for (const handoff of HANDOFFS) {
-      await updateRows($, handoff.id, all => Object.fromEntries(Object.entries(all).filter(([url, ask]) => !moved.includes(url) || isBusy(ask.busy, at))))
+  // What a hand-off press said belongs to the failure, the threads or the conflict it was
+  // about: gone once the card moves on, or no longer offers that hand-off (a draft's pill
+  // stays put as its conflict comes and goes).
+  const cards = new Map(next.map(pr => [pr.url, pr]))
+  for (const handoff of HANDOFFS) {
+    const isStale = (url: string) => {
+      const card = cards.get(url)
+
+      return moved.includes(url) || (card !== undefined && !handoff.isOffered(card))
     }
+    await updateRows($, handoff.id, all => {
+      const kept = Object.entries(all).filter(([url, ask]) => !isStale(url) || isBusy(ask.busy, at))
+
+      return kept.length === Object.keys(all).length ? all : Object.fromEntries(kept)
+    })
   }
   await refreshStatus($)
   await syncAnimation($)
@@ -764,6 +774,13 @@ async function readRows($: EngineInterface, kind: Kind): Promise<Rows> {
   return kind === 'address' ? read($, addressing) : read($, resolving)
 }
 
+// Every hand-off's rows, by kind, for the pane and the band.
+async function readHandoffs($: EngineInterface): Promise<Record<Kind, Rows>> {
+  const [fix, address, resolve] = await Promise.all([readRows($, 'fix'), readRows($, 'address'), readRows($, 'resolve')])
+
+  return { fix, address, resolve }
+}
+
 async function updateRows($: EngineInterface, kind: Kind, change: (all: Rows) => Rows) {
   if (kind === 'fix') await update($, fixing, change)
   else if (kind === 'address') await update($, addressing, change)
@@ -893,6 +910,8 @@ async function draftResolve($: EngineInterface, pr: TrackedPr) {
 
       return
     }
+    // Pressed again once stale while the cards were read (see collectFailure).
+    if ((await readRows($, 'resolve'))[pr.url]?.busy?.at !== busy.at) return
     await handOver($, 'resolve', card, resolveHeading(card), resolvePrompt(card), undefined)
   } catch {
     await settleHandoff($, 'resolve', pr.url, busy.at, { error: "Couldn't hand the conflict over" })
@@ -963,6 +982,13 @@ const HANDOFFS = [
   },
 ] as const
 
+// A hand-off's press, from a card or the band: what it collects, then its draft.
+async function startHandoff($: EngineInterface, kind: Kind, pr: TrackedPr) {
+  if (kind === 'resolve') await draftResolve($, pr)
+  else if (kind === 'fix') await collectFailure($, pr)
+  else await collectThreads($, pr)
+}
+
 // A hand-off pressed in the band: the draft lands in the prompt box as from a card. Where it
 // asks first, or goes wrong, instead, the pane opens, with the keys, where that card says so:
 // the band has no room for the question.
@@ -974,9 +1000,7 @@ async function bandHandoff($: EngineInterface, kind: Kind, pr: TrackedPr) {
 
     return
   }
-  if (kind === 'resolve') await draftResolve($, pr)
-  else if (kind === 'fix') await collectFailure($, pr)
-  else await collectThreads($, pr)
+  await startHandoff($, kind, pr)
   const ask = (await readRows($, kind))[pr.url]
   // A draft that landed stays where it is (a part that wouldn't come is said on the card).
   const hasFailed = ask?.error !== undefined && ask.done === undefined
@@ -1380,8 +1404,7 @@ export const register: Register = (on, options) => {
     const at = await read($, now)
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
-    const [fixRows, addressRows, resolveRows] = await Promise.all([readRows($, 'fix'), readRows($, 'address'), readRows($, 'resolve')])
-    const handoffs = { fix: fixRows, address: addressRows, resolve: resolveRows }
+    const handoffs = await readHandoffs($)
     const upgrade = isNoticeOn ? await read($, newer) : null
     const budget = await read($, limits)
     const isHelpOpen = await read($, ghHelp)
@@ -1671,13 +1694,7 @@ export const register: Register = (on, options) => {
           )
         }
         // Not a HANDOFFS field: the loader wants $ passed only where a collector is named.
-        buttons.push(
-          <Button
-            key={`${handoff.id}:${pr.url}`}
-            label={handoff.label}
-            onPress={() => (handoff.id === 'resolve' ? draftResolve($, pr) : handoff.id === 'fix' ? collectFailure($, pr) : collectThreads($, pr))}
-          />,
-        )
+        buttons.push(<Button key={`${handoff.id}:${pr.url}`} label={handoff.label} onPress={() => startHandoff($, handoff.id, pr)} />)
       }
 
       return (
@@ -1993,11 +2010,9 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     // Narrowed by the surface, so the terminal's table (the one with a Raster) is resolved there.
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
-    const [at, fixRows, addressRows, resolveRows, upgrade, budget] = await Promise.all([
+    const [at, rows, upgrade, budget] = await Promise.all([
       read($, now),
-      readRows($, 'fix'),
-      readRows($, 'address'),
-      readRows($, 'resolve'),
+      readHandoffs($),
       isNoticeOn ? read($, newer) : null,
       read($, limits),
     ])
@@ -2044,7 +2059,6 @@ export const register: Register = (on, options) => {
     // stands in for its button.
     const top = plan.shown[0]
     const handoff = top !== undefined && top.state === 'OPEN' ? HANDOFFS.find(h => h.isOffered(top)) : undefined
-    const rows = { fix: fixRows, address: addressRows, resolve: resolveRows }
     const isCollecting = top !== undefined && handoff !== undefined && isBusy(rows[handoff.id][top.url]?.busy, at)
     const handoffLabel = `${handoff?.verb} #${top?.number} with Claude`
     const handoffKey = handoff?.key ?? ''

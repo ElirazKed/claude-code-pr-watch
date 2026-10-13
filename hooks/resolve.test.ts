@@ -28,6 +28,8 @@ describe('the ask to resolve a conflict', () => {
 
     expect(text).toContain('fetch, then merge origin/main into it, so no history is rewritten and no force-push is needed')
     expect(text).toContain('If the branch or repo clearly works by rebase instead, say so and ask me first.')
+    // A fork's clone has the fork as origin, whose base may lag the PR's.
+    expect(text).toContain("If origin isn't acme/app (a fork's clone), merge main from the remote that is.")
     expect(text).not.toMatch(/rebase (?:it|the branch|onto)/i)
   })
 
