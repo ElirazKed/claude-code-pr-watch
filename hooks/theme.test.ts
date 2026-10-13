@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { barCells, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
+import { barCells, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell, x256 } from './look'
 import {
   MODES,
   THEME,
@@ -8,6 +8,7 @@ import {
   TONES,
   barPaint,
   cardBox,
+  depthOf,
   hexOf,
   inkOf,
   lookOf,
@@ -28,6 +29,9 @@ const KEYS = new Set(['text', 'inverseText', 'inactive', 'subtle', 'suggestion',
 const paints = (colour: unknown) =>
   typeof colour === 'string' && (KEYS.has(colour) || /^#[0-9a-f]{6}$/i.test(colour) || /^ansi256\(([0-9]|1[0-5])\)$/.test(colour))
 const decode = (cells: string) => new Uint32Array(Uint8Array.from(atob(cells), c => c.charCodeAt(0)).buffer)
+// One of the xterm palette's 256, exactly: what Claude Code paints as itself in 256 colours.
+const PALETTE = new Set(Array.from({ length: 240 }, (_, i) => x256(16 + i).join(',')))
+const isPalette = (rgb: readonly number[]) => PALETTE.has(rgb.join(','))
 const isRgb = (rgb: readonly number[]) => rgb.length === 3 && rgb.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
 
 describe('the themes', () => {
@@ -248,32 +252,89 @@ describe('the banner looks', () => {
 
 describe('the gh meter', () => {
   const paint = lookOf('classic', 'dark').variant.raster
-  test("a row of ▀: GraphQL's share on the top half, REST's on the bottom, over the track", async () => {
-    const words = decode(meterCells({ share: 0.5, health: null }, { share: 1, health: 'error' }, 10, paint))
+  const hex = ([r, g, b]: readonly number[]) => (r! << 16) | (g! << 8) | b!
+  test('one thin bar: the top half of a row of ▀, the share over the track, the bottom half left to the terminal', async () => {
+    const words = decode(meterCells({ share: 0.5, health: null }, 10, paint))
     expect(words).toHaveLength(30)
     const cell = (i: number) => ({ cp: words[i * 3]!, top: words[i * 3 + 1]!, bottom: words[i * 3 + 2]! })
     expect(new Set([...Array(10).keys()].map(i => cell(i).cp))).toEqual(new Set([0x2580]))
-    const hex = ([r, g, b]: readonly number[]) => (r! << 16) | (g! << 8) | b!
+    // Two logins' bars on rows one over the other never touch: no bottom half is painted.
+    expect(new Set([...Array(10).keys()].map(i => cell(i).bottom))).toEqual(new Set([0x01000000]))
     // Half full: the first five cells in the green ramp, the rest the track.
     expect(cell(0).top).toBe(hex(paint.green[0]))
     expect([5, 6, 9].map(i => cell(i).top)).toEqual([hex(paint.track), hex(paint.track), hex(paint.track)])
-    // Full and spent, the bottom ends in red.
-    expect(cell(9).bottom).toBe(hex(paint.red[1]))
+    // Full and spent: red to its end.
+    expect(decode(meterCells({ share: 1, health: 'error' }, 10, paint))[9 * 3 + 1]).toBe(hex(paint.red[1]))
   })
 
-  test('a half not known yet is the terminal\'s own background; a share between cells blends the cell', async () => {
-    const words = decode(meterCells({ share: 0.25, health: 'warning' }, null, 10, paint))
-    expect(words[2]).toBe(0x01000000)
+  test('a share between cells blends the cell; not known yet, no bar', async () => {
+    const words = decode(meterCells({ share: 0.25, health: 'warning' }, 10, paint))
     // 2.5 cells: the third cell is half filled.
     const third = words[2 * 3 + 1]!
     expect(third).not.toBe(words[1 * 3 + 1])
     expect(third).not.toBe(words[3 * 3 + 1])
+    expect([...decode(meterCells(null, 2, paint))]).toEqual([0x20, 0x01000000, 0x01000000, 0x20, 0x01000000, 0x01000000])
   })
 
-  test("an unknown top half is never the terminal's foreground: ▄ carries the bottom alone", async () => {
-    const words = decode(meterCells(null, { share: 0.5, health: null }, 4, paint))
-    expect([0, 1, 2, 3].map(i => words[i * 3])).toEqual([0x2584, 0x2584, 0x2584, 0x2584])
-    expect([0, 1, 2, 3].map(i => words[i * 3 + 2])).toEqual([0x01000000, 0x01000000, 0x01000000, 0x01000000])
-    expect([...decode(meterCells(null, null, 2, paint))]).toEqual([0x20, 0x01000000, 0x01000000, 0x20, 0x01000000, 0x01000000])
+  test('in 256 colours a banner theme paints the bar in one palette colour a health, never a ramp rounded cell by cell', async () => {
+    for (const name of ['tide', 'aurora'] as const) {
+      for (const mode of MODES) {
+        const raster = lookOf(name, mode, 'ansi256').variant.raster
+        const words = decode(meterCells({ share: 1, health: null }, 16, raster))
+        expect(new Set([...Array(16).keys()].map(i => words[i * 3 + 1]))).toEqual(new Set([hex(raster.green[0])]))
+        expect(isPalette(raster.green[0]) && isPalette(raster.track)).toBe(true)
+      }
+    }
+  })
+})
+
+describe('256 colours', () => {
+  test("Claude Code's own call: 256 inside tmux unless CLAUDE_CODE_TMUX_TRUECOLOR; else 24-bit where the terminal says it takes it", async () => {
+    const tmux = { TMUX: '/tmp/tmux-501/default,2060,105', TERM: 'tmux-256color', TERM_PROGRAM: 'tmux', COLORTERM: 'truecolor' }
+    expect(depthOf(tmux)).toBe('ansi256')
+    expect(depthOf({ ...tmux, CLAUDE_CODE_TMUX_TRUECOLOR: '1' })).toBe('truecolor')
+    expect(depthOf({ COLORTERM: 'truecolor' })).toBe('truecolor')
+    expect(depthOf({ COLORTERM: '24bit' })).toBe('truecolor')
+    expect(depthOf({ TERM: 'xterm-ghostty' })).toBe('truecolor')
+    expect(depthOf({ TERM: 'xterm-kitty' })).toBe('truecolor')
+    expect(depthOf({ TERM_PROGRAM: 'iTerm.app' })).toBe('truecolor')
+    expect(depthOf({ TERM_PROGRAM: 'Apple_Terminal', TERM: 'xterm-256color' })).toBe('ansi256')
+    expect(depthOf({})).toBe('ansi256')
+    expect(depthOf({ TMUX: '', COLORTERM: 'truecolor' })).toBe('truecolor')
+  })
+
+  test('tide and aurora have a paint of palette colours: the art, its glass behind the rows of links, the pill and the accents', async () => {
+    for (const name of ['tide', 'aurora'] as const) {
+      for (const mode of MODES) {
+        const { variant } = lookOf(name, mode, 'ansi256')
+        expect(variant).not.toBe(THEME[name][mode])
+        const art = variant.art!
+        expect(art.steps).toBeDefined()
+        expect([art.light, art.dark].every(isPalette)).toBe(true)
+        for (const tone of TONES) {
+          const t = art.tones[tone]
+          const steps = art.steps![tone]
+          expect([t.glass, t.surface, t.deep, t.crest, t.badge, t.ink, steps.mid, ...steps.dim].every(isPalette)).toBe(true)
+          // The Box behind the links paints the very glass the Raster does: `ansi256(n)`, which
+          // Claude Code passes as is (hex it would round its own way, a dark grey to teal).
+          const fill = variant.tones[tone].fill
+          expect(fill).toMatch(/^ansi256\((\d+)\)$/)
+          expect(x256(Number(String(fill).slice(8, -1)))).toEqual(t.glass)
+          expect(variant.tones[tone].ink).toMatch(/^ansi256\(\d+\)$/)
+        }
+        if (name === 'tide') {
+          // Three layers of water a tone, each its own colour.
+          for (const tone of TONES) expect(new Set([art.tones[tone].surface, art.steps![tone].mid, art.tones[tone].deep].map(String)).size).toBe(3)
+        }
+        expect(variant.pillText).toMatch(/^ansi256\(\d+\)$/)
+        expect(variant.panel).toMatch(/^ansi256\(\d+\)$/)
+      }
+    }
+  })
+
+  test('the stacked themes look the same at either depth', async () => {
+    for (const name of ['classic', 'solid', 'minimal', 'neon', 'retro'] as const) {
+      for (const mode of MODES) expect(lookOf(name, mode, 'ansi256')).toEqual(lookOf(name, mode))
+    }
   })
 })

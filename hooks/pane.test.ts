@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { RenderElement } from 'claude-code'
+import { x256 } from './look'
+import { lookOf } from './theme'
 
 const RUNNING = 'https://github.com/acme/app/pull/12'
 const FAILING = 'https://github.com/acme/app/pull/13'
@@ -152,6 +154,11 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // `budget.requests` what each has left (4000 and 4900 of 5000 by default), as the replies and
 // `gh api rate_limit` say; `restAsks` records each login /rate_limit was asked for. The time
 // zone (`date +%z`) is +0300.
+// The terminal's environment: one that takes 24-bit colour, unless a test says otherwise.
+const TRUECOLOR_ENV: Record<string, string> = { COLORTERM: 'truecolor', TERM: 'xterm-ghostty' }
+// Inside tmux, where Claude Code paints 256 colours.
+const TMUX_ENV: Record<string, string> = { COLORTERM: 'truecolor', TERM: 'tmux-256color', TERM_PROGRAM: 'tmux', TMUX: '/tmp/tmux-501/default,2060,105' }
+
 function fakeHost(
   on: On,
   clock: Clock,
@@ -160,6 +167,7 @@ function fakeHost(
   branchPr?: string,
   merge: (argv: readonly string[]) => MergeReply | Promise<MergeReply> = () => ({ exitCode: 0 }),
   runLog: (argv: readonly string[]) => RunReply | Promise<RunReply> = () => ({ exitCode: 0, stdout: FAILED_LOG }),
+  env: Record<string, string> = TRUECOLOR_ENV,
 ) {
   const queries: string[][] = []
   const merges: string[][] = []
@@ -171,7 +179,7 @@ function fakeHost(
   const restAsks: string[] = []
   // Each GraphQL call's timeout.
   const timeouts: number[] = []
-  on('env.get', () => ({ value: '/home/me' }))
+  on('env.get', ($, e) => ({ value: { HOME: '/home/me', ...env }[e.name] }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
   on('fs.write', ($, e) => (files.set(e.path, { text: e.text, mtimeMs: clock.now() }), { value: undefined }))
@@ -1571,15 +1579,30 @@ const keyOf = (node: Node) => String(node.key ?? node.props?.key ?? '')
 const textParts = (node: Node): Node[] =>
   node.type === 'Text' ? [node] : ((node.children ?? []) as Node[]).filter(kid => typeof kid === 'object').flatMap(textParts)
 
-// Whether the first login's bar paints GraphQL's half (top) and REST's (bottom) of its first cell.
-async function ghHalves($: Parameters<TestBody>[0]) {
+// Each login's bar as drawn: a Raster per login, its rows and columns, its glyphs, how many of
+// its cells are lit (not the track), and whether every cell leaves its bottom half to the
+// terminal's own background, so two logins' bars one over the other stay apart.
+const decodeCells = (cells: unknown) => new Uint32Array(Uint8Array.from(atob(String(cells ?? '')), c => c.charCodeAt(0)).buffer)
+async function ghBars($: Parameters<TestBody>[0], track: number) {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const bar = (await ui.findAll({ type: 'Raster' })).find(raster => String(raster.key ?? raster.props.key).startsWith('gh-bar:'))
+  const bars = (await ui.findAll({ type: 'Raster' })).filter(raster => String(raster.key ?? raster.props.key).startsWith('gh-bar:'))
   await ui.unmount()
-  const words = new Uint32Array(Uint8Array.from(atob(String(bar?.props.cells ?? '')), c => c.charCodeAt(0)).buffer)
 
-  return { top: words[1] !== 0x01000000, bottom: words[2] !== 0x01000000 }
+  return bars.map(bar => {
+    const words = [...decodeCells(bar.props.cells)]
+    const cells = Array.from({ length: words.length / 3 }, (_, i) => words.slice(i * 3, i * 3 + 3) as [number, number, number])
+
+    return {
+      key: String(bar.key ?? bar.props.key),
+      rows: bar.props.rows,
+      columns: bar.props.columns,
+      glyphs: cells.map(([cp]) => String.fromCodePoint(cp)).join(''),
+      lit: cells.filter(([, fg]) => fg !== track).length,
+      isBottomClear: cells.every(([, , bg]) => bg === 0x01000000),
+    }
+  })
 }
+const CLASSIC_TRACK = (([r, g, b]) => (r << 16) | (g << 8) | b)(lookOf('classic', 'dark').variant.raster.track)
 
 async function ghFooter($: Parameters<TestBody>[0]) {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -1829,12 +1852,15 @@ test("the gh meter: the poll's points at once, REST's requests once a round asks
   // The watch's own fetch said the points, and asked nothing more.
   expect(restAsks).toEqual([])
   expect(await ghFooter($)).toEqual({ lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'], tones: {}, isDim: true, hasHelp: true })
-  // GraphQL's half of the bar is painted; REST's, not known yet, is the terminal's own.
-  expect(await ghHalves($)).toEqual({ top: true, bottom: false })
+  // One thin bar, one row of the 16 columns drawn: the top halves GraphQL's 80%, the bottom
+  // halves the terminal's own background.
+  const thin = { key: 'gh-bar:me', rows: 1, columns: 16, glyphs: '▀'.repeat(16), isBottomClear: true }
+  expect(await ghBars($, CLASSIC_TRACK)).toEqual([{ ...thin, lit: 13 }])
   await clock.advance(10_500)
   expect(restAsks).toEqual(['me'])
   expect(await ghFooter($)).toEqual({ lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'], tones: {}, isDim: true, hasHelp: true })
-  expect(await ghHalves($)).toEqual({ top: true, bottom: true })
+  // REST's 98% known: the bar stays the lower share, the one the % is of.
+  expect(await ghBars($, CLASSIC_TRACK)).toEqual([{ ...thin, lit: 13 }])
   const { rates, rate } = JSON.parse(files.get(RESULTS)?.text ?? '{}')
   expect(rates.me).toEqual({
     graphql: { limit: 5_000, remaining: 4_000, resetAt: POINTS_RESET, seenAt: NOON + 10_150 },
@@ -2398,7 +2424,7 @@ test("the band takes the theme's colours, and keeps its lines", { options: { lay
 // ---- Banner cards and the gh meter ------------------------------------------------------
 
 // A session watching `urls` on the tide theme, with its blits recorded (`deny`: refused).
-async function tideSession($: Parameters<TestBody>[0], on: On, urls: readonly string[]) {
+async function tideSession($: Parameters<TestBody>[0], on: On, urls: readonly string[], env = TRUECOLOR_ENV) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   const blits: string[] = []
   const blit = { deny: false }
@@ -2407,7 +2433,7 @@ async function tideSession($: Parameters<TestBody>[0], on: On, urls: readonly st
   on('ui.toast', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.blit', ($, e) => (blits.push(e.key), { value: blit.deny ? { deny: 'not mounted' } : {} }))
-  fakeHost(on, clock, GH)
+  fakeHost(on, clock, GH, undefined, undefined, undefined, undefined, env)
   on('command.register', () => ({ value: { command: 'pr-watch' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
   on('session.start', () => ({ cwd: '/work' }))
@@ -2455,6 +2481,71 @@ test('tide: each card one painted Raster with its words in the cells; links and 
   for (const key of [`fix:${FAILING}`, `dismiss:${RUNNING}`, `dismiss:${MERGED}`, 'refresh', 'close']) expect(await ui.find({ key })).toBeDefined()
   await ui.press({ key: `dismiss:${MERGED}` })
   expect(await ui.find({ key: `art:${MERGED}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+// What the terminal is sent for a Raster: its rows of [glyph, fg, bg] cells.
+function rasterCells(raster: { props: Record<string, unknown> } | undefined): [number, number, number][][] {
+  const columns = Number(raster?.props.columns ?? 0)
+  const words = [...decodeCells(raster?.props.cells)]
+  const cells = Array.from({ length: words.length / 3 }, (_, i) => words.slice(i * 3, i * 3 + 3) as [number, number, number])
+
+  return Array.from({ length: Number(raster?.props.rows ?? 0) }, (_, row) => cells.slice(row * columns, (row + 1) * columns))
+}
+// The xterm palette's 256 as 0xRRGGBB, and the terminal's own colour.
+const PALETTE = new Set([...Array.from({ length: 240 }, (_, i) => x256(16 + i)).map(([r, g, b]) => (r << 16) | (g << 8) | b), 0x01000000])
+
+// Inside tmux Claude Code paints 256 colours and rounds every other colour its own way: the
+// painted cards must be drawn in the palette's own colours, from the first render.
+for (const theme of ['tide', 'aurora'] as const) {
+  test(`${theme} inside tmux: from the first render each card one Raster the pane's width, in the palette's colours, over a glass of the same; a thin bar per login`, { options: { theme } }, async ($, on) => {
+    await tideSession($, on, [RUNNING, FAILING, MERGED], TMUX_ENV)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    for (const url of [RUNNING, FAILING, MERGED]) {
+      const raster = await ui.find({ key: `art:${url}` })
+      expect(raster?.type).toBe('Raster')
+      // The whole card: the pane's 60 columns, a row a line of its words, every cell sent.
+      const rows = rasterCells(raster as never)
+      expect(raster?.props.columns).toBe(60)
+      expect(rows.length).toBe(Number(raster?.props.rows))
+      expect(rows.length).toBeGreaterThanOrEqual(4)
+      expect(rows.every(row => row.length === 60)).toBe(true)
+      // Every colour one Claude Code paints as itself: nothing for it to round into blotches.
+      expect(rows.flat().every(([, fg, bg]) => PALETTE.has(fg) && PALETTE.has(bg))).toBe(true)
+      // Not one colour flat across the card: the art is there.
+      expect(new Set(rows.flat().map(([, , bg]) => bg)).size).toBeGreaterThanOrEqual(3)
+      // The rows of links under the art: the card's glass, given as the palette entry itself.
+      const below = (await ui.findAll({ type: 'Box' })).find(box => box.props.backgroundColor !== undefined && JSON.stringify(box).includes(`open #${url.split('/').pop()} ↗`) && box.props.paddingX === 1)
+      expect(String(below?.props.backgroundColor)).toMatch(/^ansi256\(\d+\)$/)
+    }
+    // The words are in the cells, not drawn again as text beside them.
+    expect(await ui.find({ text: /Retry uploads with exponential backoff/ })).toBeUndefined()
+    // Tide's running card: its glass ahead of the front is the Box's colour, the same entry.
+    if (theme === 'tide') {
+      const rows = rasterCells((await ui.find({ key: `art:${RUNNING}` })) as never)
+      const glass = rows[1]!.at(-1)![2]
+      const below = (await ui.findAll({ type: 'Box' })).find(box => box.props.paddingX === 1 && JSON.stringify(box).includes('open #12 ↗'))
+      const n = Number(String(below?.props.backgroundColor).slice(8, -1))
+      expect(glass).toBe((([r, g, b]) => (r << 16) | (g << 8) | b)(x256(n)))
+    }
+    // The meter: a Raster per login, one row of the bar's width, its bottom halves the terminal's.
+    const bars = (await ui.findAll({ type: 'Raster' })).filter(raster => String(raster.key ?? raster.props.key).startsWith('gh-bar:'))
+    expect(bars.length).toBeGreaterThanOrEqual(1)
+    for (const bar of bars) {
+      expect(bar.props.rows).toBe(1)
+      const cells = rasterCells(bar as never)[0]!
+      expect(cells).toHaveLength(Number(bar.props.columns))
+      expect(cells.every(([cp, fg, bg]) => cp === 0x2580 && PALETTE.has(fg) && bg === 0x01000000)).toBe(true)
+    }
+    await ui.unmount()
+  })
+}
+
+test('with CLAUDE_CODE_TMUX_TRUECOLOR set, tmux gets the 24-bit paint', TIDE, async ($, on) => {
+  await tideSession($, on, [FAILING], { ...TMUX_ENV, CLAUDE_CODE_TMUX_TRUECOLOR: '1' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const rows = rasterCells((await ui.find({ key: `art:${FAILING}` })) as never)
+  expect(rows.flat().some(([, , bg]) => !PALETTE.has(bg))).toBe(true)
   await ui.unmount()
 })
 

@@ -4,6 +4,7 @@
 import type { BoxHoverProps, BoxProps, Color } from 'claude-code'
 import type { Tone } from '../types'
 import type { BarPaint } from './look'
+import { x256 } from './look'
 
 export const THEMES = ['classic', 'solid', 'minimal', 'neon', 'retro', 'tide', 'aurora'] as const
 export type ThemeName = (typeof THEMES)[number]
@@ -21,8 +22,9 @@ export type ToneLook = {
   ink: Color
   // The card's border, where the card has one.
   border: Color | null
-  // The card's background: hex, so a Raster on the card can paint the same behind its cells.
-  fill: `#${string}` | null
+  // The card's background: hex, so a Raster on the card can paint the same behind its cells (a
+  // banner theme's 256-colour paint: the palette entry its art paints, `ansi256(n)`).
+  fill: Color | null
   // The border while the pointer is on the card.
   glow: Color | null
 }
@@ -39,6 +41,9 @@ export type RasterPaint = {
   spinner: Ramp
   // The empty part of the gh meter's bars.
   track: Rgb
+  // Every colour one of the 256-colour palette's (a theme's ansi256 paint): a bar is painted in
+  // them alone.
+  isPalette?: true
 }
 
 // How a card is laid out. stack: a framed box of text rows, a CI bar and a stepper. banner: a
@@ -64,11 +69,18 @@ export type ArtTone = {
   ink: Rgb
 }
 
+// A tone's extra paint where the terminal shows 256 colours: tide's middle layer of water, and
+// aurora's curtains dimmed (for `deep`, `crest` and `surface`, in that order).
+export type ArtSteps = { mid: Rgb; dim: readonly [Rgb, Rgb, Rgb] }
+
 export type ArtPaint = {
   tones: Record<Tone, ArtTone>
   // The two text colours, whichever reads better on a cell's background is drawn there.
   light: Rgb
   dark: Rgb
+  // Present: the art is painted for 256 colours (art.ts), in a few palette colours each tone
+  // has rather than gradients, which the terminal would round to blotches of other colours.
+  steps?: Record<Tone, ArtSteps>
 }
 
 export type Variant = {
@@ -79,7 +91,7 @@ export type Variant = {
   // A banner card's paint (null: the theme stacks its cards).
   art: ArtPaint | null
   // Behind a note drawn over the pane (the gh meter's explanation under the pointer).
-  panel: `#${string}`
+  panel: Color
 }
 
 // The accents a quiet theme leaves uncoloured.
@@ -112,6 +124,9 @@ export type Theme = {
   muted: readonly Role[]
   light: Variant
   dark: Variant
+  // Where the terminal shows 256 colours (depthOf), the paint made of the palette's own
+  // colours; without one, the same paint (the terminal rounds it).
+  ansi256?: { light: Variant; dark: Variant }
 }
 
 const BRAILLE = [...'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏']
@@ -521,7 +536,150 @@ const aurora: Theme = {
   dark: { tones: painted(AURORA_DARK), pillText: '#0a0c14', raster: auroraRaster('dark'), art: AURORA_DARK, panel: '#141426' },
 }
 
+// ---- Banner themes in 256 colours ---------------------------------------------------------
+
+// Inside tmux (unless CLAUDE_CODE_TMUX_TRUECOLOR is set), in Apple's Terminal and wherever the
+// terminal doesn't say it takes 24-bit colour, Claude Code paints with the 256-colour palette,
+// each colour rounded to its nearest there. The palette's darks are few and far apart, so a
+// gradient comes out as blotches of other colours (a dark teal goes grey). These paints are
+// made of palette colours (x256), a few steps a tone, so each step stays what it was picked as.
+
+// A tone's palette colours: the glass; tide's water at its surface, in the middle and deep down,
+// or aurora's curtains bright (deep, crest, surface) and `dim`; the crest; the badge; the accent.
+type Tone256 = { glass: number; surface: number; mid: number; deep: number; crest: number; badge: number; ink: number; dim: readonly [number, number, number] }
+type Paint256 = { light: number; dark: number; pillText: number; panel: number; tones: Record<Tone, Tone256> }
+
+const byTone = <T>(make: (tone: Tone) => T): Record<Tone, T> => Object.fromEntries(TONES.map(tone => [tone, make(tone)])) as Record<Tone, T>
+
+// A text colour Claude Code paints as that very palette colour.
+const ansi = (n: number): Color => `ansi256(${n})`
+
+const art256 = (p: Paint256): ArtPaint => ({
+  light: x256(p.light),
+  dark: x256(p.dark),
+  tones: byTone(tone => {
+    const t = p.tones[tone]
+
+    return { glass: x256(t.glass), surface: x256(t.surface), deep: x256(t.deep), crest: x256(t.crest), badge: x256(t.badge), ink: x256(t.ink) }
+  }),
+  steps: byTone(tone => ({ mid: x256(p.tones[tone].mid), dim: [x256(p.tones[tone].dim[0]), x256(p.tones[tone].dim[1]), x256(p.tones[tone].dim[2])] })),
+})
+
+const variant256 = (p: Paint256, raster: RasterPaint): Variant => ({
+  tones: byTone(tone => ({ ink: ansi(p.tones[tone].ink), border: null, fill: ansi(p.tones[tone].glass), glow: null })),
+  pillText: ansi(p.pillText),
+  raster,
+  art: art256(p),
+  panel: ansi(p.panel),
+})
+
+// The gh meter, CI bars and spinner in single palette colours: a ramp between two would be
+// rounded cell by cell into colours of other hues.
+const raster256 = (truecolour: RasterPaint, c: { green: number; red: number; amber: number; mauve: number; shine: number; spin: readonly [number, number]; track: number }): RasterPaint => ({
+  green: [x256(c.green), x256(c.green)],
+  red: [x256(c.red), x256(c.red)],
+  amber: [x256(c.amber), x256(c.amber)],
+  mauve: [x256(c.mauve), x256(c.mauve)],
+  shine: x256(c.shine),
+  // The header's wave keeps its gradient: one row of thin glyphs reads as a gradient still.
+  rule: truecolour.rule,
+  spinner: [x256(c.spin[0]), x256(c.spin[1])],
+  track: x256(c.track),
+  isPalette: true,
+})
+
+const TIDE_DARK_256: Paint256 = {
+  light: 231,
+  dark: 233,
+  pillText: 233,
+  panel: 234,
+  tones: {
+    success: { glass: 233, surface: 29, mid: 23, deep: 17, crest: 79, badge: 78, ink: 121, dim: [23, 23, 23] },
+    error: { glass: 233, surface: 125, mid: 89, deep: 52, crest: 211, badge: 204, ink: 217, dim: [89, 89, 89] },
+    warning: { glass: 233, surface: 136, mid: 94, deep: 52, crest: 222, badge: 214, ink: 222, dim: [94, 94, 94] },
+    merged: { glass: 233, surface: 97, mid: 55, deep: 54, crest: 183, badge: 141, ink: 183, dim: [55, 55, 55] },
+    subtle: { glass: 233, surface: 60, mid: 238, deep: 236, crest: 146, badge: 146, ink: 189, dim: [238, 238, 238] },
+    suggestion: { glass: 233, surface: 25, mid: 24, deep: 17, crest: 117, badge: 75, ink: 117, dim: [24, 24, 24] },
+  },
+}
+
+const TIDE_LIGHT_256: Paint256 = {
+  light: 231,
+  dark: 235,
+  pillText: 231,
+  panel: 255,
+  tones: {
+    success: { glass: 255, surface: 158, mid: 115, deep: 79, crest: 195, badge: 29, ink: 22, dim: [115, 115, 115] },
+    error: { glass: 255, surface: 224, mid: 217, deep: 211, crest: 231, badge: 161, ink: 88, dim: [217, 217, 217] },
+    warning: { glass: 255, surface: 223, mid: 222, deep: 179, crest: 230, badge: 130, ink: 94, dim: [222, 222, 222] },
+    merged: { glass: 255, surface: 189, mid: 183, deep: 141, crest: 231, badge: 55, ink: 54, dim: [183, 183, 183] },
+    subtle: { glass: 255, surface: 252, mid: 250, deep: 247, crest: 231, badge: 240, ink: 238, dim: [250, 250, 250] },
+    suggestion: { glass: 255, surface: 153, mid: 117, deep: 75, crest: 195, badge: 25, ink: 18, dim: [117, 117, 117] },
+  },
+}
+
+const AURORA_DARK_256: Paint256 = {
+  light: 231,
+  dark: 233,
+  pillText: 233,
+  panel: 234,
+  tones: {
+    success: { glass: 233, deep: 37, crest: 35, surface: 39, mid: 23, badge: 78, ink: 121, dim: [23, 22, 24] },
+    error: { glass: 233, deep: 162, crest: 161, surface: 166, mid: 89, badge: 204, ink: 217, dim: [53, 52, 88] },
+    warning: { glass: 233, deep: 172, crest: 178, surface: 168, mid: 94, badge: 214, ink: 222, dim: [94, 94, 95] },
+    merged: { glass: 233, deep: 99, crest: 93, surface: 163, mid: 55, badge: 141, ink: 183, dim: [54, 55, 90] },
+    subtle: { glass: 233, deep: 103, crest: 109, surface: 67, mid: 238, badge: 146, ink: 189, dim: [237, 238, 60] },
+    suggestion: { glass: 233, deep: 33, crest: 39, surface: 99, mid: 24, badge: 75, ink: 117, dim: [17, 18, 54] },
+  },
+}
+
+const AURORA_LIGHT_256: Paint256 = {
+  light: 231,
+  dark: 235,
+  pillText: 231,
+  panel: 255,
+  tones: {
+    success: { glass: 255, deep: 122, crest: 157, surface: 153, mid: 194, badge: 29, ink: 22, dim: [194, 194, 195] },
+    error: { glass: 255, deep: 217, crest: 218, surface: 223, mid: 224, badge: 161, ink: 88, dim: [224, 225, 230] },
+    warning: { glass: 255, deep: 222, crest: 223, surface: 218, mid: 230, badge: 130, ink: 94, dim: [230, 230, 225] },
+    merged: { glass: 255, deep: 183, crest: 219, surface: 147, mid: 189, badge: 55, ink: 54, dim: [189, 225, 189] },
+    subtle: { glass: 255, deep: 251, crest: 252, surface: 250, mid: 254, badge: 240, ink: 238, dim: [254, 254, 254] },
+    suggestion: { glass: 255, deep: 153, crest: 159, surface: 183, mid: 195, badge: 25, ink: 18, dim: [195, 195, 189] },
+  },
+}
+
+// Set here, under the palettes they are made of.
+tide.ansi256 = {
+  dark: variant256(TIDE_DARK_256, raster256(tideRaster('dark'), { green: 42, red: 204, amber: 214, mauve: 141, shine: 195, spin: [80, 117], track: 238 })),
+  light: variant256(TIDE_LIGHT_256, raster256(tideRaster('light'), { green: 35, red: 161, amber: 172, mauve: 98, shine: 231, spin: [25, 31], track: 252 })),
+}
+aurora.ansi256 = {
+  dark: variant256(AURORA_DARK_256, raster256(auroraRaster('dark'), { green: 42, red: 204, amber: 214, mauve: 170, shine: 195, spin: [43, 135], track: 237 })),
+  light: variant256(AURORA_LIGHT_256, raster256(auroraRaster('light'), { green: 35, red: 161, amber: 172, mauve: 97, shine: 231, spin: [31, 61], track: 252 })),
+}
+
 export const THEME: Record<ThemeName, Theme> = { classic, solid, minimal, neon, retro, tide, aurora }
+
+// ---- How many colours the terminal is painted with ---------------------------------------
+
+// truecolor: the 24-bit colours as given. ansi256: rounded to the xterm palette's 256.
+export type Depth = 'truecolor' | 'ansi256'
+
+// What Claude Code itself decides from its environment (2.1.x): 24-bit where COLORTERM says
+// so or the terminal is one known to take it, cut to 256 inside tmux unless
+// CLAUDE_CODE_TMUX_TRUECOLOR is set; 256 wherever it is unsure, the paint that reads anywhere.
+export type ColourEnv = { TMUX?: string; CLAUDE_CODE_TMUX_TRUECOLOR?: string; COLORTERM?: string; TERM?: string; TERM_PROGRAM?: string }
+const TRUECOLOR_TERMS = new Set(['alacritty', 'contour', 'foot', 'ghostty', 'rio', 'wezterm', 'xterm-ghostty', 'xterm-kitty'])
+const TRUECOLOR_PROGRAMS = new Set(['iTerm.app', 'vscode', 'WezTerm', 'ghostty'])
+const isSet = (value: string | undefined) => value !== undefined && value !== ''
+
+export function depthOf(env: ColourEnv): Depth {
+  if (isSet(env.TMUX) && !isSet(env.CLAUDE_CODE_TMUX_TRUECOLOR)) return 'ansi256'
+  const colorterm = (env.COLORTERM ?? '').toLowerCase()
+  const isTrue = colorterm === 'truecolor' || colorterm === '24bit' || TRUECOLOR_TERMS.has(env.TERM ?? '') || TRUECOLOR_PROGRAMS.has(env.TERM_PROGRAM ?? '')
+
+  return isTrue ? 'truecolor' : 'ansi256'
+}
 
 // A theme by its name, in any case; null for a name no theme has.
 export function themeOf(value: unknown): ThemeName | null {
@@ -556,7 +714,12 @@ export function modeOfColours(value: unknown): Mode | null {
 
 export type Look = { theme: Theme; variant: Variant }
 
-export const lookOf = (name: ThemeName, mode: Mode): Look => ({ theme: THEME[name], variant: THEME[name][mode] })
+// A theme's look in a mode, in the terminal's colours: its 256-colour paint where it has one.
+export const lookOf = (name: ThemeName, mode: Mode, depth: Depth = 'truecolor'): Look => {
+  const theme = THEME[name]
+
+  return { theme, variant: depth === 'ansi256' && theme.ansi256 !== undefined ? theme.ansi256[mode] : theme[mode] }
+}
 
 // A text accent's colour; undefined where the theme leaves that accent plain.
 export function inkOf(look: Look, tone: Tone, role?: Role): Color | undefined {

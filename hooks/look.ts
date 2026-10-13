@@ -25,6 +25,33 @@ export function hex([r, g, b]: Rgb): number {
   return (r << 16) | (g << 8) | b
 }
 
+// The xterm 256-colour palette's colour `n` (16 to 255: the 6×6×6 cube, then 24 greys), as the
+// terminal paints it. Where Claude Code draws 256 colours (inside tmux, by default) it rounds
+// every colour to one of these; one of them stays itself.
+export function x256(n: number): Rgb {
+  if (n >= 232) {
+    const v = 8 + (n - 232) * 10
+
+    return [v, v, v]
+  }
+  const LEVELS = [0, 95, 135, 175, 215, 255] as const
+  const i = Math.max(0, n - 16)
+
+  return [LEVELS[Math.floor(i / 36) % 6]!, LEVELS[Math.floor(i / 6) % 6]!, LEVELS[i % 6]!]
+}
+
+// The palette colour Claude Code paints `rgb` as in 256 colours: the cube's nearest level on
+// each channel, or the grey ramp's nearest where that is closer (as its painter rounds).
+export function nearest256([r, g, b]: Rgb): Rgb {
+  const LEVELS = [0, 95, 135, 175, 215, 255] as const
+  const level = (c: number) => (c < 48 ? 0 : c < 115 ? 1 : c < 155 ? 2 : c < 195 ? 3 : c < 235 ? 4 : 5)
+  const cube: Rgb = [LEVELS[level(r)]!, LEVELS[level(g)]!, LEVELS[level(b)]!]
+  const grey = 8 + 10 * Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)))
+  const far = (to: Rgb) => (r - to[0]) ** 2 + (g - to[1]) ** 2 + (b - to[2]) ** 2
+
+  return far([grey, grey, grey]) < far(cube) ? [grey, grey, grey] : cube
+}
+
 export function gradientAt(stops: readonly Rgb[], t: number): Rgb {
   const span = (stops.length - 1) * clamp01(t)
   const i = Math.min(stops.length - 2, Math.floor(span))
@@ -106,29 +133,24 @@ export function ruleText(width: number, glyphs: string): string {
 }
 
 // The gh meter's paint: a ramp per health (look.ts's green, amber and red), and the track.
-export type MeterPaint = Pick<RasterPaint, 'green' | 'amber' | 'red' | 'track'>
+export type MeterPaint = Pick<RasterPaint, 'green' | 'amber' | 'red' | 'track' | 'isPalette'>
 export type Health = 'warning' | 'error' | null
 
-// One login's budget as one row of `▀`: the top half of each cell is GraphQL's share left, the
-// bottom half REST's (each null where it isn't known yet: the terminal's own background), each
-// coloured by its health over the track, the cell where a share ends blended by how much of it
-// is filled.
-export function meterCells(top: { share: number; health: Health } | null, bottom: { share: number; health: Health } | null, width: number, paint: MeterPaint): string {
-  const ramp = (health: Health) => (health === 'error' ? paint.red : health === 'warning' ? paint.amber : paint.green)
-  const half = (bar: { share: number; health: Health }, i: number): number => {
-    const filled = clamp01(bar.share) * width
-    const [from, to] = ramp(bar.health)
-    const colour = lerp(from, to, width === 1 ? 1 : i / (width - 1))
-
-    return hex(lerp(paint.track, colour, clamp01(filled - i)))
-  }
-  // The default colour in a cell's fg is the terminal's foreground, not its background: an
-  // unknown top half is drawn as `▄` (the bottom half in fg, the top left to the background).
+// One login's budget as one thin bar: the top half of each cell of a row of `▀`, the share left
+// coloured by its health over the track, the cell where it ends blended by how much of it is
+// filled; the bottom half is the terminal's own background, so the bars of two logins on rows
+// one over the other stay apart. Not known yet: no bar.
+export function meterCells(bar: { share: number; health: Health } | null, width: number, paint: MeterPaint): string {
+  const ramp = bar?.health === 'error' ? paint.red : bar?.health === 'warning' ? paint.amber : paint.green
   const at = (i: number): Cell => {
-    if (top !== null) return [0x2580, half(top, i), bottom === null ? DEFAULT_BG : half(bottom, i)]
-    if (bottom !== null) return [0x2584, half(bottom, i), DEFAULT_BG]
+    if (bar === null) return [0x20, DEFAULT_BG, DEFAULT_BG]
+    const filled = clamp01(bar.share) * width
+    const colour = lerp(ramp[0], ramp[1], width === 1 ? 1 : i / (width - 1))
 
-    return [0x20, DEFAULT_BG, DEFAULT_BG]
+    // In palette colours, the cell where the share ends is the bar's or the track's, never between.
+    const part = paint.isPalette === true ? Math.round(clamp01(filled - i)) : clamp01(filled - i)
+
+    return [0x2580, hex(lerp(paint.track, colour, part)), DEFAULT_BG]
   }
 
   return encode(Array.from({ length: width }, (_, i) => at(i)))

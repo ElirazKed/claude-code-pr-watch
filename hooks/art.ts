@@ -4,10 +4,12 @@
 // sways while the PR moves and is still when it doesn't. Aurora: curtains of light in the
 // state's colours, brighter as the PR moves on. Every text cell takes whichever of the theme's
 // two text colours reads better on that cell's background, so words read over both parts.
-// Pure: the render lays a card out once, and the animation repaints it per frame.
+// Where the terminal is painted in 256 colours (tmux, by default), a theme's paint has `steps`
+// and each art is drawn in a few palette colours instead (tideStepAt, auroraCell): gradients
+// would be rounded into blotches. Pure: the render lays a card out once, and the animation repaints it per frame.
 import type { Tone, TrackedPr } from '../types'
-import type { ArtKind, ArtPaint, Rgb } from './theme'
-import { clamp01, encode, gradientAt, hex, lerp } from './look'
+import type { ArtKind, ArtPaint, ArtSteps, Rgb } from './theme'
+import { clamp01, encode, gradientAt, hex, lerp, nearest256 } from './look'
 import type { Cell } from './look'
 import { ago } from './pr'
 import { threadsBeside, verdictLine } from './review'
@@ -305,7 +307,9 @@ export const roleTone = (role: Role, tone: Tone): Tone | null => (role === 'acce
 // A text cell's colour on `bg`.
 export function fgOf(role: Role, bg: Rgb, card: Pick<ArtCard, 'tone' | 'paint'>): Rgb {
   const base = inkOn(bg, card.paint)
-  if (role === 'dim') return lerp(base, bg, 0.4)
+  // In 256 colours, dimmed less and rounded here as the terminal would, so a cell is sent as
+  // painted.
+  if (role === 'dim') return card.paint.steps === undefined ? lerp(base, bg, 0.4) : nearest256(lerp(base, bg, 0.25))
   const tone = roleTone(role, card.tone)
   if (tone === null) return base
   const ink = card.paint.tones[tone].ink
@@ -317,12 +321,17 @@ export function fgOf(role: Role, bg: Rgb, card: Pick<ArtCard, 'tone' | 'paint'>)
 // inside it.
 const EIGHTHS = [...' ▏▎▍▌▋▊▉█']
 
-// Tide's background at a cell, and, where the front ends inside a cell, how much of it is liquid
-// (null: none or all) and the liquid's colour there.
-function tideAt(card: ArtCard, x: number, y: number, frame: number, rows: number, width: number): { bg: Rgb; cover: number | null; liquid: Rgb } {
+// Tide at a cell (tideAt): the background behind a word there; where the front ends inside
+// it, how much of it is liquid (null: none or all) and the liquid's colour there; and, painted
+// in 256 colours, its two halves where it holds no word.
+type TideCell = { bg: Rgb; cover: number | null; liquid: Rgb; halves?: readonly [top: Rgb, bottom: Rgb] }
+
+function tideAt(card: ArtCard, x: number, y: number, frame: number, rows: number, width: number): TideCell {
   const { glass, surface, deep, crest } = card.paint.tones[card.tone]
   const phase = card.seed * 0.7 + (card.isMoving ? frame * 0.22 : 0)
   const edge = edgeAt(card.fill, width, y, phase)
+  const steps = card.paint.steps?.[card.tone]
+  if (steps !== undefined) return tideStepAt(card, x, y, frame, rows, width, edge, steps.mid)
   const depth = clamp01(0.55 * (rows <= 1 ? 1 : y / (rows - 1)) + 0.45 * (1 - (x + 0.5) / Math.max(1, edge)))
   let liquid = lerp(surface, deep, depth)
   // The crest catches the light; full, a glint sweeps across instead while the PR moves.
@@ -338,6 +347,39 @@ function tideAt(card: ArtCard, x: number, y: number, frame: number, rows: number
   if (cover <= 0) return { bg: ahead, cover: null, liquid }
 
   return { bg: lerp(ahead, liquid, cover), cover, liquid }
+}
+
+// Tide in 256 colours: the water in three layers, the surface on top, the middle, the deep at
+// the bottom, the lines between them wavy (where a cell holds no word, its two halves can be
+// of two layers: `▀`) and swaying while the PR moves; its front, a cell that ends partway along
+// it, lit in the crest's colour. Full and moving, a glint runs across: a slant of cells a layer
+// lighter.
+function tideStepAt(card: ArtCard, x: number, y: number, frame: number, rows: number, width: number, edge: number, mid: Rgb): TideCell {
+  const { glass, surface, deep, crest } = card.paint.tones[card.tone]
+  const layers = [surface, mid, deep] as const
+  const phase = card.seed * 0.7 + (card.isMoving ? frame * 0.22 : 0)
+  const wave = 0.5 * Math.sin(x * 0.42 + phase) + 0.5 * Math.sin(x * 0.17 - phase * 0.6 + 1)
+  // The layer at a height, `at` rows down: a word's cell by its middle, unswayed, so the colour
+  // behind a word stays put; a half cell swayed.
+  const levelAt = (at: number, sway: number) => {
+    const depth = rows <= 1 ? 0 : at / rows + sway
+
+    return depth < 1 / 3 ? 0 : depth < 2 / 3 ? 1 : 2
+  }
+  const glint = (level: number): Rgb => {
+    if (edge < width || !card.isMoving) return layers[level]!
+    const at = ((frame * 0.5 + card.seed * 3) % (width + 16)) - 8
+
+    return Math.abs(x - at + y * 1.5) < 0.75 ? (level === 0 ? crest : layers[level - 1]!) : layers[level]!
+  }
+  const cover = clamp01(edge - x)
+  if (cover <= 0) return { bg: glass, cover: null, liquid: crest }
+  if (cover < 1) {
+    // The front: a word's cell takes whichever it is most of, an empty one the crest's sliver.
+    return { bg: cover >= 0.5 ? glint(levelAt(y + 0.5, 0)) : glass, cover, liquid: crest }
+  }
+
+  return { bg: glint(levelAt(y + 0.5, 0)), cover: null, liquid: crest, halves: [glint(levelAt(y + 0.25, 0.08 * wave)), glint(levelAt(y + 0.75, 0.08 * wave))] }
 }
 
 // Aurora's background at a cell: curtains rippling across the sky, through the state's colours
@@ -357,6 +399,45 @@ function auroraAt(card: ArtCard, x: number, y: number, frame: number, rows: numb
   return lerp(glass, gradientAt([deep, crest, surface], hue), light)
 }
 
+// Where aurora's curtain ends in column `x` (256 colours), in rows from the card's top: about
+// three quarters of the way down, its hem rippling (moving while the PR does), shorter past how
+// far the PR has come.
+export function hemAt(card: Pick<ArtCard, 'fill' | 'seed' | 'isMoving'>, x: number, frame: number, rows: number, width: number): number {
+  const t = card.isMoving ? frame * 0.08 : 0
+  const ripple = 0.55 * Math.sin(x * 0.23 + t + card.seed) + 0.45 * Math.sin(x * 0.61 - t * 0.7 + card.seed * 2)
+  const edge = card.fill * width
+  const reach = x <= edge ? 1 : Math.max(0.2, 1 - (x - edge) / 10)
+
+  return rows * (0.72 + 0.2 * ripple) * reach
+}
+
+// Aurora in 256 colours, a cell: the curtain in its dim colour down to its hem, the sky below;
+// the hem's last half cell lit in the bright colour where the cell holds no word. The colours by
+// the cell's third of the card across (deep, crest, surface), the folds between them slanting
+// from row to row. A word's cell takes the curtain's or the sky's colour by its middle.
+function auroraCell(card: ArtCard, glyph: Glyph, cp: number, x: number, y: number, frame: number, rows: number, width: number, steps: ArtSteps): Cell {
+  const { glass, surface, deep, crest } = card.paint.tones[card.tone]
+  const fold = 2.5 * Math.sin(y * 0.9 + card.seed)
+  const stop = Math.min(2, Math.max(0, Math.floor(((x + fold) / Math.max(1, width)) * 3)))
+  const dim = steps.dim[stop]!
+  const bright = [deep, crest, surface][stop]!
+  const hem = hemAt(card, x, frame, rows, width)
+  if (glyph.role !== 'blank') {
+    const bg = y + 0.5 < hem ? dim : glass
+
+    return [cp, hex(fgOf(glyph.role, bg, card)), hex(bg)]
+  }
+  const isTopIn = y + 0.25 < hem
+  const isBottomIn = y + 0.75 < hem
+  // The bottom half the hem's: dim over bright.
+  if (isBottomIn && hem < y + 1.25) return [0x2584, hex(bright), hex(dim)]
+  if (isBottomIn) return [0x20, hex(dim), hex(dim)]
+  // The top half the hem's: bright over the sky.
+  if (isTopIn) return [0x2580, hex(bright), hex(glass)]
+
+  return [0x20, hex(glass), hex(glass)]
+}
+
 // One frame of a card, a row of cells per row: the art behind, the text over it, the spinner
 // on the frame's glyph.
 export function artGrid(card: ArtCard, frame: number): Cell[][] {
@@ -370,15 +451,19 @@ export function artGrid(card: ArtCard, frame: number): Cell[][] {
     row.map((glyph, x): Cell => {
       if (glyph.role === 'badge') return [glyph.cp, hex(inkOn(badge, card.paint)), hex(badge)]
       if (card.kind === 'aurora') {
+        const steps = card.paint.steps?.[card.tone]
+        if (steps !== undefined) return auroraCell(card, glyph, cpOf(glyph), x, y, frame, rows, width, steps)
         const bg = auroraAt(card, x, y, frame, rows, width)
 
         return [cpOf(glyph), hex(glyph.role === 'blank' ? bg : fgOf(glyph.role, bg, card)), hex(bg)]
       }
-      const { bg, cover, liquid } = tideAt(card, x, y, frame, rows, width)
+      const { bg, cover, liquid, halves } = tideAt(card, x, y, frame, rows, width)
       if (glyph.role === 'blank') {
         const eighths = cover === null ? 0 : Math.round(cover * 8)
         // The front inside an empty cell: a partial block of liquid over the glass beyond it.
         if (eighths > 0 && eighths < 8) return [EIGHTHS[eighths]!.codePointAt(0)!, hex(liquid), hex(tideAt(card, x + 1, y, frame, rows, width).bg)]
+        // Layered water (256 colours): a wavy line between two layers through an empty cell.
+        if (halves !== undefined) return halves[0] === halves[1] ? [0x20, hex(halves[1]), hex(halves[1])] : [0x2580, hex(halves[0]), hex(halves[1])]
 
         return [0x20, hex(bg), hex(bg)]
       }

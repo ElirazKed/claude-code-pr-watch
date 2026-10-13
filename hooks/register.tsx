@@ -5,8 +5,8 @@ import type { Busy, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } 
 import { barCells, barRuns, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
 import { artCard, artCells, bannerLines, roleTone } from './art'
 import type { ArtCard, Seg } from './art'
-import { barPaint, cardBox, inkOf, lookOf, modeOf, modeOfColours, optionTheme, pillOf, rasterBg, themeListing, themeOf, unknownTheme } from './theme'
-import type { Look, Mode, Role, ThemeName } from './theme'
+import { barPaint, cardBox, depthOf, inkOf, lookOf, modeOf, modeOfColours, optionTheme, pillOf, rasterBg, themeListing, themeOf, unknownTheme } from './theme'
+import type { Depth, Look, Mode, Role, ThemeName } from './theme'
 import {
   MERGE_LABEL,
   STEPS,
@@ -40,7 +40,7 @@ import type { Layout } from './band'
 import { NOT_FOUND, failedEntry, isUnreachable, keptEntries } from './cache'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
-import type { Bar, Rates } from './rate'
+import type { Bar, Meter, Rates } from './rate'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -136,7 +136,9 @@ let layout: Layout = 'pane'
 // terminal is light or dark (readMode), dark until known.
 let themeName: ThemeName = 'classic'
 let mode: Mode = 'dark'
-const look = (): Look => lookOf(themeName, mode)
+// How many colours Claude Code paints this terminal with (readDepth): 24-bit until known.
+let depth: Depth = 'truecolor'
+const look = (): Look => lookOf(themeName, mode, depth)
 const seconds = (value: unknown, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.max(MIN_POLL_MS, value * 1_000) : fallback
 // A session whose file has not been touched for this long has exited.
@@ -956,6 +958,26 @@ async function readMode($: EngineInterface): Promise<Mode> {
   return colourMode ?? 'dark'
 }
 
+// The terminal's colours, as Claude Code decides them from its environment (theme.ts's depthOf):
+// read once, since they don't change while the session runs; redrawn when they are 256.
+async function readDepth($: EngineInterface) {
+  try {
+    const [tmux, tmuxTruecolor, colorterm, term, program] = await Promise.all([
+      $.env.get('TMUX'),
+      $.env.get('CLAUDE_CODE_TMUX_TRUECOLOR'),
+      $.env.get('COLORTERM'),
+      $.env.get('TERM'),
+      $.env.get('TERM_PROGRAM'),
+    ])
+    const seen = depthOf({ TMUX: tmux, CLAUDE_CODE_TMUX_TRUECOLOR: tmuxTruecolor, COLORTERM: colorterm, TERM: term, TERM_PROGRAM: program })
+    if (seen === depth) return
+    depth = seen
+    $.ui.invalidate('ui.render')
+  } catch {
+    // Nothing to read here: the 24-bit paint stays.
+  }
+}
+
 // Redraws the pane and the band when the light or dark has changed.
 async function followMode($: EngineInterface, next?: Mode) {
   const seen = next ?? (await readMode($))
@@ -1162,8 +1184,9 @@ export const register: Register = (on, options) => {
       description: 'Open the PR pane; /pr-watch <url> watches a PR, /pr-watch stop <number|url|all> stops, /pr-watch theme <name> restyles it',
       argumentHint: '[<pr url> | stop <number|url|all> | theme [<name>]]',
     })
-    // Off the start path: the pane redraws if it turns out light.
+    // Off the start path: the pane redraws if it turns out light, or painted in 256 colours.
     void followMode($)
+    void readDepth($)
     await $.tool.register({
       name: 'watch',
       description:
@@ -1384,7 +1407,9 @@ export const register: Register = (on, options) => {
       const loginW = Math.min(14, Math.max(1, width - 3 - 1 - 4 - 5 - refillW - 3), Math.max(0, ...meter.meters.map(m => m.login.length)))
       // "gh " + login + " " + bar + " 100%" + refill + "  ?"
       const meterW = Math.max(4, Math.min(16, width - 3 - loginW - 1 - 5 - refillW - 3))
-      const half = (bar: Bar | null) => (bar === null ? null : { share: bar.share, health: bar.tone })
+      // The bar is the lower of GraphQL's and REST's shares, the one the % is of.
+      const lower = (m: Meter) => (m.graphql === null || (m.core !== null && m.core.share < m.graphql.share) ? m.core : m.graphql)
+      const health = (bar: Bar | null) => (bar === null ? null : { share: bar.share, health: bar.tone })
       const textBar = (bar: Bar | null) => {
         const filled = bar === null ? 0 : Math.round(Math.min(1, bar.share) * meterW)
 
@@ -1411,10 +1436,9 @@ export const register: Register = (on, options) => {
             <Text dimColor>{i === 0 ? 'gh ' : '   '}</Text>
             <Text dimColor>{(m.login.length > loginW ? `${m.login.slice(0, loginW - 1)}…` : m.login).padEnd(loginW)} </Text>
             {Raster !== null ? (
-              <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells(half(m.graphql), half(m.core), meterW, variant.raster)} />
+              <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells(health(lower(m)), meterW, variant.raster)} />
             ) : (
-              // One bar as text: the lower one, the one the % is of.
-              textBar(m.graphql === null || (m.core !== null && m.core.share < m.graphql.share) ? m.core : m.graphql)
+              textBar(lower(m))
             )}
             <Text color={toneInk(m.tone)} dimColor={m.tone === null} bold={m.tone !== null}>
               {` ${m.percent.padStart(4)}`}

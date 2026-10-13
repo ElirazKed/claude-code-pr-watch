@@ -163,8 +163,8 @@ function lowestIn(buckets: readonly (Bucket | undefined)[], at: number): Bucket 
 
 // One bar of a meter: the share a bucket has left, and how healthy that is.
 export type Bar = { share: number; tone: Tone }
-// One login's meter: GraphQL's bar (the poll's points) over REST's (gh's requests), each null
-// until seen; the lower share as "94%", its tone, and when that bucket refills ("↻42m"), null
+// One login's meter: GraphQL's bar (the poll's points) and REST's (gh's requests), each null
+// until seen (the pane draws the lower); the lower share as "94%", its tone, and when that bucket refills ("↻42m"), null
 // where neither has a reset ahead (both full).
 export type Meter = { login: string; graphql: Bar | null; core: Bar | null; percent: string; tone: Tone; refill: string | null }
 // The pane's gh meter: the hold, while a secondary limit pauses the poll, and a meter per
@@ -196,7 +196,7 @@ export function ghMeter(limits: Limits, at: number): GhMeter | null {
 
 // The `?` under the meter: what the budget is, in plain words.
 export const GH_HELP = [
-  "GitHub's hourly budget per gh login: GraphQL points on top (the poll's), REST requests below (gh's). The % is the lower.",
+  "GitHub's hourly budget per gh login, a bar each: what is left of its GraphQL points (the poll's) or its REST requests (gh's), whichever is lower.",
   'It is per login, so every session on this machine signed in as it shares it.',
   "Running low, pr-watch stops polling that login's PRs; ⏸ means GitHub asked everyone to wait.",
   '↻ is how long until it refills.',
