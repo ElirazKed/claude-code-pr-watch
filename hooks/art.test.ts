@@ -125,18 +125,20 @@ describe('the cells', () => {
   })
 })
 
-// Every card paint: each banner theme, mode and tone, at a fill.
+// Every card paint: each banner theme, mode, depth and tone, at a fill.
 function cards(fill: number, isMoving = true): ArtCard[] {
   const roles: Role[] = ['text', 'strong', 'dim', 'accent', 'branch', 'add', 'del', 'ok', 'bad', 'warn', 'note', 'blank', 'badge']
   const grid = Array.from({ length: 5 }, (_, y) => Array.from({ length: 44 }, (_, x): Glyph => ({ cp: 0x41, role: roles[(x + y) % roles.length]! })))
 
   return (['tide', 'aurora'] as const).flatMap(name =>
     MODES.flatMap(mode =>
-      TONES.map((tone): ArtCard => {
-        const look = lookOf(name, mode)
+      (['truecolor', 'ansi256'] as const).flatMap(depth =>
+        TONES.map((tone): ArtCard => {
+          const look = lookOf(name, mode, depth)
 
-        return { kind: name, grid, fill, isMoving, seed: 12, tone, paint: look.variant.art!, spin: look.theme.spin }
-      }),
+          return { kind: name, grid, fill, isMoving, seed: 12, tone, paint: look.variant.art!, spin: look.theme.spin }
+        }),
+      ),
     ),
   )
 }
@@ -171,7 +173,7 @@ describe('the paint', () => {
     expect(liquid.slice(front + 1).every(isLiquid => !isLiquid)).toBe(true)
   })
 
-  test('every text cell takes the text colour that reads on its own background; accents only where they read', async () => {
+  test('every text cell takes the text colour that reads on its own background; accents only where they read', { timeoutMs: 30_000 }, async () => {
     for (const fill of [0, 0.3, 0.85, 1]) {
       for (const card of cards(fill)) {
         for (const frame of [0, 5, 11]) {
