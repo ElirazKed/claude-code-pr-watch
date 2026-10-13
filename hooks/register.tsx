@@ -944,6 +944,9 @@ async function bandHandoff($: EngineInterface, kind: Kind, pr: TrackedPr) {
   if (ask?.asking !== undefined || hasFailed) await $.ui.open({ ...OPEN, focus: true })
 }
 
+// COLORFGBG's light or dark, once read (null: it doesn't say).
+let colourMode: Mode | null | undefined
+
 // Light or dark: Claude Code's own theme row says, unless it is `auto` or a custom one; then the
 // terminal's COLORFGBG, where it sets one; else dark.
 async function readMode($: EngineInterface): Promise<Mode> {
@@ -953,11 +956,16 @@ async function readMode($: EngineInterface): Promise<Mode> {
   } catch {
     // No rows to read here: the terminal's word, or dark.
   }
-  try {
-    return modeOfColours(await $.env.get('COLORFGBG')) ?? 'dark'
-  } catch {
-    return 'dark'
+  // The terminal's word doesn't change while the session runs: read it once.
+  if (colourMode === undefined) {
+    try {
+      colourMode = modeOfColours(await $.env.get('COLORFGBG'))
+    } catch {
+      colourMode = null
+    }
   }
+
+  return colourMode ?? 'dark'
 }
 
 // Redraws the pane and the band when the light or dark has changed.
@@ -1156,7 +1164,8 @@ export const register: Register = (on, options) => {
       description: 'Open the PR pane; /pr-watch <url> watches a PR, /pr-watch stop <number|url|all> stops, /pr-watch theme <name> restyles it',
       argumentHint: '[<pr url> | stop <number|url|all> | theme [<name>]]',
     })
-    await followMode($)
+    // Off the start path: the pane redraws if it turns out light.
+    void followMode($)
     await $.tool.register({
       name: 'watch',
       description:
@@ -1170,12 +1179,14 @@ export const register: Register = (on, options) => {
     })
     // One tick for the session; the round itself is shared by every session on the machine.
     $.clock.every(10_000, async () => {
-      const active = (await read($, prs)).map(full).filter(isActive)
+      const list = await read($, prs)
+      // A light or dark picked where no config.set is raised (the theme dialog) shows by the next
+      // tick, merged and closed cards too.
+      if (list.length > 0) await followMode($)
+      const active = list.map(full).filter(isActive)
       if (active.length === 0 || isTicking) return
       isTicking = true
       try {
-        // A light or dark picked where no config.set is raised (the theme dialog) shows by the next tick.
-        await followMode($)
         await apply($, await tick($, active.map(refOf), await $.clock.now()))
       } finally {
         isTicking = false
