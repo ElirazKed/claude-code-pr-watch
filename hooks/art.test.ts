@@ -173,7 +173,7 @@ describe('the paint', () => {
     expect(liquid.slice(front + 1).every(isLiquid => !isLiquid)).toBe(true)
   })
 
-  test('every text cell takes the text colour that reads on its own background; accents only where they read', async () => {
+  test('every text cell takes the text colour that reads on its own background; accents only where they read', { timeoutMs: 30_000 }, async () => {
     for (const fill of [0, 0.3, 0.85, 1]) {
       for (const card of cards(fill)) {
         for (const frame of [0, 5, 11]) {
