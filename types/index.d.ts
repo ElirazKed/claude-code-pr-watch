@@ -106,7 +106,7 @@ export type Bucket = { limit: number; remaining: number; resetAt: number; seenAt
 // A login's two buckets, and when the round last asked GitHub's /rate_limit for it.
 export type LoginRates = { graphql?: Bucket; core?: Bucket; askedAt?: number }
 
-// What the gh line shows: each logged-in login's buckets, the active one first, and until
+// What the gh meter shows: each logged-in login's buckets, the active one first, and until
 // when a secondary limit holds every session off GitHub (0: no hold).
 export type Limits = { logins: ({ login: string } & Pick<LoginRates, 'graphql' | 'core'>)[]; heldUntil: number }
 
@@ -129,6 +129,8 @@ declare module 'claude-code' {
       newer: Newer | null
       // GitHub's budget per login, and a hold, as the shared results last said.
       limits: Limits
+      // Whether the gh meter's explanation is open (its `?`).
+      ghHelp: boolean
     }
   }
 }

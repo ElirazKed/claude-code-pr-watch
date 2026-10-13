@@ -2,7 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
-import { barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
+import { barCells, barRuns, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
+import { artCard, artCells, bannerLines, roleTone } from './art'
+import type { ArtCard, Seg } from './art'
 import { barPaint, cardBox, inkOf, lookOf, modeOf, modeOfColours, optionTheme, pillOf, rasterBg, themeListing, themeOf, unknownTheme } from './theme'
 import type { Look, Mode, Role, ThemeName } from './theme'
 import {
@@ -37,8 +39,8 @@ import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf
 import type { Layout } from './band'
 import { NOT_FOUND, failedEntry, isUnreachable, keptEntries } from './cache'
 import type { Entry } from './cache'
-import { bandNote, bucketOf, ghLines, isRestDue, legacyRate, lowUntil, offsetOf, restOf, roundWaitsUntil, withSeen } from './rate'
-import type { Rates } from './rate'
+import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
+import type { Bar, Rates } from './rate'
 import type { GhPr, MergeRun, PrRef } from './pr'
 
 const PANE = 'pr-watch'
@@ -57,16 +59,24 @@ const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
 // A newer pr-watch than this one, for the footer.
 const newer = atom({ plugin: 'pr-watch', key: 'newer' } as const, null)
-// GitHub's budget per login and a hold, for the gh line.
+// GitHub's budget per login and a hold, for the gh meter.
 const limits = atom({ plugin: 'pr-watch', key: 'limits' } as const, { logins: [], heldUntil: 0 })
+// Whether the gh meter's explanation is open (its `?`): shut until asked, per session.
+const ghHelp = atom({ plugin: 'pr-watch', key: 'ghHelp' } as const, false)
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
 // Module memory: lost on reload, which only costs one extra poll.
 let isTicking = false
 let hasHinted = false
-// What the pane last drew, so the animation can blit frames of the same size.
+// What the pane last drew, so the animation can blit frames of the same size: a stacked card's
+// CI bar width, and a banner card as laid out (art.ts).
 const barWidth = new Map<string, number>()
+const artCards = new Map<string, ArtCard>()
+// A banner card repaints every ART_EVERY frames: the wave sways at the spinner's pace or slower.
+const ART_EVERY = 2
+// The pointer on the gh meter's `?` reveals its explanation over the pane.
+const HELP_SCOPE = 'pr-watch-gh-help'
 let anim: { cancel: () => void } | null = null
 let frame = 0
 // Whether the pane is drawn: set by its render, cleared when a spinner blit is refused (closed,
@@ -147,7 +157,6 @@ const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(
 let homeDir: string | null | undefined
 let dir: string | null = null
 let loginsCache: Promise<{ active: string; others: string[] }> | null = null
-let zone: { at: number; offset: Promise<number> } | null = null
 const tokens = new Map<string, Promise<string | null>>()
 let prunedAt = 0
 
@@ -261,27 +270,6 @@ async function tokenFor($: EngineInterface, login: string): Promise<string | nul
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
-// The person's time zone, minutes east of UTC, for the gh line's reset time: `date +%z`,
-// asked again each ZONE_MS, so a session that lives through a clock change follows it; where
-// it won't say, what the runtime thinks.
-const ZONE_MS = 3_600_000
-
-async function zoneOffset($: EngineInterface): Promise<number> {
-  const at = await $.clock.now()
-  const guess = () => -new Date().getTimezoneOffset()
-  if (zone === null || at - zone.at >= ZONE_MS) {
-    zone = {
-      at,
-      offset: $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).then(
-        res => offsetOf(res.stdout) ?? guess(),
-        () => guess(),
-      ),
-    }
-  }
-
-  return zone.offset
-}
-
 // One batch's call, timed, and what GitHub said: the status and headers, and the reply.
 async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string | null, timeoutMs = GH_MS) {
   const startedAt = await $.clock.now()
@@ -324,7 +312,7 @@ async function logFailure($: EngineInterface, call: CallLog) {
 // lease ends (a second kept to write the results). A batch starts only with time left before
 // it and may take no more than is left (callBudget); the rest are `left` for the next round,
 // as they were. A secondary limit stops the asking (`waitMs`: how long every session holds
-// off), and spent points stop this login's. Neither is a card's error: the gh line says it
+// off), and spent points stop this login's. Neither is a card's error: the gh meter says it
 // (rate.ts), and the PRs keep what they have.
 async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
   const token = await tokenFor($, login)
@@ -469,7 +457,7 @@ async function fetchRefs(
 }
 
 // GitHub's /rate_limit for each logged-in login once REST_MS is up (rate.ts): REST's requests,
-// and the points again, for the gh line. It counts against no limit. Only a round asks, in
+// and the points again, for the gh meter. It counts against no limit. Only a round asks, in
 // what is left of its lease, never every session; asked counts as checked, answered or not.
 async function askRest($: EngineInterface, rates: Rates, at: number, until: number): Promise<Rates> {
   const { active, others } = await logins($)
@@ -632,7 +620,7 @@ async function apply($: EngineInterface, shared: Shared) {
   await sayNewer($, shared).catch(() => undefined)
 }
 
-// What the gh line shows: the logged-in logins' buckets, the active one first (every login the
+// What the gh meter shows: the logged-in logins' buckets, the active one first (every login the
 // results know of, where gh named none), and the hold.
 function limitsOf(shared: Shared, names: readonly string[]): Limits {
   const { rates } = shared
@@ -1063,7 +1051,16 @@ async function syncAnimation($: EngineInterface) {
       const { spin } = paint.theme
       const { spinner } = paint.variant.raster
       for (const pr of moving) {
-        if (isPaneDrawn) {
+        const art = artCards.get(pr.url)
+        if (art !== undefined) {
+          // A banner card: the whole card is one Raster, its wave, glint and spinner in it. Its
+          // size is the one drawn, so a refusal means the pane isn't mounted.
+          if (isPaneDrawn && frame % ART_EVERY === 0) {
+            void $.ui.blit({ requestId: PANE, key: `art:${pr.url}`, cells: artCells(art, frame) }).then(done => {
+              if ('deny' in done) isPaneDrawn = false
+            })
+          }
+        } else if (isPaneDrawn) {
           // The spinner is one cell, so a refusal means the pane isn't mounted, never another size.
           const cells = spinnerCell(frame + pr.number, spinner, spin, rasterBg(paint, pr.tone))
           void $.ui.blit({ requestId: PANE, key: `spin:${pr.url}`, cells }).then(done => {
@@ -1074,7 +1071,7 @@ async function syncAnimation($: EngineInterface) {
           void $.ui.blit({ requestId: bandId, key: `band-spin:${pr.url}`, cells: spinnerCell(frame + pr.number, spinner, spin) })
         }
         const width = barWidth.get(pr.url)
-        if (isPaneDrawn && width !== undefined && pr.checks.pending > 0) {
+        if (isPaneDrawn && art === undefined && width !== undefined && pr.checks.pending > 0) {
           void $.ui.blit({ requestId: PANE, key: `bar:${pr.url}`, cells: barCells(pr.checks, width, frame, barPaint(paint, pr.tone)) })
         }
       }
@@ -1092,6 +1089,7 @@ async function dismiss($: EngineInterface, url: string) {
   await setHandoff($, 'fix', url, null)
   await setHandoff($, 'address', url, null)
   barWidth.delete(url)
+  artCards.delete(url)
   await syncAnimation($)
   if ((await read($, prs)).length === 0) await $.ui.close({ id: PANE })
   await refreshStatus($)
@@ -1313,8 +1311,7 @@ export const register: Register = (on, options) => {
     const handoffs = { fix: fixRows, address: addressRows }
     const upgrade = isNoticeOn ? await read($, newer) : null
     const budget = await read($, limits)
-    const isGhShown = budget.logins.length > 0 || budget.heldUntil > at
-    const offset = isGhShown ? await zoneOffset($) : 0
+    const isHelpOpen = await read($, ghHelp)
     const width = Math.max(24, e.props.bodyColumns)
     const inner = width - 4 // card border + padding (or, borderless, the padding standing for it)
     const open = list.filter(isActive).length
@@ -1323,6 +1320,11 @@ export const register: Register = (on, options) => {
     const paint = look()
     const { theme, variant } = paint
     const ink = (tone: TrackedPr['tone'], role?: Role) => inkOf(paint, tone, role)
+    // This drawing's Rasters are the ones the animation blits: what an earlier one drew is gone.
+    if (Raster !== null) {
+      barWidth.clear()
+      artCards.clear()
+    }
 
     const header = (
       <Box flexDirection="column" marginBottom={1}>
@@ -1349,7 +1351,7 @@ export const register: Register = (on, options) => {
         {Raster !== null ? (
           <Raster key="rule" columns={width} rows={1} cells={ruleCells(width, variant.raster.rule, theme.rule)} />
         ) : (
-          <Text color={ink('merged')} dimColor>{theme.rule.repeat(width)}</Text>
+          <Text color={ink('merged')} dimColor>{ruleText(width, theme.rule)}</Text>
         )}
       </Box>
     )
@@ -1369,21 +1371,100 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    // GitHub's budget per login, dim while healthy, or the pause while a limit holds the poll:
-    // "gh  octocat 4.3k/5k GraphQL · 4.9k/5k REST · resets 13:40".
-    const ghLine = isGhShown && (
-      <Box key="gh" flexDirection="column">
-        {ghLines(budget, at, width, offset).map((line, i) => (
-          <Text key={`gh:${i}`} wrap="truncate-end">
-            {line.map((part, j) => (
-              <Text key={`gh:${i}:${j}`} color={part.tone === null ? undefined : ink(part.tone)} dimColor={part.tone === null}>
-                {part.text}
-              </Text>
-            ))}
+    // GitHub's budget per login, a meter each: "gh  octocat ▀▀▀▀▀▀▀▀▀▀▀▀  94% ↻42m  ?", the bar's
+    // top half GraphQL's points, its bottom half REST's requests, coloured healthy, low, spent;
+    // the pause above while a limit holds the poll. `?` opens what it all means beneath (the
+    // pointer on it shows the same over the pane).
+    const meter = ghMeter(budget, at)
+    const toneInk = (tone: 'warning' | 'error' | null) => (tone === null ? undefined : ink(tone))
+    const ghLine = (() => {
+      if (meter === null) return null
+      const refillW = Math.max(0, ...meter.meters.map(m => (m.refill === null ? 0 : m.refill.length + 1)))
+      // The login gives way first on a narrow pane, so the row still fits beside a 4-cell bar.
+      const loginW = Math.min(14, Math.max(1, width - 3 - 1 - 4 - 5 - refillW - 3), Math.max(0, ...meter.meters.map(m => m.login.length)))
+      // "gh " + login + " " + bar + " 100%" + refill + "  ?"
+      const meterW = Math.max(4, Math.min(16, width - 3 - loginW - 1 - 5 - refillW - 3))
+      const half = (bar: Bar | null) => (bar === null ? null : { share: bar.share, health: bar.tone })
+      const textBar = (bar: Bar | null) => {
+        const filled = bar === null ? 0 : Math.round(Math.min(1, bar.share) * meterW)
+
+        return (
+          <Text>
+            <Text color={toneInk(bar?.tone ?? null) ?? ink('success')}>{'━'.repeat(filled)}</Text>
+            <Text dimColor>{'─'.repeat(meterW - filled)}</Text>
           </Text>
-        ))}
-      </Box>
-    )
+        )
+      }
+      const help = (
+        <Button key="gh-help" label="?" plain dimColor={!isHelpOpen} hover={{ scope: HELP_SCOPE, bold: true }} onPress={() => update($, ghHelp, isOpen => !isOpen)} />
+      )
+      const rows = [
+        ...(meter.pause === null
+          ? []
+          : [
+              <Text key="gh-pause" color={ink('warning')} wrap="truncate-end">
+                {meter.pause}
+              </Text>,
+            ]),
+        ...meter.meters.map((m, i) => (
+          <Box key={`gh:${m.login}`}>
+            <Text dimColor>{i === 0 ? 'gh ' : '   '}</Text>
+            <Text dimColor>{(m.login.length > loginW ? `${m.login.slice(0, loginW - 1)}…` : m.login).padEnd(loginW)} </Text>
+            {Raster !== null ? (
+              <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells(half(m.graphql), half(m.core), meterW, variant.raster)} />
+            ) : (
+              // One bar as text: the lower one, the one the % is of.
+              textBar(m.graphql === null || (m.core !== null && m.core.share < m.graphql.share) ? m.core : m.graphql)
+            )}
+            <Text color={toneInk(m.tone)} dimColor={m.tone === null} bold={m.tone !== null}>
+              {` ${m.percent.padStart(4)}`}
+            </Text>
+            {m.refill !== null && <Text color={toneInk(m.tone)} dimColor>{` ${m.refill}`}</Text>}
+          </Box>
+        )),
+      ]
+
+      return (
+        <Box key="gh" flexDirection="column">
+          {rows.map((row, i) => (
+            <Box key={`gh-row:${i}`} justifyContent="space-between">
+              {row}
+              {i === 0 && help}
+            </Box>
+          ))}
+          {isHelpOpen ? (
+            <Box key="gh-explain" flexDirection="column" marginTop={1}>
+              {GH_HELP.map((line, i) => (
+                <Text key={`gh-explain:${i}`} dimColor wrap="wrap">
+                  {line}
+                </Text>
+              ))}
+            </Box>
+          ) : (
+            // Under the pointer only: the same words in a note over the rows above the meter.
+            <Box
+              position="absolute"
+              bottom={rows.length}
+              left={0}
+              width={width}
+              display="none"
+              hover={{ scope: HELP_SCOPE, display: 'flex' }}
+              flexDirection="column"
+              borderStyle="round"
+              borderColor={ink('subtle')}
+              backgroundColor={variant.panel}
+              paddingX={1}
+            >
+              {GH_HELP.map((line, i) => (
+                <Text key={`gh-note:${i}`} wrap="wrap">
+                  {line}
+                </Text>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )
+    })()
 
     if (list.length === 0) {
       return (
@@ -1567,6 +1648,27 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // A card's last row: its link, how old its data is, and its dismiss.
+    const linkRow = (pr: TrackedPr) => (
+      <Box justifyContent="space-between">
+        <Text>
+          {/* Its own label: with "open ↗" on every card, a click on any of them opened the last.
+              The repo too when another card shares the number (acme/app#7, acme/api#7). */}
+          <Link href={pr.url} label={`open ${list.some(o => o.url !== pr.url && o.number === pr.number) ? pr.repo : ''}#${pr.number} ↗`} />
+          {pr.checkedAt !== null && <Text dimColor> · checked {ago(at - pr.checkedAt)}</Text>}
+        </Text>
+        <Button
+          key={`dismiss:${pr.url}`}
+          label={isActive(pr) ? '✕' : 'Dismiss'}
+          plain={isActive(pr) ? true : undefined}
+          role="dismiss"
+          variant={isActive(pr) ? undefined : 'primary'}
+          dimColor={isActive(pr)}
+          onPress={() => dismiss($, pr.url)}
+        />
+      </Box>
+    )
+
     const card = (pr: TrackedPr) => {
       const step = stepIndex(pr.stage)
       const isMerged = pr.stage === 'merged'
@@ -1695,26 +1797,65 @@ export const register: Register = (on, options) => {
           {pr.state === 'OPEN' && handoffRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
 
-          <Box justifyContent="space-between">
-            <Text>
-              {/* Its own label: with "open ↗" on every card, a click on any of them opened the last.
-                  The repo too when another card shares the number (acme/app#7, acme/api#7). */}
-              <Link
-                href={pr.url}
-                label={`open ${list.some(o => o.url !== pr.url && o.number === pr.number) ? pr.repo : ''}#${pr.number} ↗`}
-              />
-              {pr.checkedAt !== null && <Text dimColor> · checked {ago(at - pr.checkedAt)}</Text>}
-            </Text>
-            <Button
-              key={`dismiss:${pr.url}`}
-              label={isActive(pr) ? '✕' : 'Dismiss'}
-              plain={isActive(pr) ? true : undefined}
-              role="dismiss"
-              variant={isActive(pr) ? undefined : 'primary'}
-              dimColor={isActive(pr)}
-              onPress={() => dismiss($, pr.url)}
-            />
+          {linkRow(pr)}
+        </Box>
+      )
+    }
+
+    // A banner card (theme.ts's `layout`): its words in one Raster's cells over the art
+    // (art.ts), the PR's progress the art itself; then its hand-offs, merge row and links on rows
+    // of their own, over the card's glass, so every press works as on a stacked card.
+    const bannerCard = (pr: TrackedPr) => {
+      const art = variant.art
+      if (art === null || theme.art === null) return card(pr)
+      const glass = variant.tones[pr.tone].fill ?? undefined
+      const below = (
+        <Box flexDirection="column" paddingX={1} backgroundColor={glass}>
+          {pr.state === 'OPEN' && handoffRow(pr)}
+          {pr.state === 'OPEN' && mergeRow(pr)}
+          {linkRow(pr)}
+        </Box>
+      )
+      if (Raster !== null) {
+        const model = artCard(theme.art, pr, at, width, art, theme.spin)
+        artCards.set(pr.url, model)
+
+        return (
+          <Box key={`card:${pr.url}`} flexDirection="column" marginBottom={theme.card.gap}>
+            <Raster key={`art:${pr.url}`} columns={width} rows={model.grid.length} cells={artCells(model, frame)} />
+            {below}
           </Box>
+        )
+      }
+      // No Raster on this surface: the same rows as text, on the glass.
+      const run = (seg: Seg, i: number) => {
+        if (seg.role === 'badge') {
+          return (
+            <Text key={`seg:${i}`} {...pillOf(paint, pr.tone, '').props}>
+              {seg.text}
+            </Text>
+          )
+        }
+        const tone = roleTone(seg.role, pr.tone)
+
+        return (
+          <Text key={`seg:${i}`} color={tone === null ? undefined : ink(tone)} dimColor={seg.role === 'dim'} bold={seg.role === 'strong'}>
+            {seg.text}
+          </Text>
+        )
+      }
+
+      return (
+        <Box key={`card:${pr.url}`} flexDirection="column" marginBottom={theme.card.gap} backgroundColor={glass}>
+          <Box flexDirection="column" paddingX={1}>
+            {bannerLines(pr, at, width).map((line, i) => (
+              <Box key={`line:${pr.url}:${i}`} justifyContent="space-between">
+                <Text wrap="truncate-end">{line.left.length > 0 ? line.left.map(run) : ' '}</Text>
+                {(line.right ?? []).length > 0 && <Text>{(line.right ?? []).map(run)}</Text>}
+              </Box>
+            ))}
+          </Box>
+          {below}
         </Box>
       )
     }
@@ -1722,17 +1863,20 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {header}
-        {list.flatMap((pr, i) =>
+        {list.flatMap((pr, i) => {
+          // The theme's layout: a stacked card, or a banner card.
+          const drawn = theme.layout === 'banner' ? bannerCard(pr) : card(pr)
+
           // A theme without boxes draws a thin rule between the PRs instead.
-          i > 0 && theme.card.separator !== null
+          return i > 0 && theme.card.separator !== null
             ? [
                 <Box key={`sep:${pr.url}`} marginBottom={theme.card.gap}>
                   <Text dimColor>{theme.card.separator.repeat(width)}</Text>
                 </Box>,
-                card(pr),
+                drawn,
               ]
-            : [card(pr)],
-        )}
+            : [drawn]
+        })}
         <Box gap={2}>
           <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
           {closeButton}
@@ -1779,7 +1923,7 @@ export const register: Register = (on, options) => {
       read($, limits),
     ])
     // Only the pause, or a bucket below 20%: a healthy budget leaves the line to the buttons.
-    const ghNote = bandNote(budget, at, budget.logins.length > 0 ? await zoneOffset($) : 0)
+    const ghNote = bandNote(budget, at)
     const width = Math.max(20, e.props.bodyColumns)
     // Single lines: the theme's text colours and spinner, no frames.
     const paint = look()

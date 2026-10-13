@@ -1556,21 +1556,43 @@ async function blipCard($: Parameters<TestBody>[0]) {
   return said
 }
 
-// The pane's gh line, a string a line, and the colour of each part that has one (the rest
-// are dim, `isDim` says).
-type Node = { type: string; props?: Record<string, unknown>; children?: unknown[] }
-const flat = (node: unknown): string => (typeof node === 'string' ? node : ((node as Node).children ?? []).map(flat).join(''))
+// The pane's gh meter, a string a row (a bar as its `▀` cells), the colour of each part that
+// has one (the rest are dim, `isDim` says), and whether its `?` is drawn.
+type Node = { type: string; key?: string; props?: Record<string, unknown>; children?: unknown[] }
+const flat = (node: unknown): string => {
+  if (typeof node === 'string') return node
+  const el = node as Node
+  if (el.type === 'Raster') return '▀'.repeat(Number(el.props?.columns ?? 0))
+  if (el.type === 'Button') return ''
+
+  return (el.children ?? []).map(flat).join('')
+}
+const keyOf = (node: Node) => String(node.key ?? node.props?.key ?? '')
+const textParts = (node: Node): Node[] =>
+  node.type === 'Text' ? [node] : ((node.children ?? []) as Node[]).filter(kid => typeof kid === 'object').flatMap(textParts)
+
+// Whether the first login's bar paints GraphQL's half (top) and REST's (bottom) of its first cell.
+async function ghHalves($: Parameters<TestBody>[0]) {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const bar = (await ui.findAll({ type: 'Raster' })).find(raster => String(raster.key ?? raster.props.key).startsWith('gh-bar:'))
+  await ui.unmount()
+  const words = new Uint32Array(Uint8Array.from(atob(String(bar?.props.cells ?? '')), c => c.charCodeAt(0)).buffer)
+
+  return { top: words[1] !== 0x01000000, bottom: words[2] !== 0x01000000 }
+}
 
 async function ghFooter($: Parameters<TestBody>[0]) {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const rows = (((await ui.find({ key: 'gh' })) as unknown as Node | undefined)?.children ?? []) as Node[]
+  const gh = (await ui.find({ key: 'gh' })) as unknown as Node | undefined
+  const hasHelp = (await ui.find({ key: 'gh-help' })) !== undefined
   await ui.unmount()
-  const parts = rows.flatMap(row => (row.children ?? []) as Node[])
+  const rows = ((gh?.children ?? []) as Node[]).filter(row => keyOf(row).startsWith('gh-row:'))
+  const parts = rows.flatMap(textParts).filter(part => flat(part).trim() !== '')
   const lines = rows.map(flat)
-  const tones = Object.fromEntries(parts.filter(part => part.props?.color !== undefined).map(part => [flat(part), part.props?.color]))
+  const tones = Object.fromEntries(parts.filter(part => part.props?.color !== undefined).map(part => [flat(part).trim(), part.props?.color]))
   const isDim = parts.every(part => part.props?.color !== undefined || part.props?.dimColor === true)
 
-  return { lines, tones, isDim }
+  return { lines, tones, isDim, hasHelp }
 }
 
 test("a 502 a retry gets past leaves no trace: one retry, two seconds on", async ($, on) => {
@@ -1626,11 +1648,11 @@ test("a secondary limit is not retried, and holds every session off GitHub for i
   // Hit at 12:00:10.150, after the lease's wait.
   expect(held.heldUntil).toBe(NOON + 10_150 + 120_000)
   expect(held.nextAt).toBe(held.heldUntil)
-  // The card had data: it keeps it, untouched; the gh line says why it's not fresh.
+  // The card had data: it keeps it, untouched; the gh meter says why it's not fresh.
   expect(entry()).toMatchObject({ at: NOON })
   expect(entry().failedSince).toBe(undefined)
   expect(await blipCard($)).toMatchObject({ warning: null, isFailedShown: true })
-  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 2m'])
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · resumes in 2m', 'gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'])
   const line = JSON.parse(files.get(ERRORS_LOG)?.text.trim() ?? '{}')
   expect(line).toMatchObject({ login: 'me', batch: 1, status: 403, class: 'secondary-limit', retryAfter: '120', remaining: '4990', used: '10', resource: 'graphql' })
 
@@ -1641,15 +1663,15 @@ test("a secondary limit is not retried, and holds every session off GitHub for i
   await ui.unmount()
   expect(queries).toEqual([[FAILING]])
   // Counted down: the Refresh at 12:01:53.1 came 17.05s before the end.
-  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 18s'])
+  expect((await ghFooter($)).lines[0]).toBe('⏸ GitHub rate limit · resumes in 18s')
   // The tick at 12:02:10 is just inside the wait; the one at 12:02:20 asks.
   await clock.advance(20_000)
   expect(queries).toEqual([[FAILING]])
   await clock.advance(10_000)
   expect(queries).toEqual([[FAILING], [FAILING]])
   expect(entry().failedSince).toBe(undefined)
-  // The pause is gone with the hold, the budget back in its place.
-  expect((await ghFooter($)).lines).toEqual(['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'])
+  // The pause is gone with the hold, the meter alone again.
+  expect((await ghFooter($)).lines).toEqual(['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻58m'])
 })
 
 test('a secondary limit that names no wait holds a minute; a PR never read waits under the pause line, with no error of its own', async ($, on) => {
@@ -1660,10 +1682,10 @@ test('a secondary limit that names no wait holds a minute; a PR never read waits
   expect(JSON.parse(files.get(RESULTS)?.text ?? '{}').heldUntil).toBe(NOON + 60_000)
   expect(entry()).toBe(undefined)
   expect(await blipCard($)).toMatchObject({ warning: null, checked: null })
-  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 1m'])
+  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · resumes in 1m'])
   await clock.advance(55_000)
   expect(queries).toEqual([[FAILING]])
-  expect((await ghFooter($)).lines).toEqual(['⏸ GitHub rate limit · polling resumes in 10s'])
+  expect((await ghFooter($)).lines[0]).toBe('⏸ GitHub rate limit · resumes in 10s')
   // The round at 12:01:00 asks, and the card fills.
   await clock.advance(10_000)
   expect(queries).toEqual([[FAILING], [FAILING]])
@@ -1800,16 +1822,19 @@ test('a round drops the PRs no live session watches once an hour old; a watch or
   expect(kept()).toEqual([DEAD_RECENT, FAILING, LIVE_OLD].sort())
 })
 
-// ---- The gh line ------------------------------------------------------------------------
+// ---- The gh meter ------------------------------------------------------------------------
 
-test("the gh line: the poll's points at once, REST's requests once a round asks, dim while healthy", async ($, on) => {
+test("the gh meter: the poll's points at once, REST's requests once a round asks, dim while healthy", async ($, on) => {
   const { clock, restAsks, files } = await blipSession($, on)
   // The watch's own fetch said the points, and asked nothing more.
   expect(restAsks).toEqual([])
-  expect(await ghFooter($)).toEqual({ lines: ['gh  me 4k/5k GraphQL · resets 16:00'], tones: {}, isDim: true })
+  expect(await ghFooter($)).toEqual({ lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'], tones: {}, isDim: true, hasHelp: true })
+  // GraphQL's half of the bar is painted; REST's, not known yet, is the terminal's own.
+  expect(await ghHalves($)).toEqual({ top: true, bottom: false })
   await clock.advance(10_500)
   expect(restAsks).toEqual(['me'])
-  expect(await ghFooter($)).toEqual({ lines: ['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'], tones: {}, isDim: true })
+  expect(await ghFooter($)).toEqual({ lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'], tones: {}, isDim: true, hasHelp: true })
+  expect(await ghHalves($)).toEqual({ top: true, bottom: true })
   const { rates, rate } = JSON.parse(files.get(RESULTS)?.text ?? '{}')
   expect(rates.me).toEqual({
     graphql: { limit: 5_000, remaining: 4_000, resetAt: POINTS_RESET, seenAt: NOON + 10_150 },
@@ -1839,15 +1864,15 @@ test('below 20% of the limit a bucket is a warning, below 5% an error, and so is
   budget.points.me = 900
   await clock.advance(10_500)
   expect(await ghFooter($)).toMatchObject({
-    lines: ['gh  me 900/5k GraphQL · 4.9k/5k REST · resets 16:00'],
-    tones: { '900/5k GraphQL': 'warning', 'resets 16:00': 'warning' },
+    lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  18% ↻1h'],
+    tones: { '18%': 'warning', '↻1h': 'warning' },
   })
   budget.points.me = 4_000
   budget.requests.me = 200
   await clock.advance(5 * 60_000)
   expect(await ghFooter($)).toMatchObject({
-    lines: ['gh  me 4k/5k GraphQL · 200/5k REST · resets 16:30'],
-    tones: { '200/5k REST': 'error', 'resets 16:30': 'error' },
+    lines: ['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   4% ↻1h 25m'],
+    tones: { '4%': 'error', '↻1h 25m': 'error' },
   })
 })
 
@@ -1879,8 +1904,8 @@ test("one login out of points holds back only its own PRs: the other's are polle
   // REST is asked for both logins, each with its own token.
   expect(restAsks).toEqual(['octocat', 'hubot'])
   expect(await ghFooter($)).toMatchObject({
-    lines: ['gh  octocat 4k/5k GraphQL · 4.9k/5k REST', '    hubot 0/5k GraphQL · 4.9k/5k REST · resets 16:00'],
-    tones: { '0/5k GraphQL': 'error', 'resets 16:00': 'error' },
+    lines: ['gh octocat ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h', '   hubot   ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀   0% ↻1h'],
+    tones: { '0%': 'error', '↻1h': 'error' },
   })
   await clock.advance(60_000)
   expect(queries).toEqual([[FAILING], [FAILING]])
@@ -1942,7 +1967,7 @@ test("an older version's results.json still reads, and its low `rate` holds noth
   const shared = JSON.parse(files.get(RESULTS)?.text ?? '{}')
   expect(shared.rates.me.graphql.remaining).toBe(4_000)
   expect(shared.rate.remaining).toBe(4_000)
-  expect((await ghFooter($)).lines).toEqual(['gh  me 4k/5k GraphQL · 4.9k/5k REST · resets 16:00'])
+  expect((await ghFooter($)).lines).toEqual(['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'])
 })
 
 // ---- The band layout ----------------------------------------------------------------------
@@ -2189,8 +2214,9 @@ test('the band says the gh budget only once it runs low, short where the line is
   expect(await last()).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude')
   budget.points.me = 900
   await clock.advance(10_500)
-  expect(await last()).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18% · resets 16:00')
-  expect(await last(60)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18%')
+  expect(await last()).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18% ↻1h')
+  expect(await last(60)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18% ↻1h')
+  expect(await last(57)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude  gh 18%')
   expect(await last(50)).toBe('o: Open pane  r: Refresh  f: Fix #13 with Claude')
 })
 
@@ -2207,9 +2233,9 @@ test('a secondary limit: the band says the pause, counted down, and the line goe
   blips.push(SECONDARY_LIMIT)
   await clock.advance(10_500)
   // The pause before the hand-off, where both won't fit.
-  expect(await drawn()).toEqual(['✗ #13 Retry uploads with exponential backoff · 1 check failing', 'o: Open pane  r: Refresh  ⏸ GitHub rate limit · polling resumes in 2m'])
+  expect(await drawn()).toEqual(['✗ #13 Retry uploads with exponential backoff · 1 check failing', 'o: Open pane  r: Refresh  ⏸ GitHub rate limit · resumes in 2m'])
   await clock.advance(30_000)
-  expect((await drawn()).at(-1)).toBe('o: Open pane  r: Refresh  ⏸ GitHub rate limit · polling resumes in 1m 31s')
+  expect((await drawn()).at(-1)).toBe('o: Open pane  r: Refresh  ⏸ GitHub rate limit · resumes in 1m 31s')
   // Gone the moment the hold ends, before any tick; the round at 12:02:20 then asks.
   queries.length = 0
   await clock.advance(130_300 - 40_600)
@@ -2311,8 +2337,8 @@ test('/pr-watch theme lists the looks, marks the current one, and says what name
   const { ui } = await themedPane($, on, [FAILING])
   const listed = (await theme($, '')).text ?? ''
   expect(listed.split('\n').filter(line => line.startsWith('●'))).toEqual([expect.stringMatching(/^● classic .*\(current\)$/)])
-  for (const name of ['classic', 'solid', 'minimal', 'neon', 'retro']) expect(listed).toContain(name)
-  expect((await theme($, 'sparkly')).text).toBe('No theme "sparkly". Themes: classic, solid, minimal, neon, retro.')
+  for (const name of ['classic', 'solid', 'minimal', 'neon', 'retro', 'tide', 'aurora']) expect(listed).toContain(name)
+  expect((await theme($, 'sparkly')).text).toBe('No theme "sparkly". Themes: classic, solid, minimal, neon, retro, tide, aurora.')
   // Nothing changed.
   expect((await ui.find({ key: `card:${FAILING}` }))?.props.borderStyle).toBe('round')
   await ui.unmount()
@@ -2367,4 +2393,157 @@ test("the band takes the theme's colours, and keeps its lines", { options: { lay
   expect((await ui.find({ type: 'Text', text: /^#13$/ }))?.props.color).toBe('ansi256(1)')
   expect((await ui.find({ type: 'Text', text: /^1 check failing$/ }))?.props.color).toBe('ansi256(1)')
   await ui.unmount()
+})
+
+// ---- Banner cards and the gh meter ------------------------------------------------------
+
+// A session watching `urls` on the tide theme, with its blits recorded (`deny`: refused).
+async function tideSession($: Parameters<TestBody>[0], on: On, urls: readonly string[]) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  const blits: string[] = []
+  const blit = { deny: false }
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.blit', ($, e) => (blits.push(e.key), { value: blit.deny ? { deny: 'not mounted' } : {} }))
+  fakeHost(on, clock, GH)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: urls.join(' '), origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { clock, blits, blit }
+}
+
+// A Raster's cells as text, a string a row.
+function rasterRows(raster: { props: Record<string, unknown> } | undefined): string[] {
+  const columns = Number(raster?.props.columns ?? 0)
+  const words = new Uint32Array(Uint8Array.from(atob(String(raster?.props.cells ?? '')), c => c.charCodeAt(0)).buffer)
+  const glyphs = [...words].filter((_, i) => i % 3 === 0).map(cp => String.fromCodePoint(cp))
+
+  return Array.from({ length: glyphs.length / Math.max(1, columns) }, (_, row) => glyphs.slice(row * columns, (row + 1) * columns).join(''))
+}
+
+const TIDE = { options: { theme: 'tide' } }
+
+test('tide: each card one painted Raster with its words in the cells; links and buttons on rows of their own', TIDE, async ($, on) => {
+  await tideSession($, on, [RUNNING, FAILING, MERGED])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const art = async (url: string) => rasterRows((await ui.find({ key: `art:${url}` })) as never)
+  const running = await art(RUNNING)
+  // The pane's whole width: no frame, the art its own padding.
+  expect(running.every(row => [...row].length === 60)).toBe(true)
+  expect(running[0]).toMatch(/^ #12 Retry uploads with exponential backoff +● CI RUNNING  $/)
+  expect(running[1]).toMatch(/^ acme\/app · feat\/retry → main {2}\+120 −14 +@octocat $/)
+  expect(running[2]?.trimEnd()).toMatch(/^ \S Running build · 1 queued · 1\/3 passed$/)
+  expect((await art(FAILING))[0]).toContain('✗ CI FAILED')
+  expect((await art(FAILING))[2]?.trimEnd()).toMatch(/^ Failing: build {20,}1\/2$/)
+  expect((await art(MERGED))[2]?.trimEnd()).toMatch(/^ Merged · /)
+  // The stacked card's own Rasters are not drawn.
+  for (const url of [RUNNING, FAILING, MERGED]) {
+    expect(await ui.find({ key: `spin:${url}` })).toBeUndefined()
+    expect(await ui.find({ key: `bar:${url}` })).toBeUndefined()
+    expect((await ui.find({ key: `card:${url}` }))?.props.borderStyle).toBeUndefined()
+  }
+  // Every link, by its own label; the hand-off, dismiss and footer buttons as on any card.
+  const links = await ui.findAll({ type: 'Link' })
+  expect(links.map(link => link.props.label).sort()).toEqual(['open #12 ↗', 'open #13 ↗', 'open #7 ↗'])
+  expect(new Set(links.map(link => link.props.href)).size).toBe(3)
+  for (const key of [`fix:${FAILING}`, `dismiss:${RUNNING}`, `dismiss:${MERGED}`, 'refresh', 'close']) expect(await ui.find({ key })).toBeDefined()
+  await ui.press({ key: `dismiss:${MERGED}` })
+  expect(await ui.find({ key: `art:${MERGED}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('tide at a narrow pane: the title gives way to the badge; nothing is wider than the pane', TIDE, async ($, on) => {
+  await tideSession($, on, [RUNNING])
+  for (const bodyColumns of [36, 24]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns }, surface: 'terminal' })
+    const rows = rasterRows((await ui.find({ key: `art:${RUNNING}` })) as never)
+    expect(rows.every(row => [...row].length === bodyColumns)).toBe(true)
+    if (bodyColumns === 36) expect(rows[0]).toBe(' #12 Retry uploads…   ● CI RUNNING  ')
+    else {
+      expect(rows[0]?.startsWith(' #12 Re…')).toBe(true)
+      expect(rows[0]?.endsWith('● CI RUNNING  ')).toBe(true)
+    }
+    await ui.unmount()
+  }
+})
+
+test('tide: only a moving card animates, every other frame, and nothing is blitted while the pane is not drawn', TIDE, async ($, on) => {
+  const { clock, blits, blit } = await tideSession($, on, [RUNNING, FAILING])
+  // Watched, the pane never drawn: no frames sent.
+  await clock.advance(1_000)
+  expect(blits).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'refresh' })
+  blits.length = 0
+  await clock.advance(900)
+  // Ten frames at 90ms, every other one sent; the failed card is still.
+  expect(blits.length).toBeGreaterThanOrEqual(4)
+  expect(blits.length).toBeLessThanOrEqual(6)
+  expect(new Set(blits)).toEqual(new Set([`art:${RUNNING}`]))
+  // The pane gone: one refused frame, and no more.
+  blit.deny = true
+  blits.length = 0
+  await clock.advance(900)
+  expect(blits).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('tide off the terminal: the same rows as text over the glass, every link and button kept', TIDE, async ($, on) => {
+  await tideSession($, on, [RUNNING, FAILING])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  expect(await ui.find({ text: /CI FAILED/ })).toBeDefined()
+  expect(await ui.find({ text: /Retry uploads with exponential backoff/ })).toBeDefined()
+  expect((await ui.find({ key: `card:${FAILING}` }))?.props.backgroundColor).toMatch(/^#[0-9a-f]{6}$/)
+  expect((await ui.findAll({ type: 'Link' })).map(link => link.props.label).sort()).toEqual(['open #12 ↗', 'open #13 ↗'])
+  expect(await ui.find({ key: `fix:${FAILING}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('aurora paints its cards the same way, and a light Claude Code theme gets the light paint', { options: { theme: 'aurora' } }, async ($, on) => {
+  configRows(on, { theme: 'dark' })
+  await tideSession($, on, [FAILING])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const cells = async () => String((await ui.find({ key: `art:${FAILING}` }))?.props.cells)
+  expect(rasterRows((await ui.find({ key: `art:${FAILING}` })) as never)[0]).toContain('#13 Retry uploads')
+  const dark = await cells()
+  await $.config.set({ key: 'theme', value: 'light' } as never)
+  expect(await cells()).not.toBe(dark)
+  await ui.unmount()
+})
+
+test("the gh meter: a bar per login, the share and refill, and a `?` that opens what it means", async ($, on) => {
+  await blipSession($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const help = await ui.find({ key: 'gh-help' })
+  // A plain `?`, no hotkey of its own: none of the pane's letters is taken.
+  expect(help?.props).toMatchObject({ label: '?', plain: true })
+  expect(help?.props.hotkey).toBeUndefined()
+  expect(await ui.find({ key: 'gh-explain' })).toBeUndefined()
+  // Under the pointer, the same words over the pane: hidden until the `?` is hovered.
+  const peek = (await ui.findAll({ type: 'Box' })).find(box => box.props.position === 'absolute')
+  expect(peek?.props).toMatchObject({ display: 'none', position: 'absolute' })
+  expect(hoverOf(await ui.drawn(), 'gh-help')).toEqual({ scope: 'pr-watch-gh-help', bold: true })
+  await ui.press({ key: 'gh-help' })
+  const said = (await ui.find({ key: 'gh-explain' })) as unknown as Node | undefined
+  expect(said).toBeDefined()
+  const words = ((said?.children ?? []) as Node[]).map(flat)
+  expect(words).toHaveLength(4)
+  expect(words.join(' ')).toContain('every session on this machine')
+  expect(words.join(' ')).toContain('↻ is how long until it refills')
+  // Open, there is nothing to peek at.
+  expect((await ui.findAll({ type: 'Box' })).some(box => box.props.position === 'absolute')).toBe(false)
+  await ui.unmount()
+  // The session keeps it open across redraws, until the `?` shuts it.
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await again.find({ key: 'gh-explain' })).toBeDefined()
+  await again.press({ key: 'gh-help' })
+  expect(await again.find({ key: 'gh-explain' })).toBeUndefined()
+  await again.unmount()
 })
