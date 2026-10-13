@@ -1523,6 +1523,80 @@ test('a card with failed CI and open threads offers both, and each press keeps t
   await ui.unmount()
 })
 
+const CONFLICTED = 'https://github.com/acme/app/pull/51'
+// A branch GitHub can't merge into its base: green CI, review still asked for.
+const conflicted = (extra: Record<string, unknown> = {}) =>
+  pr(CONFLICTED, { mergeStateStatus: 'DIRTY', mergeable: 'CONFLICTING', statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')], ...extra })
+
+test('a conflicted card offers Resolve with Claude, a draft too; a clean or failing one does not', async ($, on) => {
+  const draft = pr(READY, { isDraft: true, mergeStateStatus: 'DIRTY', mergeable: 'CONFLICTING' })
+  const { ui } = await fixCard($, on, { [CONFLICTED]: conflicted(), [READY]: draft, [BROKEN]: broken, [RUNNING]: GH[RUNNING] })
+  expect((await ui.find({ key: `resolve:${CONFLICTED}` }))?.props.label).toBe('Resolve with Claude')
+  expect((await ui.find({ key: `resolve:${READY}` }))?.props.label).toBe('Resolve with Claude')
+  expect(await ui.find({ key: `resolve:${BROKEN}` })).toBeUndefined()
+  expect(await ui.find({ key: `resolve:${RUNNING}` })).toBeUndefined()
+  expect(await ui.find({ key: `merge:${CONFLICTED}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Resolve with Claude drafts the ask in the prompt box, asking GitHub nothing more', async ($, on) => {
+  const { ui, asked, fills, sent } = await fixCard($, on, { [CONFLICTED]: conflicted() })
+  const before = asked.length
+  await ui.press({ key: `resolve:${CONFLICTED}` })
+
+  expect(asked.slice(before)).toEqual([])
+  expect(fills).toHaveLength(1)
+  const draft = fills[0] ?? ''
+  expect(draft.startsWith('Merge conflicts on acme/app#51: Retry uploads with exponential backoff\n')).toBe(true)
+  expect(draft).toContain('https://github.com/acme/app/pull/51 · feat/retry → main')
+  expect(draft).toContain('merge origin/main into it')
+  expect(draft).toContain("Don't push")
+  // A draft, not a message: nothing reaches Claude until the person presses Enter.
+  expect(sent).toEqual([])
+  expect(await ui.find({ text: /Drafted in the prompt box/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a second Resolve press replaces its own draft, and a double press drafts once', async ($, on) => {
+  const { ui, fills, box, type } = await fixCard($, on, { [CONFLICTED]: conflicted() })
+  await Promise.all([ui.press({ key: `resolve:${CONFLICTED}` }), ui.press({ key: `resolve:${CONFLICTED}` })])
+  expect(fills).toHaveLength(1)
+
+  type(`Look at this one first.\n\n${box()}`)
+  await ui.press({ key: `resolve:${CONFLICTED}` })
+  expect(fills).toHaveLength(2)
+  expect(box().startsWith('Look at this one first.\n\nMerge conflicts on acme/app#51')).toBe(true)
+  expect(box().split('Merge conflicts on acme/app#51')).toHaveLength(2)
+  await ui.unmount()
+})
+
+test("where the prompt box won't take a draft, it asks first, and Confirm sends the ask to resolve", async ($, on) => {
+  const { ui, sent } = await fixCard($, on, { [CONFLICTED]: conflicted() }, undefined, () => ({ isFilled: false }))
+  await ui.press({ key: `resolve:${CONFLICTED}` })
+  expect(await ui.find({ text: 'Send merge conflicts of #51 to Claude?' })).toBeDefined()
+
+  await ui.press({ key: `resolve-confirm:${CONFLICTED}` })
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('Merge conflicts on acme/app#51')
+  expect(await ui.find({ text: '✓ Sent to Claude' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a conflict with failed CI and open threads offers all three, Resolve first, each keeping the others\' drafts', async ($, on) => {
+  const all = conflicted({ statusCheckRollup: broken.statusCheckRollup, reviews: comments, threads: discussion })
+  const { ui, box } = await fixCard($, on, { [CONFLICTED]: all })
+  const labels = (await ui.findAll({ type: 'Button' })).map(button => String(button.props.label)).filter(label => label.endsWith('with Claude'))
+  expect(labels).toEqual(['Resolve with Claude', 'Fix with Claude', 'Address with Claude'])
+
+  await ui.press({ key: `fix:${CONFLICTED}` })
+  await ui.press({ key: `resolve:${CONFLICTED}` })
+  await ui.press({ key: `fix:${CONFLICTED}` })
+  expect(box().startsWith('CI failed on acme/app#51')).toBe(true)
+  expect(box().split('CI failed on acme/app#51')).toHaveLength(2)
+  expect(box().split('\n\nMerge conflicts on acme/app#51')).toHaveLength(2)
+  await ui.unmount()
+})
+
 // ---- GitHub having a moment -------------------------------------------------------------
 
 const NOON = Date.parse('2026-10-07T12:00:00Z')
@@ -2225,6 +2299,18 @@ test("Fix with Claude in the band drafts the most urgent PR's failure; where it 
   isFilling = false
   await ui.press({ key: 'band-handoff' })
   expect(opens).toEqual([{ id: 'pr-watch', focus: true }])
+  await ui.unmount()
+})
+
+test("Resolve with Claude in the band is the conflicted top PR's hand-off, over its failed CI", IN_BAND, async ($, on) => {
+  const both = conflicted({ statusCheckRollup: broken.statusCheckRollup })
+  const { fills, opens } = await bandSession($, on, [BROKEN, CONFLICTED], { fixtures: { [BROKEN]: broken, [CONFLICTED]: both } })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(lines(await ui.drawn()).at(-1)).toBe('o: Open pane  r: Refresh  c: Resolve #51 with Claude')
+  await ui.press({ key: 'band-handoff' })
+  expect(fills).toHaveLength(1)
+  expect(fills[0]).toContain('Merge conflicts on acme/app#51')
+  expect(opens).toEqual([])
   await ui.unmount()
 })
 

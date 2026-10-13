@@ -71,6 +71,8 @@ export type TrackedPr = {
   // The newest review submission looked at (ms), so only later ones toast; null before the
   // first look.
   reviewSeen: number | null
+  // GitHub can't merge the head into the base cleanly (draft or not): Resolve with Claude.
+  isConflicted: boolean
 }
 
 // A press's work under way, from when it started: a mark older than a run can take was left by
@@ -86,7 +88,7 @@ export type MergeAsk = {
   error?: string
 }
 
-// A card's hand-off to Claude (Fix with Claude, Address with Claude): what it needs being
+// A card's hand-off to Claude (Fix, Address or Resolve with Claude): what it needs being
 // collected, the message held for a yes where no prompt box can take it as a draft, what came
 // of it, or what went wrong.
 export type HandoffAsk = {
@@ -125,6 +127,8 @@ declare module 'claude-code' {
       fixing: Record<string, HandoffAsk>
       // Address with Claude, by PR url.
       addressing: Record<string, HandoffAsk>
+      // Resolve with Claude, by PR url.
+      resolving: Record<string, HandoffAsk>
       // Null while no newer version is known, or the notice is off.
       newer: Newer | null
       // GitHub's budget per login, and a hold, as the shared results last said.

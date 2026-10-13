@@ -161,8 +161,9 @@ export function addressPrompt(pr: PrFacts, threads: readonly GhThread[], total =
   return out.join('\n')
 }
 
-// Where a hand-off's draft starts, past the first: fixHeading's and addressHeading's first words.
-const NEXT_DRAFT = /\n\n(?:CI failed|Review comments to address) on [\w.-]+\/[\w.-]+#\d+:/
+// Where a hand-off's draft starts, past the first: fixHeading's, addressHeading's and
+// resolveHeading's first words.
+const NEXT_DRAFT = /\n\n(?:CI failed|Review comments to address|Merge conflicts) on [\w.-]+\/[\w.-]+#\d+:/
 
 // The prompt box with a hand-off drafted in: over an earlier draft of the same one (keeping the
 // person's text before it and any other hand-off's draft after it), into an empty box, or

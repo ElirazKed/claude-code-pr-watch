@@ -334,6 +334,7 @@ export function metaOf(pr: GhPr) {
     deletions: pr.deletions,
     author: pr.author?.login ?? '',
     mergedAt: pr.mergedAt,
+    isConflicted: isConflicted(pr),
   }
 }
 
@@ -595,6 +596,7 @@ export function placeholder(ref: PrRef): TrackedPr {
     merge: noMerge(),
     reviews: null,
     reviewSeen: null,
+    isConflicted: false,
   }
 }
 
