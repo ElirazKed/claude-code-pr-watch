@@ -2,7 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
-import { PALETTE, barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
+import { barCells, barRuns, fullBarCells, ruleCells, spinnerCell } from './look'
+import { barPaint, cardBox, inkOf, lookOf, modeOf, modeOfColours, optionTheme, pillOf, rasterBg, themeListing, themeOf, unknownTheme } from './theme'
+import type { Look, Mode, Role, ThemeName } from './theme'
 import {
   MERGE_LABEL,
   STEPS,
@@ -120,6 +122,11 @@ const pace = { fastMs: 20_000, slowMs: 60_000 }
 let isNoticeOn = true
 // The `layout` option, the same way: the pane (opened as PRs come), or the band above the prompt.
 let layout: Layout = 'pane'
+// The `theme` option, the same way, or what /pr-watch theme picked; and whether the person's
+// terminal is light or dark (readMode), dark until known.
+let themeName: ThemeName = 'classic'
+let mode: Mode = 'dark'
+const look = (): Look => lookOf(themeName, mode)
 const seconds = (value: unknown, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.max(MIN_POLL_MS, value * 1_000) : fallback
 // A session whose file has not been touched for this long has exited.
@@ -937,6 +944,54 @@ async function bandHandoff($: EngineInterface, kind: Kind, pr: TrackedPr) {
   if (ask?.asking !== undefined || hasFailed) await $.ui.open({ ...OPEN, focus: true })
 }
 
+// Light or dark: Claude Code's own theme row says, unless it is `auto` or a custom one; then the
+// terminal's COLORFGBG, where it sets one; else dark.
+async function readMode($: EngineInterface): Promise<Mode> {
+  try {
+    const said = modeOf((await $.config.list()).find(row => row.key === 'theme')?.value)
+    if (said !== null) return said
+  } catch {
+    // No rows to read here: the terminal's word, or dark.
+  }
+  try {
+    return modeOfColours(await $.env.get('COLORFGBG')) ?? 'dark'
+  } catch {
+    return 'dark'
+  }
+}
+
+// Redraws the pane and the band when the light or dark has changed.
+async function followMode($: EngineInterface, next?: Mode) {
+  const seen = next ?? (await readMode($))
+  if (seen === mode) return
+  mode = seen
+  $.ui.invalidate('ui.render')
+}
+
+// This mod's `theme` row in /config: `pr-watch.theme`, or with the marketplace after the name.
+const THEME_ROW = /^pr-watch(?:@[\w.-]+)?\.theme$/
+
+// `/pr-watch theme <name>`: the look changes at once; then it is written to the `theme` option
+// where /config has the row and lets a plugin set it, so every session follows. Where it
+// doesn't, the pick holds for this session.
+async function pickTheme($: EngineInterface, name: ThemeName): Promise<string> {
+  themeName = name
+  $.ui.invalidate('ui.render')
+  let why = ''
+  try {
+    const row = (await $.config.list()).find(r => THEME_ROW.test(r.key))
+    if (row !== undefined) {
+      const done = await $.config.set({ key: row.key, value: name })
+      if (done.deny === undefined) return `pr-watch theme: ${name}. Saved in /config, so every session follows.`
+      why = ` (/config said: ${done.deny})`
+    }
+  } catch {
+    // No row to write here.
+  }
+
+  return `pr-watch theme: ${name}, for this session${why}. Pick it in /config (pr-watch, theme) to keep it for every session.`
+}
+
 async function refreshStatus($: EngineInterface) {
   const list = await read($, prs)
   const focus = list.find(isActive) ?? list[list.length - 1]
@@ -996,19 +1051,23 @@ async function syncAnimation($: EngineInterface) {
 
         return
       }
+      const paint = look()
+      const { spin } = paint.theme
+      const { spinner } = paint.variant.raster
       for (const pr of moving) {
         if (isPaneDrawn) {
           // The spinner is one cell, so a refusal means the pane isn't mounted, never another size.
-          void $.ui.blit({ requestId: PANE, key: `spin:${pr.url}`, cells: spinnerCell(frame + pr.number) }).then(done => {
+          const cells = spinnerCell(frame + pr.number, spinner, spin, rasterBg(paint, pr.tone))
+          void $.ui.blit({ requestId: PANE, key: `spin:${pr.url}`, cells }).then(done => {
             if ('deny' in done) isPaneDrawn = false
           })
         }
         if (layout === 'band' && bandId !== null && bandSpins.has(pr.url)) {
-          void $.ui.blit({ requestId: bandId, key: `band-spin:${pr.url}`, cells: spinnerCell(frame + pr.number) })
+          void $.ui.blit({ requestId: bandId, key: `band-spin:${pr.url}`, cells: spinnerCell(frame + pr.number, spinner, spin) })
         }
         const width = barWidth.get(pr.url)
         if (isPaneDrawn && width !== undefined && pr.checks.pending > 0) {
-          void $.ui.blit({ requestId: PANE, key: `bar:${pr.url}`, cells: barCells(pr.checks, width, frame) })
+          void $.ui.blit({ requestId: PANE, key: `bar:${pr.url}`, cells: barCells(pr.checks, width, frame, barPaint(paint, pr.tone)) })
         }
       }
     })
@@ -1051,6 +1110,7 @@ export const register: Register = (on, options) => {
   pace.slowMs = seconds(options.poll_idle_seconds, 60_000)
   isNoticeOn = options.update_notice !== false
   layout = layoutOf(options.layout)
+  themeName = optionTheme(options.theme)
   ownVersion = undefined
   isPaneDrawn = false
   toldVersion = null
@@ -1058,8 +1118,15 @@ export const register: Register = (on, options) => {
   // A change in /config applies from the next round, no reload needed.
   on('config.set', async ($, e, next) => {
     const done = await next(e)
-    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds|update_notice|layout)$/)?.[1]
-    if (field === undefined || done.deny !== undefined) return done
+    if (done.deny !== undefined) return done
+    // Claude Code's own theme: the looks follow it to light or dark.
+    if (e.key === 'theme') {
+      await followMode($, modeOf(done.value) ?? undefined)
+
+      return done
+    }
+    const field = e.key.match(/^pr-watch(?:@[\w.-]+)?\.(poll_active_seconds|poll_idle_seconds|update_notice|layout|theme)$/)?.[1]
+    if (field === undefined) return done
     if (field === 'poll_active_seconds') pace.fastMs = seconds(done.value, pace.fastMs)
     else if (field === 'poll_idle_seconds') pace.slowMs = seconds(done.value, pace.slowMs)
     else if (field === 'layout') {
@@ -1070,6 +1137,10 @@ export const register: Register = (on, options) => {
       $.ui.invalidate('ui.render')
       if (layout === 'band') void $.ui.close({ id: PANE })
       else if ((await read($, prs)).length > 0) void $.ui.open(OPEN)
+    } else if (field === 'theme') {
+      // The pane and the band take the new look at once.
+      themeName = optionTheme(done.value)
+      $.ui.invalidate('ui.render')
     } else {
       isNoticeOn = done.value !== false
       // Off: the footer's note goes now; on, it comes back with the next tick.
@@ -1082,9 +1153,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'pr-watch',
-      description: 'Open the PR pane; /pr-watch <url> watches a PR, /pr-watch stop <number|url|all> stops',
-      argumentHint: '[<pr url> | stop <number|url|all>]',
+      description: 'Open the PR pane; /pr-watch <url> watches a PR, /pr-watch stop <number|url|all> stops, /pr-watch theme <name> restyles it',
+      argumentHint: '[<pr url> | stop <number|url|all> | theme [<name>]]',
     })
+    await followMode($)
     await $.tool.register({
       name: 'watch',
       description:
@@ -1102,6 +1174,8 @@ export const register: Register = (on, options) => {
       if (active.length === 0 || isTicking) return
       isTicking = true
       try {
+        // A light or dark picked where no config.set is raised (the theme dialog) shows by the next tick.
+        await followMode($)
         await apply($, await tick($, active.map(refOf), await $.clock.now()))
       } finally {
         isTicking = false
@@ -1128,6 +1202,15 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'pr-watch' }, async ($, e) => {
+    // `/pr-watch theme neon` restyles the pane and the band; `/pr-watch theme` lists the looks.
+    const asked = e.args.trim().match(/^theme(?:\s+(.*))?$/i)
+    if (asked !== null) {
+      const wanted = asked[1]?.trim() ?? ''
+      if (wanted === '') return { text: themeListing(themeName) }
+      const name = themeOf(wanted)
+
+      return { text: name === null ? unknownTheme(wanted) : await pickTheme($, name) }
+    }
     // `/pr-watch stop 2344` (or a URL, or `all`) stops watching without opening the pane.
     const stop = e.args.trim().match(/^(?:stop|unwatch|rm)\s+(.+)$/i)
     if (stop !== null) {
@@ -1222,36 +1305,40 @@ export const register: Register = (on, options) => {
     const isGhShown = budget.logins.length > 0 || budget.heldUntil > at
     const offset = isGhShown ? await zoneOffset($) : 0
     const width = Math.max(24, e.props.bodyColumns)
-    const inner = width - 4 // card border + padding
+    const inner = width - 4 // card border + padding (or, borderless, the padding standing for it)
     const open = list.filter(isActive).length
     const done = list.length - open
+    // The theme's look (theme.ts): every colour below is the theme's, by tone.
+    const paint = look()
+    const { theme, variant } = paint
+    const ink = (tone: TrackedPr['tone'], role?: Role) => inkOf(paint, tone, role)
 
     const header = (
       <Box flexDirection="column" marginBottom={1}>
         <Box justifyContent="space-between">
           <Text bold>
-            <Text color="merged">⎇</Text> Pull requests
+            <Text color={ink('merged')}>⎇</Text> Pull requests
           </Text>
           <Text>
             {open > 0 && (
               <Text>
-                <Text color="warning" bold>{open}</Text>
+                <Text color={ink('warning')} bold>{open}</Text>
                 <Text dimColor> open</Text>
               </Text>
             )}
             {open > 0 && done > 0 && <Text dimColor> · </Text>}
             {done > 0 && (
               <Text>
-                <Text color="merged" bold>{done}</Text>
+                <Text color={ink('merged')} bold>{done}</Text>
                 <Text dimColor> done</Text>
               </Text>
             )}
           </Text>
         </Box>
         {Raster !== null ? (
-          <Raster key="rule" columns={width} rows={1} cells={ruleCells(width)} />
+          <Raster key="rule" columns={width} rows={1} cells={ruleCells(width, variant.raster.rule, theme.rule)} />
         ) : (
-          <Text color="merged" dimColor>{'─'.repeat(width)}</Text>
+          <Text color={ink('merged')} dimColor>{theme.rule.repeat(width)}</Text>
         )}
       </Box>
     )
@@ -1278,7 +1365,7 @@ export const register: Register = (on, options) => {
         {ghLines(budget, at, width, offset).map((line, i) => (
           <Text key={`gh:${i}`} wrap="truncate-end">
             {line.map((part, j) => (
-              <Text key={`gh:${i}:${j}`} color={part.tone ?? undefined} dimColor={part.tone === null}>
+              <Text key={`gh:${i}:${j}`} color={part.tone === null ? undefined : ink(part.tone)} dimColor={part.tone === null}>
                 {part.text}
               </Text>
             ))}
@@ -1292,9 +1379,9 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {header}
           <Box flexDirection="column" alignItems="center" paddingY={1}>
-            <Text color="merged">╭─────╮</Text>
-            <Text color="merged">│ ⎇ ◌ │</Text>
-            <Text color="merged">╰─────╯</Text>
+            <Text color={ink('merged')}>╭─────╮</Text>
+            <Text color={ink('merged')}>│ ⎇ ◌ │</Text>
+            <Text color={ink('merged')}>╰─────╯</Text>
             <Text bold>Nothing to watch yet</Text>
             <Text dimColor>PRs appear when Claude runs gh pr …</Text>
             <Text dimColor>or with /pr-watch &lt;url&gt;</Text>
@@ -1312,17 +1399,17 @@ export const register: Register = (on, options) => {
       const methods = pr.merge.methods.filter(m => !(refusedBy[pr.repo] ?? []).includes(m))
       const method = pickMethod(methods, ask.method)
       const error = ask.error !== undefined && (
-        <Text color="error" wrap="wrap">
+        <Text color={ink('error')} wrap="wrap">
           {`✗ ${ask.error}`}
         </Text>
       )
-      if (isBusy(ask.busy, at)) return <Text color="suggestion">{`◌ ${BUSY[ask.busy.action]}`}</Text>
+      if (isBusy(ask.busy, at)) return <Text color={ink('suggestion')}>{`◌ ${BUSY[ask.busy.action]}`}</Text>
       if (pr.merge.isAuto) {
         return (
           <Box flexDirection="column">
             {error}
             <Box justifyContent="space-between">
-              <Text color="suggestion">{`⇢ Auto-merge on${pr.merge.autoMethod === null ? '' : ` · ${pr.merge.autoMethod}`}`}</Text>
+              <Text color={ink('suggestion')}>{`⇢ Auto-merge on${pr.merge.autoMethod === null ? '' : ` · ${pr.merge.autoMethod}`}`}</Text>
               {pr.merge.canCancelAuto && (
                 <Button
                   key={`cancel-auto:${pr.url}`}
@@ -1387,12 +1474,12 @@ export const register: Register = (on, options) => {
       for (const handoff of offered) {
         const ask = handoffs[handoff.id][pr.url] ?? {}
         if (isBusy(ask.busy, at)) {
-          notes.push(<Text key={`${handoff.id}-busy:${pr.url}`} color="suggestion">{`◌ ${handoff.busy}`}</Text>)
+          notes.push(<Text key={`${handoff.id}-busy:${pr.url}`} color={ink('suggestion')}>{`◌ ${handoff.busy}`}</Text>)
           continue
         }
         if (ask.error !== undefined) {
           notes.push(
-            <Text key={`${handoff.id}-error:${pr.url}`} color="error" wrap="wrap">
+            <Text key={`${handoff.id}-error:${pr.url}`} color={ink('error')} wrap="wrap">
               {`✗ ${ask.error}`}
             </Text>,
           )
@@ -1414,7 +1501,7 @@ export const register: Register = (on, options) => {
         }
         if (ask.done !== undefined) {
           notes.push(
-            <Text key={`${handoff.id}-done:${pr.url}`} color="success" wrap="wrap">
+            <Text key={`${handoff.id}-done:${pr.url}`} color={ink('success')} wrap="wrap">
               {`✓ ${ask.done}`}
             </Text>,
           )
@@ -1446,7 +1533,8 @@ export const register: Register = (on, options) => {
             <Text wrap="truncate-end">
               {pieces.map((piece, i) => {
                 // A pending request, or "+2 more": dim.
-                const colour = piece.verdict === null ? undefined : VERDICT_COLOUR[piece.verdict]
+                const tone = piece.verdict === null ? undefined : VERDICT_COLOUR[piece.verdict]
+                const colour = tone === undefined ? undefined : ink(tone)
 
                 return (
                   <Text>
@@ -1460,7 +1548,7 @@ export const register: Register = (on, options) => {
             </Text>
           )}
           {threads !== '' && (
-            <Text color="warning" wrap="truncate-end">
+            <Text color={ink('warning')} wrap="truncate-end">
               {threads}
             </Text>
           )}
@@ -1471,7 +1559,10 @@ export const register: Register = (on, options) => {
     const card = (pr: TrackedPr) => {
       const step = stepIndex(pr.stage)
       const isMerged = pr.stage === 'merged'
-      const doneColour = isMerged ? 'merged' : 'success'
+      const doneTone = isMerged ? 'merged' : 'success'
+      const doneColour = ink(doneTone, 'steps')
+      const toneColour = ink(pr.tone)
+      const pill = pillOf(paint, pr.tone, pr.pill)
       const icon = [...pr.pill][0] ?? '●'
       // Labels take 25 cells and the glyphs/gaps 10 (one more for a wide icon, 💬); connectors
       // share what is left.
@@ -1487,27 +1578,21 @@ export const register: Register = (on, options) => {
         if (i < step) return <Text color={doneColour}>✓</Text>
         if (i > step) return <Text dimColor>○</Text>
         if (pr.isMoving && Raster !== null) {
-          return <Raster key={`spin:${pr.url}`} columns={1} rows={1} cells={spinnerCell(frame + pr.number)} />
+          const cells = spinnerCell(frame + pr.number, variant.raster.spinner, theme.spin, rasterBg(paint, pr.tone))
+
+          return <Raster key={`spin:${pr.url}`} columns={1} rows={1} cells={cells} />
         }
 
-        return <Text color={pr.tone} bold>{pr.isMoving ? '◌' : icon}</Text>
+        return <Text color={ink(pr.tone, 'steps')} bold>{pr.isMoving ? '◌' : icon}</Text>
       }
 
       return (
-        <Box
-          key={`card:${pr.url}`}
-          flexDirection="column"
-          borderStyle="round"
-          borderColor={pr.tone}
-          borderDimColor
-          hover={{ borderDimColor: false }}
-          paddingX={1}
-          marginBottom={1}
-        >
+        <Box key={`card:${pr.url}`} flexDirection="column" {...cardBox(paint, pr.tone)}>
           <Box justifyContent="space-between">
-            <Text backgroundColor={pr.tone} color="inverseText" bold>
-              {' '}
-              {pr.pill}{' '}
+            <Text {...pill.props}>
+              {pill.open !== '' && pill.open}
+              {pill.text}
+              {pill.close !== '' && pill.close}
             </Text>
             <Text dimColor wrap="truncate-start">
               {pr.repo}
@@ -1516,7 +1601,7 @@ export const register: Register = (on, options) => {
 
           <Box>
             <Text wrap="truncate-end">
-              <Text color={pr.tone} bold>
+              <Text color={ink(pr.tone, 'number')} bold>
                 #{pr.number}
               </Text>{' '}
               <Text bold>{pr.title || 'Loading…'}</Text>
@@ -1524,11 +1609,11 @@ export const register: Register = (on, options) => {
           </Box>
           {pr.branch !== '' && (
             <Text wrap="truncate-end">
-              <Text color="suggestion">{pr.branch}</Text>
+              <Text color={ink('suggestion', 'branch')}>{pr.branch}</Text>
               <Text dimColor> → </Text>
               <Text dimColor>{pr.base}</Text>
               <Text dimColor>{'  '}</Text>
-              <Text color="success">+{pr.additions}</Text> <Text color="error">−{pr.deletions}</Text>
+              <Text color={ink('success', 'diff')}>+{pr.additions}</Text> <Text color={ink('error', 'diff')}>−{pr.deletions}</Text>
               {pr.author !== '' && <Text dimColor>{'  '}@{pr.author}</Text>}
             </Text>
           )}
@@ -1538,7 +1623,7 @@ export const register: Register = (on, options) => {
               <Box>
                 {glyph(i)}
                 <Text
-                  color={i < step ? doneColour : i === step ? pr.tone : undefined}
+                  color={i < step ? doneColour : i === step ? ink(pr.tone, 'steps') : undefined}
                   dimColor={i > step}
                   bold={i === step}
                 >
@@ -1562,12 +1647,16 @@ export const register: Register = (on, options) => {
                   key={isMerged ? `done:${pr.url}` : `bar:${pr.url}`}
                   columns={barW}
                   rows={1}
-                  cells={isMerged ? fullBarCells(barW, PALETTE.mauve) : barCells(pr.checks, barW, frame)}
+                  cells={
+                    isMerged
+                      ? fullBarCells(barW, variant.raster.mauve, rasterBg(paint, pr.tone))
+                      : barCells(pr.checks, barW, frame, barPaint(paint, pr.tone))
+                  }
                 />
               ) : (
                 <Text>
                   {(isMerged ? [{ text: '━'.repeat(barW), colour: 'merged' as const }] : barRuns(pr.checks, barW)).map(r => (
-                    <Text color={r.colour}>{r.text}</Text>
+                    <Text color={ink(r.colour)}>{r.text}</Text>
                   ))}
                 </Text>
               )}
@@ -1575,20 +1664,20 @@ export const register: Register = (on, options) => {
             </Box>
           )}
 
-          <Text color={pr.tone} wrap="wrap">
+          <Text color={toneColour} wrap="wrap">
             {pr.headline}
             {isMerged && pr.mergedAt !== null && <Text dimColor> · {ago(at - Date.parse(pr.mergedAt))}</Text>}
             {threads.note !== '' && <Text dimColor> · {threads.note}</Text>}
           </Text>
           {pr.checks.failing.length > 2 &&
             pr.checks.failing.slice(2, 5).map(name => (
-              <Text color="error" dimColor wrap="truncate-end">
+              <Text color={ink('error')} dimColor wrap="truncate-end">
                 {'  '}✗ {name}
               </Text>
             ))}
           {pr.state === 'OPEN' && pr.reviews !== null && reviewLines(pr.reviews, threads.line)}
           {pr.error !== null && (
-            <Text color="error" wrap="truncate-end">
+            <Text color={ink('error')} wrap="truncate-end">
               ⚠ {pr.error}
             </Text>
           )}
@@ -1622,7 +1711,17 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {header}
-        {list.map(card)}
+        {list.flatMap((pr, i) =>
+          // A theme without boxes draws a thin rule between the PRs instead.
+          i > 0 && theme.card.separator !== null
+            ? [
+                <Box key={`sep:${pr.url}`} marginBottom={theme.card.gap}>
+                  <Text dimColor>{theme.card.separator.repeat(width)}</Text>
+                </Box>,
+                card(pr),
+              ]
+            : [card(pr)],
+        )}
         <Box gap={2}>
           <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
           {closeButton}
@@ -1671,6 +1770,9 @@ export const register: Register = (on, options) => {
     // Only the pause, or a bucket below 20%: a healthy budget leaves the line to the buttons.
     const ghNote = bandNote(budget, at, budget.logins.length > 0 ? await zoneOffset($) : 0)
     const width = Math.max(20, e.props.bodyColumns)
+    // Single lines: the theme's text colours and spinner, no frames.
+    const paint = look()
+    const { theme, variant } = paint
     if (isTerminal) {
       bandId = e.requestId
       bandSpins.clear()
@@ -1684,20 +1786,20 @@ export const register: Register = (on, options) => {
       return (
         <Box key={`band:${pr.url}`}>
           {isSpinning ? (
-            <Raster key={`band-spin:${pr.url}`} columns={1} rows={1} cells={spinnerCell(frame + pr.number)} />
+            <Raster key={`band-spin:${pr.url}`} columns={1} rows={1} cells={spinnerCell(frame + pr.number, variant.raster.spinner, theme.spin)} />
           ) : (
-            <Text color={pr.tone} bold>
+            <Text color={inkOf(paint, pr.tone)} bold>
               {row.icon}
             </Text>
           )}
           <Text wrap="truncate-end">
             {' '}
-            <Text color={pr.tone} bold>
+            <Text color={inkOf(paint, pr.tone, 'number')} bold>
               {row.number}
             </Text>
             {row.title !== '' && <Text> {row.title}</Text>}
             <Text dimColor>{row.title !== '' ? ' · ' : ' '}</Text>
-            <Text color={pr.tone}>{row.state}</Text>
+            <Text color={inkOf(paint, pr.tone)}>{row.state}</Text>
           </Text>
         </Box>
       )
@@ -1732,13 +1834,13 @@ export const register: Register = (on, options) => {
             <Button key="band-open" label="Open pane" hotkey="o" plain dimColor onPress={() => $.ui.open({ ...OPEN, focus: true })} />
             <Button key="band-refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
             {actions.handoff && top !== undefined && handoff !== undefined && (isCollecting ? (
-              <Text color="suggestion">{busyText}</Text>
+              <Text color={inkOf(paint, 'suggestion')}>{busyText}</Text>
             ) : (
               <Button key="band-handoff" label={handoffLabel} hotkey={handoffKey} plain dimColor onPress={() => bandHandoff($, handoff.id, top)} />
             ))}
             {actions.notice !== null && <Text dimColor>{actions.notice}</Text>}
             {actions.gh !== null && (
-              <Text key="band:gh" color={ghNote?.tone ?? undefined} dimColor={(ghNote?.tone ?? null) === null}>
+              <Text key="band:gh" color={ghNote === null || ghNote.tone === null ? undefined : inkOf(paint, ghNote.tone)} dimColor={(ghNote?.tone ?? null) === null}>
                 {actions.gh}
               </Text>
             )}

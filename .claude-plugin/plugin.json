@@ -1,6 +1,6 @@
 {
   "name": "pr-watch",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "description": "Live pane tracking the GitHub PRs touched in a session: CI, review, conflicts, merge. One shared poller for every session on the machine.",
   "types": "./types/index.d.ts",
   "author": {
@@ -38,6 +38,13 @@
       "description": "pane: the PR pane, opened as PRs come (docked beside the transcript in a wide fullscreen terminal, else above the prompt). band: a few short lines above the prompt instead, most urgent first; the pane opens only when asked (Open pane, /pr-watch).",
       "options": ["pane", "band"],
       "default": "pane"
+    },
+    "theme": {
+      "type": "string",
+      "title": "How the PRs look",
+      "description": "classic: round borders coloured by state. solid: borderless tiles tinted by state. minimal: no boxes, a thin rule between PRs. neon: bold vivid borders that glow on hover. retro: double borders in the 16 terminal colours. Follows a light or dark Claude Code theme; /pr-watch theme <name> switches too.",
+      "options": ["classic", "solid", "minimal", "neon", "retro"],
+      "default": "classic"
     }
   }
 }

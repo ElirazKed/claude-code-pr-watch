@@ -2218,3 +2218,153 @@ test('a secondary limit: the band says the pause, counted down, and the line goe
   await clock.advance(10_000)
   expect(queries).toEqual([[FAILING]])
 })
+
+// ---- Themes -------------------------------------------------------------------------------
+
+// Claude Code's own `theme` row and pr-watch's, as /config lists them; `sets` records each
+// change a plugin makes through $.config.set.
+function configRows(on: On, rows: { theme?: string; own?: string } = {}) {
+  const sets: { key: string; value: unknown }[] = []
+  const row = (key: string, value: string, plugin: string) => ({ key, label: key, kind: 'choice', value, provider: { plugin, tier: 'user' }, isLocked: false })
+  on('config.list', () => ({
+    value: [
+      ...(rows.theme === undefined ? [] : [row('theme', rows.theme, 'engine')]),
+      ...(rows.own === undefined ? [] : [row('pr-watch.theme', rows.own, 'pr-watch')]),
+    ] as never,
+  }))
+  on('config.set', ($, e) => (sets.push({ key: e.key, value: e.value }), { value: e.value }))
+
+  return sets
+}
+
+// A session watching `urls`, the pane drawn on the terminal.
+async function themedPane($: Parameters<TestBody>[0], on: On, urls: readonly string[]) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  fakeHost(on, clock, GH)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: urls.join(' '), origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { clock, ui: await $.ui.mount({ ...PANE, surface: 'terminal' }) }
+}
+
+// The hover styles of the element keyed `key` in a drawn tree (find leaves them out).
+function hoverOf(node: unknown, key: string): Record<string, unknown> | undefined {
+  if (node === null || typeof node !== 'object') return undefined
+  const el = node as { props?: { key?: unknown }; hover?: Record<string, unknown>; children?: unknown[] }
+  if (el.props?.key === key) return el.hover
+
+  return (el.children ?? []).map(kid => hoverOf(kid, key)).find(found => found !== undefined)
+}
+
+const theme = ($: Parameters<TestBody>[0], args: string) =>
+  $.command.run({ command: 'pr-watch', args: `theme ${args}`.trim(), origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+
+test('the classic look by default: round borders in the tone, a filled pill', async ($, on) => {
+  const { ui } = await themedPane($, on, [FAILING])
+  expect((await ui.find({ key: `card:${FAILING}` }))?.props).toMatchObject({ borderStyle: 'round', borderColor: 'error', borderDimColor: true, paddingX: 1 })
+  expect(hoverOf(await ui.drawn(), `card:${FAILING}`)).toEqual({ borderDimColor: false })
+  expect((await ui.find({ type: 'Text', text: /CI FAILED/ }))?.props).toMatchObject({ backgroundColor: 'error', color: 'inverseText', bold: true })
+  await ui.unmount()
+})
+
+test('solid: borderless tiles tinted by state, the same size as a bordered card', { options: { theme: 'solid' } }, async ($, on) => {
+  const { ui } = await themedPane($, on, [FAILING, RUNNING, MERGED])
+  const fill = async (url: string) => (await ui.find({ key: `card:${url}` }))?.props
+  const failing = await fill(FAILING)
+  expect(failing?.borderStyle).toBeUndefined()
+  // Two cells each side and a row above and below, as a border and its padding take.
+  expect(failing).toMatchObject({ paddingX: 2, paddingY: 1 })
+  expect(failing?.backgroundColor).toMatch(/^#[0-9a-f]{6}$/)
+  // Red failing, amber running, purple merged: three tints.
+  expect(new Set([failing?.backgroundColor, (await fill(RUNNING))?.backgroundColor, (await fill(MERGED))?.backgroundColor]).size).toBe(3)
+  expect((await ui.find({ type: 'Text', text: /CI FAILED/ }))?.props).toMatchObject({ backgroundColor: 'error', bold: true })
+  // The bar and the spinner still draw on the tile.
+  expect(await ui.find({ key: `bar:${RUNNING}` })).toBeDefined()
+  expect(await ui.find({ key: `spin:${RUNNING}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('minimal: no boxes, a thin rule between PRs, colour on the pill and headline only', { options: { theme: 'minimal' } }, async ($, on) => {
+  const { ui } = await themedPane($, on, [FAILING, RUNNING, MERGED])
+  const card = (await ui.find({ key: `card:${FAILING}` }))?.props
+  expect(card?.borderStyle).toBeUndefined()
+  expect(card?.backgroundColor).toBeUndefined()
+  expect(card?.paddingX).toBe(2)
+  // A rule before every card but the first.
+  const rules = (await ui.findAll({ type: 'Box' })).filter(box => box.key?.startsWith('sep:'))
+  expect(rules.map(box => box.key)).toEqual([`sep:${RUNNING}`, `sep:${MERGED}`])
+  expect(rules[0]?.text).toBe('─'.repeat(60))
+  const pill = (await ui.find({ type: 'Text', text: /CI FAILED/ }))?.props
+  expect(pill).toMatchObject({ color: 'error', bold: true })
+  expect(pill?.backgroundColor).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^#13$/ }))?.props.color).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/pr-watch theme lists the looks, marks the current one, and says what names there are', async ($, on) => {
+  configRows(on)
+  const { ui } = await themedPane($, on, [FAILING])
+  const listed = (await theme($, '')).text ?? ''
+  expect(listed.split('\n').filter(line => line.startsWith('●'))).toEqual([expect.stringMatching(/^● classic .*\(current\)$/)])
+  for (const name of ['classic', 'solid', 'minimal', 'neon', 'retro']) expect(listed).toContain(name)
+  expect((await theme($, 'sparkly')).text).toBe('No theme "sparkly". Themes: classic, solid, minimal, neon, retro.')
+  // Nothing changed.
+  expect((await ui.find({ key: `card:${FAILING}` }))?.props.borderStyle).toBe('round')
+  await ui.unmount()
+})
+
+test('/pr-watch theme Neon restyles the pane at once and saves it in /config', async ($, on) => {
+  const sets = configRows(on, { own: 'classic' })
+  const { ui } = await themedPane($, on, [FAILING])
+  const said = await theme($, 'Neon')
+  expect(said.text).toBe('pr-watch theme: neon. Saved in /config, so every session follows.')
+  expect(sets).toEqual([{ key: 'pr-watch.theme', value: 'neon' }])
+  const card = (await ui.find({ key: `card:${FAILING}` }))?.props
+  expect(card).toMatchObject({ borderStyle: 'bold', borderColor: expect.stringMatching(/^#/) })
+  // The glow: a brighter border while the pointer is on the card.
+  const hover = hoverOf(await ui.drawn(), `card:${FAILING}`)
+  expect(hover?.borderColor).toMatch(/^#/)
+  expect(hover?.borderColor).not.toBe(card?.borderColor)
+  expect(listedCurrent((await theme($, '')).text)).toBe('neon')
+  await ui.unmount()
+})
+
+const listedCurrent = (text: string | undefined) => text?.split('\n').find(line => line.startsWith('●'))?.split(/\s+/)[1]
+
+test('where /config has no row for it, /pr-watch theme holds for the session and says so', async ($, on) => {
+  configRows(on)
+  const { ui } = await themedPane($, on, [FAILING])
+  expect((await theme($, 'retro')).text).toBe('pr-watch theme: retro, for this session. Pick it in /config (pr-watch, theme) to keep it for every session.')
+  expect((await ui.find({ key: `card:${FAILING}` }))?.props).toMatchObject({ borderStyle: 'double', borderColor: 'ansi256(1)' })
+  expect((await ui.find({ type: 'Text', text: /CI FAILED/ }))?.children).toEqual(['[', '✗ CI FAILED', ']'])
+  await ui.unmount()
+})
+
+test('a theme picked in /config restyles at once, and a light Claude Code theme gets the light tints', async ($, on) => {
+  configRows(on, { theme: 'dark' })
+  const { ui } = await themedPane($, on, [FAILING])
+  await $.config.set({ key: 'pr-watch.theme', value: 'solid' } as never)
+  const dark = (await ui.find({ key: `card:${FAILING}` }))?.props.backgroundColor
+  expect(dark).toMatch(/^#/)
+  await $.config.set({ key: 'theme', value: 'light' } as never)
+  const light = (await ui.find({ key: `card:${FAILING}` }))?.props.backgroundColor
+  expect(light).toMatch(/^#/)
+  expect(light).not.toBe(dark)
+  await $.config.set({ key: 'pr-watch.theme', value: 'classic' } as never)
+  expect((await ui.find({ key: `card:${FAILING}` }))?.props.borderStyle).toBe('round')
+  await ui.unmount()
+})
+
+test("the band takes the theme's colours, and keeps its lines", { options: { layout: 'band', theme: 'retro' } }, async ($, on) => {
+  await bandSession($, on, [FAILING])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(lines(await ui.drawn())[0]).toBe('✗ #13 Retry uploads with exponential backoff · 1 check failing')
+  expect((await ui.find({ type: 'Text', text: /^#13$/ }))?.props.color).toBe('ansi256(1)')
+  expect((await ui.find({ type: 'Text', text: /^1 check failing$/ }))?.props.color).toBe('ansi256(1)')
+  await ui.unmount()
+})
