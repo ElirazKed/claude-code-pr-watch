@@ -1379,8 +1379,9 @@ export const register: Register = (on, options) => {
     const toneInk = (tone: 'warning' | 'error' | null) => (tone === null ? undefined : ink(tone))
     const ghLine = (() => {
       if (meter === null) return null
-      const loginW = Math.min(14, Math.max(0, ...meter.meters.map(m => m.login.length)))
       const refillW = Math.max(0, ...meter.meters.map(m => (m.refill === null ? 0 : m.refill.length + 1)))
+      // The login gives way first on a narrow pane, so the row still fits beside a 4-cell bar.
+      const loginW = Math.min(14, Math.max(1, width - 3 - 1 - 4 - 5 - refillW - 3), Math.max(0, ...meter.meters.map(m => m.login.length)))
       // "gh " + login + " " + bar + " 100%" + refill + "  ?"
       const meterW = Math.max(4, Math.min(16, width - 3 - loginW - 1 - 5 - refillW - 3))
       const half = (bar: Bar | null) => (bar === null ? null : { share: bar.share, health: bar.tone })
@@ -1412,7 +1413,8 @@ export const register: Register = (on, options) => {
             {Raster !== null ? (
               <Raster key={`gh-bar:${m.login}`} columns={meterW} rows={1} cells={meterCells(half(m.graphql), half(m.core), meterW, variant.raster)} />
             ) : (
-              textBar(m.graphql ?? m.core)
+              // One bar as text: the lower one, the one the % is of.
+              textBar(m.graphql === null || (m.core !== null && m.core.share < m.graphql.share) ? m.core : m.graphql)
             )}
             <Text color={toneInk(m.tone)} dimColor={m.tone === null} bold={m.tone !== null}>
               {` ${m.percent.padStart(4)}`}
@@ -1432,8 +1434,8 @@ export const register: Register = (on, options) => {
           ))}
           {isHelpOpen ? (
             <Box key="gh-explain" flexDirection="column" marginTop={1}>
-              {GH_HELP.map(line => (
-                <Text dimColor wrap="wrap">
+              {GH_HELP.map((line, i) => (
+                <Text key={`gh-explain:${i}`} dimColor wrap="wrap">
                   {line}
                 </Text>
               ))}
@@ -1453,8 +1455,10 @@ export const register: Register = (on, options) => {
               backgroundColor={variant.panel}
               paddingX={1}
             >
-              {GH_HELP.map(line => (
-                <Text wrap="wrap">{line}</Text>
+              {GH_HELP.map((line, i) => (
+                <Text key={`gh-note:${i}`} wrap="wrap">
+                  {line}
+                </Text>
               ))}
             </Box>
           )}
@@ -1824,12 +1828,18 @@ export const register: Register = (on, options) => {
         )
       }
       // No Raster on this surface: the same rows as text, on the glass.
-      const run = (seg: Seg) => {
-        if (seg.role === 'badge') return <Text {...pillOf(paint, pr.tone, '').props}>{seg.text}</Text>
+      const run = (seg: Seg, i: number) => {
+        if (seg.role === 'badge') {
+          return (
+            <Text key={`seg:${i}`} {...pillOf(paint, pr.tone, '').props}>
+              {seg.text}
+            </Text>
+          )
+        }
         const tone = roleTone(seg.role, pr.tone)
 
         return (
-          <Text color={tone === null ? undefined : ink(tone)} dimColor={seg.role === 'dim'} bold={seg.role === 'strong'}>
+          <Text key={`seg:${i}`} color={tone === null ? undefined : ink(tone)} dimColor={seg.role === 'dim'} bold={seg.role === 'strong'}>
             {seg.text}
           </Text>
         )
@@ -1838,8 +1848,8 @@ export const register: Register = (on, options) => {
       return (
         <Box key={`card:${pr.url}`} flexDirection="column" marginBottom={theme.card.gap} backgroundColor={glass}>
           <Box flexDirection="column" paddingX={1}>
-            {bannerLines(pr, at, width).map(line => (
-              <Box justifyContent="space-between">
+            {bannerLines(pr, at, width).map((line, i) => (
+              <Box key={`line:${pr.url}:${i}`} justifyContent="space-between">
                 <Text wrap="truncate-end">{line.left.length > 0 ? line.left.map(run) : ' '}</Text>
                 {(line.right ?? []).length > 0 && <Text>{(line.right ?? []).map(run)}</Text>}
               </Box>

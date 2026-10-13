@@ -269,4 +269,11 @@ describe('the gh meter', () => {
     expect(third).not.toBe(words[1 * 3 + 1])
     expect(third).not.toBe(words[3 * 3 + 1])
   })
+
+  test("an unknown top half is never the terminal's foreground: ▄ carries the bottom alone", async () => {
+    const words = decode(meterCells(null, { share: 0.5, health: null }, 4, paint))
+    expect([0, 1, 2, 3].map(i => words[i * 3])).toEqual([0x2584, 0x2584, 0x2584, 0x2584])
+    expect([0, 1, 2, 3].map(i => words[i * 3 + 2])).toEqual([0x01000000, 0x01000000, 0x01000000, 0x01000000])
+    expect([...decode(meterCells(null, null, 2, paint))]).toEqual([0x20, 0x01000000, 0x01000000, 0x20, 0x01000000, 0x01000000])
+  })
 })

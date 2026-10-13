@@ -99,6 +99,10 @@ describe('the cells', () => {
     expect(text(layoutLine({ left: [{ text: 'acme/app · feat/retry → main', role: 'dim' }], right: [{ text: '@octocat', role: 'dim' }], isRightSpare: true }, 34))).toBe(
       ' acme/app · feat/retry → main     ',
     )
+    // A cut on a blank run: the "…" takes the text before it, never a blank's (drawn as nothing).
+    const cut = layoutLine({ left: [{ text: 'main', role: 'dim' }, { text: '  ', role: 'blank' }, { text: '+12', role: 'add' }] }, 9)
+    expect(text(cut)).toBe(' main…   ')
+    expect(cut[5]?.role).toBe('dim')
   })
 
   test("a banner card's rows: headline and badge, where it goes, what it does, then room below", async () => {

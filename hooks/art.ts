@@ -7,7 +7,7 @@
 // Pure: the render lays a card out once, and the animation repaints it per frame.
 import type { Tone, TrackedPr } from '../types'
 import type { ArtKind, ArtPaint, Rgb } from './theme'
-import { encode, gradientAt, hex, lerp } from './look'
+import { clamp01, encode, gradientAt, hex, lerp } from './look'
 import type { Cell } from './look'
 import { ago } from './pr'
 import { threadsBeside, verdictLine } from './review'
@@ -52,8 +52,6 @@ export function fillOf(pr: Pick<TrackedPr, 'state' | 'stage' | 'checks'>): numbe
       return MIN_FILL
   }
 }
-
-const clamp01 = (n: number) => Math.min(1, Math.max(0, n))
 
 // Where tide's front stands on `row`, in cells from the left: the fill's share of the width,
 // swayed by two sines (`phase` moves them), the sway shrinking near either edge so the liquid
@@ -184,7 +182,9 @@ export function layoutLine(line: Line, width: number, pad = 1): Glyph[] {
     // Cut at a word's end where the cut falls on a space: "uploads…", never "uploads …".
     const kept = left.slice(0, Math.max(0, leftRoom - 1))
     while (kept.length > 0 && kept.at(-1)!.cp === 0x20) kept.pop()
-    left = leftRoom === 0 ? [] : [...kept, { cp: 0x2026, role: left[kept.length]!.role }]
+    // The "…" in the cut text's colour; never a blank's, which draws no glyph.
+    const role = kept.at(-1)?.role ?? left[0]!.role
+    left = leftRoom === 0 ? [] : [...kept, { cp: 0x2026, role: role === 'blank' ? 'dim' : role }]
   }
   left.forEach((glyph, i) => (row[pad + i] = glyph))
   right.forEach((glyph, i) => (row[width - pad - right.length + i] = glyph))
