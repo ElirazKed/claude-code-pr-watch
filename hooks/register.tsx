@@ -263,7 +263,9 @@ async function releaseLease($: EngineInterface) {
 // good reading stands meanwhile, and is awaited only where there is none yet, or with
 // `isFresh` (before a round calls a PR not found).
 async function logins($: EngineInterface, isFresh = false, timeoutMs = GH_MS): Promise<Logins> {
-  if (loginsAsk === null && (isFresh || isDue(loginsAsked, await $.clock.now()))) {
+  // The time first: callers at once then see each other's ask, never start one each.
+  const at = await $.clock.now()
+  if (loginsAsk === null && (isFresh || isDue(loginsAsked, at))) {
     loginsAsk = (async () => {
       const status = await gh($, ['auth', 'status', '--hostname', 'github.com'], undefined, undefined, timeoutMs).catch(() => null)
       const read = status === null ? null : loginsOf(`${status.stdout}\n${status.stderr}`)
@@ -282,7 +284,7 @@ async function logins($: EngineInterface, isFresh = false, timeoutMs = GH_MS): P
 // without a token may run as anyone. A token is asked of gh again every few minutes (a login
 // logged in again has a new one); where gh won't give it then, the last one it gave stands,
 // and where it never gave one, that is said, never stood in for.
-async function tokenFor($: EngineInterface, login: string): Promise<Token> {
+async function tokenFor($: EngineInterface, login: string, timeoutMs = GH_MS): Promise<Token> {
   if (login === '') return { error: tokenError('') }
   const at = await $.clock.now()
   const good = tokens.get(login)
@@ -292,7 +294,7 @@ async function tokenFor($: EngineInterface, login: string): Promise<Token> {
   const asking =
     tokenAsks.get(login) ??
     (async (): Promise<Token> => {
-      const res = await gh($, ['auth', 'token', '--hostname', 'github.com', '--user', login]).catch(() => null)
+      const res = await gh($, ['auth', 'token', '--hostname', 'github.com', '--user', login], undefined, undefined, timeoutMs).catch(() => null)
       const said = res?.stdout.trim() ?? ''
       const doneAt = await $.clock.now()
       if (res !== null && res.exitCode === 0 && said !== '') {
@@ -319,7 +321,7 @@ async function tokenFor($: EngineInterface, login: string): Promise<Token> {
 // one, which polls the owners no other login was found for. Never another: a press whose
 // login has no token says so on the card.
 async function pressLogin($: EngineInterface, pr: TrackedPr): Promise<string> {
-  return (await readShared($)).accounts[ownerOf(pr)] ?? (await logins($)).active
+  return loginFor((await readShared($)).accounts, ownerOf(pr), await logins($))
 }
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
@@ -370,7 +372,6 @@ async function logFailure($: EngineInterface, call: CallLog) {
 // (rate.ts), and the PRs keep what they have. Every batch goes as `login`, with its token; where
 // that won't come, nothing is asked, and the PRs fail as on a timeout: none is called not found.
 async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
-  const token = await tokenFor($, login)
   const out = {
     found: new Map<string, GhPr>(),
     missing: [] as PrRef[],
@@ -383,6 +384,14 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
     isLatestAsked: false,
     waitMs: null as number | null,
   }
+  // The token, too, comes inside the lease: a keyring that hangs never outlives it.
+  const tokenBudget = callBudget(until, await $.clock.now(), GH_MS)
+  if (tokenBudget === null) {
+    out.left.push(...refs)
+
+    return out
+  }
+  const token = await tokenFor($, login, tokenBudget)
   if ('error' in token) {
     for (const ref of refs) out.failed.set(ref.url, token.error)
 
@@ -538,7 +547,8 @@ async function fetchRefs(
       }
     }
     // Held by a secondary limit, the rest were not all asked: they wait, as they were.
-    if (waitMs === null && isSure) for (const ref of missing) errors.set(ref.url, { error: notFoundAs(missedBy.get(ref.url) ?? []), isMiss: true })
+    // With gh's logins unread, the others were never asked: no PR is called not found.
+    if (waitMs === null && isSure && order.length > 0) for (const ref of missing) errors.set(ref.url, { error: notFoundAs(missedBy.get(ref.url) ?? []), isMiss: true })
   }
 
   return { found, errors, rates: seen, needed, latest, waitMs, asked: withLatest && !isAsking }
@@ -554,7 +564,7 @@ async function askRest($: EngineInterface, rates: Rates, at: number, until: numb
     const budget = callBudget(until, await $.clock.now(), REST_CALL_MS)
     if (budget === null) break
     // A login gh gives no token for is not asked as another: it counts as asked, unanswered.
-    const token = await tokenFor($, login)
+    const token = await tokenFor($, login, budget)
     const res = 'token' in token ? await gh($, ['api', 'rate_limit'], token.token, undefined, budget).catch(() => null) : null
     const read = res !== null && res.exitCode === 0 ? restOf(res.stdout, await $.clock.now()) : null
     seen = withSeen(seen, login, { ...read, askedAt: at })
@@ -805,6 +815,8 @@ async function tryAgain($: EngineInterface, pr: TrackedPr) {
   if (!isClaimed) return
   try {
     await fetchNow($, [refOf(pr)])
+  } catch {
+    // The card says what it said: the button comes back to press again.
   } finally {
     await update($, retrying, all => {
       const { [pr.url]: _, ...rest } = all
