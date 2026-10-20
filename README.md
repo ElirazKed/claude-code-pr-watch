@@ -132,7 +132,7 @@ A card offers a merge button once GitHub would merge the PR now (open, not a dra
 
 - **Confirmation:** the first press asks, e.g. *Squash-merge #12 into main?*, and only **Confirm** (`y`) runs anything; **Cancel** (`n`) goes back.
 - **Auto-merge:** while the PR waits on checks or reviews in a repo with auto-merge allowed, the button is **Auto-merge · squash** instead. It asks the same way, then GitHub merges the PR once everything passes (`gh pr merge --auto`). With auto-merge on, the card says so (*Auto-merge on · squash*) and has a **Cancel auto-merge** button, which needs no confirmation.
-- **Which account:** `gh pr merge` runs as the gh account that can see the repo, the one the poller reads it with.
+- **Which account:** `gh pr merge` runs as the gh account that can see the repo, the one the poller reads it with, by that login's own token. If gh won't give that token, the card says so and nothing runs: never as another account.
 - **While it runs:** the card says so (*Merging…*), and a second press does nothing. If a reload cuts the run off, the buttons come back after 2 minutes.
 - **When GitHub says no:** its message shows on the card. If it refused the method itself (say, a ruleset that allows only rebase), that method isn't offered for the repo again this session.
 
@@ -143,7 +143,7 @@ A card whose CI failed (at least one check failing on its latest run, counted th
 - **What's in it:** the PR (repo, number, title, link, head branch → base), each failing check with its conclusion and link, the failed steps' logs, and the ask: find the cause and fix it on this branch, or say first if the repo or branch isn't checked out here. It doesn't ask Claude to push or merge.
 - **Logs:** for GitHub Actions jobs, `gh run view --job <id> --log-failed`, for the first 3 failing jobs. Each log loses its colour codes, timestamps and runner group markers, and keeps its last 120 lines, where the error usually is; all the logs together stay under about 12 KB. The draft says when a log was trimmed.
 - **Other CI:** a check from another CI app, or a commit status, has no log to fetch here, so its name, conclusion, summary or description, and link go in instead.
-- **Which account:** the checks and logs are fetched as the gh account that can see the repo, the one the poller reads it with.
+- **Which account:** the checks and logs are fetched as the gh account that can see the repo, the one the poller reads it with, by its own token. If gh won't give that token, the card says so and nothing is fetched.
 - **When something won't come:** the card says why (say, *No log for build: GitHub no longer keeps this log*), and the draft still has the names and links.
 - **While it collects:** the card says *Collecting logs…*, and a second press does nothing. If a reload cuts it off, the button comes back after 2 minutes.
 - **No prompt box:** where the box won't take a draft, the card asks instead, *Send CI failure of #12 to Claude?*, and only **Confirm** (`y`) sends it; **Cancel** (`n`) sends nothing.
@@ -175,7 +175,7 @@ Every session on the machine shares **one** poller, so 30 sessions watching 30 P
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise.
 - Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote (Address with Claude asks that of one PR, on its press).
 - **A round never outlives its 30-second lease:** a query starts only with 5 seconds of it left, and may take no longer than is left. A batch with no time left waits, untouched, for the next round, which asks it first.
-- **When GitHub stumbles:** a query its gateway drops (a 502, 503 or 504, its own timeout, a cut connection) is asked once more 2 seconds later, while the lease has room. A card that has data keeps it through failed rounds, its *checked 1m ago* growing, and shows the error only once fetches have failed for 2 minutes. A PR never read yet shows it at once, and the next round asks again. Only a PR no logged-in account can see waits 5 minutes before it's asked again.
+- **When GitHub stumbles:** a query its gateway drops (a 502, 503 or 504, its own timeout, a cut connection) is asked once more 2 seconds later, while the lease has room. A card that has data keeps it through failed rounds, its *checked 1m ago* growing, and shows the error only once fetches have failed for 2 minutes. A PR never read yet shows it at once, and the next round asks again. Only a PR no logged-in account can see waits 5 minutes before it's asked again, unless you press **Try again** on its card.
 - **Rate limits, per login:** each round reads GraphQL's points from the poll's own replies (free), and, at most every 5 minutes per login, REST's requests from GitHub's `/rate_limit`, which counts against no limit. Only the session running the round asks; every session reads them from `results.json`. A login with fewer than 300 points left isn't polled until its reset: its PRs keep their last data, and the other login's are polled as ever. Only when every login the round needs is that low does the round itself wait for the first reset.
 - **Secondary limits:** GitHub's limit on bursts is never retried. Every session waits out its `retry-after`, or a minute where it names none, Refresh and new watches included, under the gh meter's pause line.
 - **Only watched PRs are kept:** each round drops a PR from `results.json` once no live session watches it and its last fetch is an hour old.
@@ -191,7 +191,11 @@ Both intervals are settings in `/config`:
 | `poll_idle_seconds`: while nothing is moving | 60 | 10–3600 |
 
 A change applies from the next round, with no reload needed. Sessions check on a 10s tick, so an interval is rounded up to the next tick. The session that runs a round uses its own settings, so keep them the same across Claude Code configs that share the machine.
-- With several `gh` accounts logged in, a PR the active account can't see is retried with the others. The cache remembers which **login** sees which owner, never a token.
+- **Several `gh` accounts:** a PR the active account can't see is retried with the others, and the cache remembers which **login** sees which owner, never a token.
+  - **Every call runs as its own login:** each one carries that login's token from `gh auth token --user`, the active login's too, so a `gh auth switch` in another terminal changes nothing for pr-watch. A login is never stood in for by another.
+  - **A token gh won't give** (a keyring locked after sleep, say) is asked for again a few seconds later. Its PRs fail as a timeout does, and are never called not found for it. A card that has data keeps it, and says *Couldn't get octocat's gh token* only if it lasts 2 minutes. Where gh gave the token before, that one is used meanwhile.
+  - **New logins show up:** `gh auth status` is read again every 5 minutes, and once more before a PR is called not found, so an account you log in to while sessions run is asked too, and the gh meter follows a switch.
+  - **Not found:** a PR no login could see says which were asked, e.g. *Not found as octocat or hubot*, and has a **Try again** button, which asks every login now rather than after the 5-minute wait.
 
 ## Updates
 
