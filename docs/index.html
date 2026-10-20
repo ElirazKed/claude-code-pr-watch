@@ -4,19 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pr-watch — live GitHub PR pane for Claude Code</title>
-<meta name="description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta name="description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix, Address and Resolve with Claude, and merge from the pane.">
 <meta name="theme-color" content="#0D0E14">
 <link rel="canonical" href="https://elirazked.github.io/claude-code-pr-watch/">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23CBA6F7%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%226%22%20cy%3D%226%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%226%22%20cy%3D%2218%22%20r%3D%222.5%22%2F%3E%3Ccircle%20cx%3D%2218%22%20cy%3D%2218%22%20r%3D%222.5%22%2F%3E%3Cpath%20d%3D%22M6%208.5v7%22%2F%3E%3Cpath%20d%3D%22M18%2015.5V10a3%203%200%200%200-3-3h-4%22%2F%3E%3Cpath%20d%3D%22M13%204.5%2010.5%207%2013%209.5%22%2F%3E%3C%2Fsvg%3E">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="pr-watch">
 <meta property="og:title" content="pr-watch — live GitHub PR pane for Claude Code">
-<meta property="og:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta property="og:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix, Address and Resolve with Claude, and merge from the pane.">
 <meta property="og:url" content="https://elirazked.github.io/claude-code-pr-watch/">
 <meta property="og:image" content="https://elirazked.github.io/claude-code-pr-watch/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="pr-watch — live GitHub PR pane for Claude Code">
-<meta name="twitter:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix with Claude, and merge from the pane.">
+<meta name="twitter:description" content="A Claude Code mod that keeps a live pane of every GitHub pull request your session touches: CI as it runs, reviews, conflicts, one-press Fix, Address and Resolve with Claude, and merge from the pane.">
 <meta name="twitter:image" content="https://elirazked.github.io/claude-code-pr-watch/screenshot.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;family=Space+Grotesk:wght@500;700&amp;display=swap" rel="stylesheet">
@@ -161,9 +161,9 @@ GitHub
 <section style="border-top: 1px solid #22253A;">
 <div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-wrap: wrap; gap: 48px; align-items: center;">
 <div style="flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px;">
-<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #F38BA8;">Fix with Claude · Address with Claude</p>
+<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #F38BA8;">Fix · Address · Resolve with Claude</p>
 <h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(30px, 3.6vw, 42px); line-height: 1.1; letter-spacing: -0.02em;">CI failed? The fix is one press away.</h2>
-<p style="margin: 0; color: #C9C7DA;">Press <strong style="color: #ECEAF4;">Fix with Claude</strong> on a failing card and pr-watch collects the failing checks and the failed steps' logs, trims them to the part that matters, and drafts the ask in your prompt box. <strong style="color: #ECEAF4;">Address with Claude</strong> does the same for unresolved review threads, by file and line.</p>
+<p style="margin: 0; color: #C9C7DA;">Press <strong style="color: #ECEAF4;">Fix with Claude</strong> on a failing card and pr-watch collects the failing checks and the failed steps' logs, trims them to the part that matters, and drafts the ask in your prompt box. <strong style="color: #ECEAF4;">Address with Claude</strong> does the same for unresolved review threads, by file and line, and <strong style="color: #ECEAF4;">Resolve with Claude</strong> for a branch that conflicts with its base: merge the base in, keep what both sides meant.</p>
 <p style="margin: 0; color: #C9C7DA;">It's a draft: read it, change it, and nothing reaches Claude until you press Enter. It never asks Claude to push, merge or reply on GitHub for you.</p>
 <p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #F38BA8;">Try it: press Fix with Claude on the card.</p>
 </div>
