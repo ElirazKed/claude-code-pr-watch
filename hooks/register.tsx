@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Busy, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
+import type { Busy, CommentAsk, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
 import { barCells, barRuns, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
 import { artCard, artCells, bannerLines, roleTone } from './art'
 import type { ArtCard, Seg } from './art'
@@ -34,6 +34,7 @@ import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, thre
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import { resolveHeading, resolvePrompt } from './resolve'
+import { commentArgv, commentError, commentInput, commentPlaceholder, commentUrl, isPostable } from './comment'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
 import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
@@ -61,6 +62,8 @@ const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
 const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
 const resolving = atom({ plugin: 'pr-watch', key: 'resolving' } as const, {})
+// A card's comment: its field, the post, what came of it.
+const commenting = atom({ plugin: 'pr-watch', key: 'commenting' } as const, {})
 // Try again on a not-found card, while every login is asked.
 const retrying = atom({ plugin: 'pr-watch', key: 'retrying' } as const, {})
 // A newer pr-watch than this one, for the footer.
@@ -93,6 +96,9 @@ let bandId: string | null = null
 const bandSpins = new Set<string>()
 // The end of the hold a timer is set for, so the pause line goes the moment it ends, ticks or not.
 let pauseEndsAt = 0
+// What each card's comment field holds, by PR url: kept here on every keystroke, so typing
+// redraws nothing, and a redraw (a poll round's) draws the field with it. Lost on reload.
+const drafts = new Map<string, string>()
 
 // Rows kept by an older version of this mod lack the newer fields.
 function full(pr: TrackedPr): TrackedPr {
@@ -890,6 +896,87 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   await fetchNow($, [refOf(pr)])
 }
 
+// ---- Comment ------------------------------------------------------------------------------
+// A card's Comment opens a field; Enter posts what it holds to the PR's conversation (an issue
+// comment, not a review). Nothing is preset: the person writes every comment.
+
+// The field's address: what `$.ui.focus` and a test type into.
+const commentKey = (url: string) => `comment-text:${url}`
+
+async function setComment($: EngineInterface, url: string, ask: CommentAsk | null) {
+  await update($, commenting, all => {
+    const { [url]: _, ...rest } = all
+
+    return ask === null ? rest : { ...rest, [url]: ask }
+  })
+}
+
+// Open or Cancel from a frame drawn before a post began (a quick click, another surface) waits
+// on it: overwriting its row would drop what it came to, and let a second Enter post again.
+// False: a post holds the row, nothing changed.
+async function setIdleComment($: EngineInterface, url: string, ask: CommentAsk | null) {
+  const at = await $.clock.now()
+  let isSet = false
+  await update($, commenting, all => {
+    isSet = !isBusy(all[url]?.busy, at)
+    if (!isSet) return all
+    const { [url]: _, ...rest } = all
+
+    return ask === null ? rest : { ...rest, [url]: ask }
+  })
+
+  return isSet
+}
+
+// Comment opens the field, the last post's word gone, and moves the keys onto it where the pane
+// holds them (a click, ctrl+x tab); where it doesn't, the field takes them once it does.
+async function openComment($: EngineInterface, pr: TrackedPr) {
+  if (!(await setIdleComment($, pr.url, { isOpen: true }))) return
+  void $.ui.focus({ requestId: PANE, key: commentKey(pr.url) }).catch(() => undefined)
+}
+
+// Cancel: the field closes and its text goes, nothing posted.
+async function closeComment($: EngineInterface, url: string) {
+  if (await setIdleComment($, url, null)) drafts.delete(url)
+}
+
+// Enter in the field posts its text as the login the poller found sees the repo, by that login's
+// own token, as a merge runs (runMerge): never as another account. Blank text does nothing, and
+// neither does a second Enter while it posts. Posted, the field closes, the card links the
+// comment and GitHub is asked again (a comment can start checks or change a review); refused,
+// the text stays in the field and the card says why, to try again.
+async function postComment($: EngineInterface, pr: TrackedPr, text: string) {
+  if (!isPostable(text)) return
+  const busy = { at: await $.clock.now() }
+  let isClaimed = false
+  await update($, commenting, all => {
+    const ask = all[pr.url]
+    isClaimed = ask?.isOpen === true && !isBusy(ask.busy, busy.at)
+
+    return isClaimed ? { ...all, [pr.url]: { isOpen: true, busy } } : all
+  })
+  if (!isClaimed) return
+  drafts.set(pr.url, text)
+  let ask: CommentAsk = { isOpen: true }
+  try {
+    const login = await pressLogin($, pr)
+    const got = await tokenFor($, login)
+    if ('error' in got) ask = { isOpen: true, error: got.error }
+    else {
+      // The text on stdin, never in argv (comment.ts), which is why this isn't gh().
+      const res = await $.process.run(['gh', ...commentArgv(pr)], { timeoutMs: GH_MS, env: { GH_TOKEN: got.token }, stdin: commentInput(text) })
+      ask = res.exitCode === 0 ? { done: { url: commentUrl(res.stdout) ?? pr.url, login } } : { isOpen: true, error: commentError(res.stderr || res.stdout, login) }
+    }
+  } catch {
+    // Cut off, not refused: GitHub may have taken it, so a retry could post it twice.
+    ask = { isOpen: true, error: "Couldn't tell whether it posted: gh api did not finish. Check the PR before trying again" }
+  }
+  if (ask.done !== undefined) drafts.delete(pr.url)
+  // Only while the row is still this post's: not on a dismissed card.
+  await update($, commenting, all => (all[pr.url]?.busy?.at === busy.at ? { ...all, [pr.url]: ask } : all))
+  if (ask.done !== undefined) await fetchNow($, [refOf(pr)])
+}
+
 // Which hand-off a row is: Fix with Claude's (`fixing`), Address with Claude's (`addressing`)
 // or Resolve with Claude's (`resolving`). They run apart, so a card can collect logs while its
 // threads come.
@@ -1326,6 +1413,8 @@ async function dismiss($: EngineInterface, url: string) {
   await setHandoff($, 'fix', url, null)
   await setHandoff($, 'address', url, null)
   await setHandoff($, 'resolve', url, null)
+  await setComment($, url, null)
+  drafts.delete(url)
   barWidth.delete(url)
   artCards.delete(url)
   await syncAnimation($)
@@ -1549,12 +1638,25 @@ export const register: Register = (on, options) => {
     isPaneDrawn = true
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
+    // The mobile app draws no field yet: no Comment there.
+    const Input = e.surface === 'mobile' ? null : $.ui.resolve(e).Input
     const list = (await read($, prs)).map(full)
     const at = await read($, now)
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
     const handoffs = await readHandoffs($)
     const retries = await read($, retrying)
+    const comments = await read($, commenting)
+    // The login an open field will post as, for its placeholder.
+    // Only for a field that draws (an open card, a surface with Input), and results.json and
+    // gh's logins read once for all of them, not once per card on every redraw.
+    const commentAs = new Map<string, string>()
+    const fields = Input === null ? [] : list.filter(pr => pr.state === 'OPEN' && comments[pr.url]?.isOpen === true)
+    if (fields.length > 0) {
+      const { accounts } = await readShared($)
+      const known = await logins($)
+      for (const pr of fields) commentAs.set(pr.url, loginFor(accounts, ownerOf(pr), known))
+    }
     const upgrade = isNoticeOn ? await read($, newer) : null
     const budget = await read($, limits)
     const isHelpOpen = await read($, ghHelp)
@@ -1801,11 +1903,68 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // The repo too where another card shares the number (acme/app#7, acme/api#7): a Link has no
+    // key, so its label is what tells one card's from another's.
+    const twinRepo = (pr: TrackedPr) => (list.some(o => o.url !== pr.url && o.number === pr.number) ? pr.repo : '')
+
+    // Comment, last of a card's buttons and dim, as secondary actions are; pressed, a field below
+    // them in its place, with Cancel. What the last post came to sits over the field: posting, a
+    // link to the comment, or why GitHub said no (the text still in the field).
+    const commentParts = (pr: TrackedPr) => {
+      if (Input === null) return { button: null, rows: [] }
+      const ask = comments[pr.url] ?? {}
+      if (isBusy(ask.busy, at)) {
+        return { button: null, rows: [<Text key={`comment-busy:${pr.url}`} color={ink('suggestion')}>◌ Posting the comment…</Text>] }
+      }
+      const rows = []
+      if (ask.error !== undefined) {
+        rows.push(
+          <Text key={`comment-error:${pr.url}`} color={ink('error')} wrap="wrap">
+            {`✗ ${ask.error}`}
+          </Text>,
+        )
+      }
+      if (ask.done !== undefined) {
+        rows.push(
+          <Text key={`comment-done:${pr.url}`} wrap="wrap">
+            <Text color={ink('success')}>{`✓ Commented as ${ask.done.login} · `}</Text>
+            <Link href={ask.done.url} label={`comment on ${twinRepo(pr)}#${pr.number} ↗`} />
+          </Text>,
+        )
+      }
+      if (ask.isOpen !== true) {
+        return { button: <Button key={`comment:${pr.url}`} label="Comment" plain dimColor onPress={() => openComment($, pr)} />, rows }
+      }
+      // One line: at two, in the slim dock, the terminal cut the placeholder's login short and
+      // wrapped the key hint onto the second row.
+      rows.push(
+        <Box key={`comment-field:${pr.url}`} flexDirection="column">
+          <Input
+            key={commentKey(pr.url)}
+            placeholder={commentPlaceholder(pr, commentAs.get(pr.url) ?? '')}
+            value={drafts.get(pr.url) ?? ''}
+            submitLabel="post"
+            autoFocus
+            onInput={text => {
+              drafts.set(pr.url, text)
+            }}
+            onSubmit={text => postComment($, pr, text)}
+          />
+          <Box>
+            <Button key={`comment-cancel:${pr.url}`} label="Cancel" plain dimColor onPress={() => closeComment($, pr.url)} />
+          </Box>
+        </Box>,
+      )
+
+      return { button: null, rows }
+    }
+
     // The hand-offs a card offers, what came of each one's last press above, and their buttons
-    // side by side below; a question, where no prompt box took the draft, stands for its button.
-    const handoffRow = (pr: TrackedPr) => {
+    // side by side below, Comment last; a question, where no prompt box took the draft, stands
+    // for its button. Comment's field and word go under the buttons.
+    const actionRow = (pr: TrackedPr) => {
       const offered = HANDOFFS.filter(handoff => handoff.isOffered(pr))
-      if (offered.length === 0) return null
+      const comment = commentParts(pr)
       const notes = []
       const buttons = []
       for (const handoff of offered) {
@@ -1846,6 +2005,8 @@ export const register: Register = (on, options) => {
         // Not a HANDOFFS field: the loader wants $ passed only where a collector is named.
         buttons.push(<Button key={`${handoff.id}:${pr.url}`} label={handoff.label} onPress={() => startHandoff($, handoff.id, pr)} />)
       }
+      if (comment.button !== null) buttons.push(comment.button)
+      if (notes.length === 0 && buttons.length === 0 && comment.rows.length === 0) return null
 
       return (
         <Box flexDirection="column">
@@ -1855,6 +2016,7 @@ export const register: Register = (on, options) => {
               {buttons}
             </Box>
           )}
+          {comment.rows}
         </Box>
       )
     }
@@ -1909,9 +2071,8 @@ export const register: Register = (on, options) => {
     const linkRow = (pr: TrackedPr) => (
       <Box justifyContent="space-between">
         <Text>
-          {/* Its own label: with "open ↗" on every card, a click on any of them opened the last.
-              The repo too when another card shares the number (acme/app#7, acme/api#7). */}
-          <Link href={pr.url} label={`open ${list.some(o => o.url !== pr.url && o.number === pr.number) ? pr.repo : ''}#${pr.number} ↗`} />
+          {/* Its own label: with "open ↗" on every card, a click on any of them opened the last. */}
+          <Link href={pr.url} label={`open ${twinRepo(pr)}#${pr.number} ↗`} />
           {pr.checkedAt !== null && <Text dimColor> · checked {ago(at - pr.checkedAt)}</Text>}
         </Text>
         <Button
@@ -2052,7 +2213,7 @@ export const register: Register = (on, options) => {
             </Text>
           )}
           {notFoundRow(pr)}
-          {pr.state === 'OPEN' && handoffRow(pr)}
+          {pr.state === 'OPEN' && actionRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
 
           {linkRow(pr)}
@@ -2070,7 +2231,7 @@ export const register: Register = (on, options) => {
       const below = (
         <Box flexDirection="column" paddingX={1} backgroundColor={glass}>
           {notFoundRow(pr)}
-          {pr.state === 'OPEN' && handoffRow(pr)}
+          {pr.state === 'OPEN' && actionRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
           {linkRow(pr)}
         </Box>
