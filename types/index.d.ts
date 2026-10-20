@@ -101,6 +101,16 @@ export type HandoffAsk = {
   error?: string
 }
 
+// A card's comment: its field open, the post under way, the comment posted (its link on
+// GitHub, and the login it went as), or what GitHub said no with. The typed text is kept
+// apart, so a keystroke redraws nothing.
+export type CommentAsk = {
+  isOpen?: boolean
+  busy?: Busy
+  done?: { url: string; login: string }
+  error?: string
+}
+
 // A newer pr-watch than the one running, and how this copy updates (update.ts).
 export type Newer = { version: string; how: string }
 
@@ -132,6 +142,8 @@ declare module 'claude-code' {
       addressing: Record<string, HandoffAsk>
       // Resolve with Claude, by PR url.
       resolving: Record<string, HandoffAsk>
+      // Comment, by PR url.
+      commenting: Record<string, CommentAsk>
       // Try again on a not-found card, by PR url: while every login is asked.
       retrying: Record<string, Busy>
       // Null while no newer version is known, or the notice is off.

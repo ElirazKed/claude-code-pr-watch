@@ -136,6 +136,17 @@ A card offers a merge button once GitHub would merge the PR now (open, not a dra
 - **While it runs:** the card says so (*Merging…*), and a second press does nothing. If a reload cuts the run off, the buttons come back after 2 minutes.
 - **When GitHub says no:** its message shows on the card. If it refused the method itself (say, a ruleset that allows only rebase), that method isn't offered for the repo again this session.
 
+## Comment
+
+Every open PR's card, drafts too, has a dim **Comment** button after its other buttons. It opens a one-line text field on the card, *Comment on #12 as octocat*, so you see which account will post. Type, press Enter, and the text goes to the PR's conversation as a plain comment (not a review). There are no preset comments: what you type is what's posted.
+
+- **Which account:** as for a merge, the gh account that can see the repo, by that login's own token. If gh won't give that token, the card says so and nothing is posted: never as another account.
+- **Exactly as typed:** the text goes to `gh api repos/<owner>/<repo>/issues/<n>/comments` on its standard input, as the request's JSON body, never on the command line, so a comment that starts with `@` or `-` is posted as it is.
+- **Then:** the field closes and the card says *✓ Commented as octocat · comment on #12 ↗*, linking the new comment, and GitHub is asked about the PR again at once, since a comment can start checks or change a review.
+- **While it posts:** the card says *Posting the comment…*, and a second Enter does nothing. An empty field posts nothing.
+- **When GitHub says no:** its reason shows on the card (say, *Couldn't comment: Unable to create comment because issue is locked.*), and your text stays in the field to try again.
+- **Cancel** closes the field without posting and drops the text. Esc only hands the keys back to the prompt: the field stays open, and the next `ctrl+x tab` lands in it. What you typed stays in the field while the pane redraws (not across a reload of the mod); dismissing the card drops it. The band has no Comment; the desktop app's pane does, the mobile app's doesn't yet (it draws no text field).
+
 ## Fix with Claude
 
 A card whose CI failed (at least one check failing on its latest run, counted the way the card counts them) has a **Fix with Claude** button. It collects what failed and puts it in your prompt box as a draft: read it, change it if you like, and press Enter to send it to this session. Nothing reaches Claude until you do.

@@ -157,7 +157,10 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // GraphQL call, and `mergeTokens` of each `gh pr merge` (undefined: none). `sight.owners`: the
 // owners a login can read (a login not in it reads every one). `auth.failStatus` and
 // `auth.failToken` (by login): how many of the next `gh auth status`, or `gh auth token` for
-// that login, fail; `auth.asks` records each ("status", or "token <login>"). The time zone
+// that login, fail; `auth.asks` records each ("status", or "token <login>"). A comment posted
+// (`gh api … /issues/<n>/comments`) goes in `comments`: its argv, the body its stdin carried and
+// its GH_TOKEN; `posting.reply`, when set, says how it ends (now, or once a promise settles),
+// and by default it posts, GitHub answering with the new comment's link. The time zone
 // (`date +%z`) is +0300.
 // The terminal's environment: one that takes 24-bit colour, unless a test says otherwise.
 const TRUECOLOR_ENV: Record<string, string> = { COLORTERM: 'truecolor', TERM: 'xterm-ghostty' }
@@ -188,6 +191,8 @@ function fakeHost(
   const mergeTokens: (string | undefined)[] = []
   const sight = { owners: {} as Record<string, string[]> }
   const auth = { failStatus: 0, failToken: {} as Record<string, number>, asks: [] as string[] }
+  const comments: { argv: string[]; body: unknown; token: string | undefined }[] = []
+  const posting: { reply: ((body: unknown) => RunReply | Promise<RunReply>) | null } = { reply: null }
   on('env.get', ($, e) => ({ value: { HOME: '/home/me', ...env }[e.name] }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
@@ -248,6 +253,14 @@ function fakeHost(
       return out(0, JSON.stringify({ resources, rate: resources.core }))
     }
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
+    const issue = String(e.argv[4] ?? '').match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/)
+    if (e.argv[1] === 'api' && issue !== null) {
+      const body = (JSON.parse(e.init?.stdin ?? '{}') as { body?: unknown }).body
+      comments.push({ argv: [...e.argv], body, token: e.init?.env?.GH_TOKEN })
+      const posted: RunReply = { exitCode: 0, stdout: JSON.stringify({ html_url: `https://github.com/${issue[1]}/pull/${issue[2]}#issuecomment-${comments.length}`, body }) }
+
+      return Promise.resolve(posting.reply === null ? posted : posting.reply(body)).then(reply => out(reply.exitCode, reply.stdout ?? '', reply.stderr))
+    }
     if (e.argv[1] !== 'api') return out(1, '')
     const query = String(e.argv[4] ?? '').slice('query='.length)
     asked.push(query)
@@ -286,7 +299,7 @@ function fakeHost(
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth }
+  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth, comments, posting }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -2291,6 +2304,225 @@ test("a token gh gave once stands where it won't give it again, so a locked keyr
   expect(of(HUBOT_PR).error).toBe(undefined)
 })
 
+// ---- Comment ------------------------------------------------------------------------------
+
+const FIELD = `comment-text:${READY}`
+const POST = ['gh', 'api', '--method', 'POST', 'repos/acme/app/issues/21/comments', '--input', '-']
+
+// Watches #21 as `fixture` (a clean PR by default), `setup` shaping gh first, and draws the pane.
+async function commentCard($: Parameters<TestBody>[0], on: On, fixture = mergeable(), setup: (host: ReturnType<typeof fakeHost>) => void = () => {}) {
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  const host = fakeHost(on, clock, { [READY]: fixture })
+  setup(host)
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { ...host, clock, ui: await $.ui.mount({ ...PANE, surface: 'terminal' }) }
+}
+
+test('Comment opens a field saying who will post; Enter posts the text as that login, and the card links the comment', async ($, on) => {
+  const { ui, comments, queries } = await commentCard($, on)
+  const button = await ui.find({ key: `comment:${READY}` })
+  expect(button?.props.label).toBe('Comment')
+  expect(button?.props.dimColor).toBe(true)
+  expect(await ui.find({ key: FIELD })).toBeUndefined()
+
+  await ui.press({ key: `comment:${READY}` })
+  const field = await ui.find({ key: FIELD })
+  expect(field?.type).toBe('Input')
+  expect(field?.props.placeholder).toBe('Comment on #21 as me')
+  expect(field?.props.submitLabel).toBe('post')
+  expect(await ui.find({ key: `comment:${READY}` })).toBeUndefined()
+  expect(comments).toEqual([])
+
+  queries.length = 0
+  await ui.input({ key: FIELD, text: 'LGTM' })
+  // By the login's own token, the text on stdin only.
+  expect(comments).toEqual([{ argv: POST, body: 'LGTM', token: 'me-token' }])
+  expect(await ui.find({ text: /✓ Commented as me/ })).toBeDefined()
+  const link = (await ui.findAll({ type: 'Link' })).find(l => l.props.label === 'comment on #21 ↗')
+  expect(link?.props.href).toBe(`${READY}#issuecomment-1`)
+  // The field closes, Comment comes back, and GitHub is asked again at once.
+  expect(await ui.find({ key: FIELD })).toBeUndefined()
+  expect(await ui.find({ key: `comment:${READY}` })).toBeDefined()
+  expect(queries).toEqual([[READY]])
+  // Comment again: the last post's word goes, and the field starts empty.
+  await ui.press({ key: `comment:${READY}` })
+  expect(await ui.find({ text: /✓ Commented/ })).toBeUndefined()
+  expect((await ui.find({ key: FIELD }))?.props.value).toBe('')
+  await ui.unmount()
+})
+
+test('a text starting with @ or -, or holding newlines, posts as typed and never reaches argv', async ($, on) => {
+  const { ui, comments } = await commentCard($, on)
+  const texts = ['@octocat /retest', '--method=DELETE', '-F body=@/etc/passwd', 'first line\nsecond line\n']
+  for (const text of texts) {
+    await ui.press({ key: `comment:${READY}` })
+    await ui.input({ key: FIELD, text })
+  }
+  expect(comments.map(c => c.body)).toEqual(texts)
+  expect(comments.every(c => JSON.stringify(c.argv) === JSON.stringify(POST))).toBe(true)
+  await ui.unmount()
+})
+
+test('a comment posts as the login that sees the repo, and the field says so', async ($, on) => {
+  const { ui, comments } = await commentCard($, on, mergeable(), host => {
+    host.budget.logins = ['me', 'hubot']
+    host.sight.owners = { me: [] }
+  })
+  await ui.press({ key: `comment:${READY}` })
+  expect((await ui.find({ key: FIELD }))?.props.placeholder).toBe('Comment on #21 as hubot')
+  await ui.input({ key: FIELD, text: 'LGTM' })
+  expect(comments.map(c => c.token)).toEqual(['hubot-token'])
+  expect(await ui.find({ text: /✓ Commented as hubot/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a comment whose login gh gives no token for says so, posts nothing as another, and keeps the text", async ($, on) => {
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  // A round another session ran found acme is hubot's; gh gives this one no token for hubot.
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const prs = { [READY]: { at: NOON, pr: mergeable() } }
+  files.set(RESULTS, { text: JSON.stringify({ fetchedAt: NOON, nextAt: NOON + 60_000, prs, accounts: { acme: 'hubot' }, rate: null }), mtimeMs: NOON })
+  const host = fakeHost(on, clock, { [READY]: mergeable() }, files)
+  host.budget.logins = ['me', 'hubot']
+  host.auth.failToken.hubot = 5
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `comment:${READY}` })
+  await ui.input({ key: FIELD, text: 'LGTM' })
+  expect(host.comments).toEqual([])
+  expect(await ui.find({ text: /✗ Couldn't get hubot's gh token/ })).toBeDefined()
+  expect((await ui.find({ key: FIELD }))?.props.value).toBe('LGTM')
+  await ui.unmount()
+})
+
+test('an empty or blank field posts nothing and stays open', async ($, on) => {
+  const { ui, comments } = await commentCard($, on)
+  await ui.press({ key: `comment:${READY}` })
+  for (const text of ['', '   ', '\n\n']) await ui.input({ key: FIELD, text })
+  expect(comments).toEqual([])
+  expect(await ui.find({ key: FIELD })).toBeDefined()
+  expect(await ui.find({ text: /Commented|Couldn't comment|Posting/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a double Enter posts once; while it posts the card says so', async ($, on) => {
+  const gh = held<RunReply>({ exitCode: 0, stdout: JSON.stringify({ html_url: `${READY}#issuecomment-9` }) })
+  const { ui, comments, clock } = await commentCard($, on, mergeable(), host => (host.posting.reply = () => gh.promise))
+  await ui.press({ key: `comment:${READY}` })
+  const first = ui.input({ key: FIELD, text: 'LGTM' })
+  const second = ui.input({ key: FIELD, text: 'LGTM' })
+  await clock.advance(10)
+  expect(await ui.find({ text: '◌ Posting the comment…' })).toBeDefined()
+  expect(await ui.find({ key: FIELD })).toBeUndefined()
+  gh.release()
+  await Promise.all([first, second])
+
+  expect(comments.map(c => c.body)).toEqual(['LGTM'])
+  expect((await ui.findAll({ type: 'Link' })).find(l => l.props.label === 'comment on #21 ↗')?.props.href).toBe(`${READY}#issuecomment-9`)
+  await ui.unmount()
+})
+
+test("a comment GitHub refuses says why, keeps the text in the field, and Enter tries again", async ($, on) => {
+  let isLocked = true
+  const locked = { exitCode: 1, stdout: '{"message":"Unable to create comment because issue is locked."}', stderr: 'gh: Unable to create comment because issue is locked. (HTTP 403)\n' }
+  const { ui, comments } = await commentCard($, on, mergeable(), host => {
+    host.posting.reply = body => (isLocked ? locked : { exitCode: 0, stdout: JSON.stringify({ html_url: `${READY}#issuecomment-2`, body }) })
+  })
+  await ui.press({ key: `comment:${READY}` })
+  await ui.input({ key: FIELD, text: 'LGTM' })
+  expect(await ui.find({ text: "✗ Couldn't comment: Unable to create comment because issue is locked." })).toBeDefined()
+  expect((await ui.find({ key: FIELD }))?.props.value).toBe('LGTM')
+
+  isLocked = false
+  await ui.input({ key: FIELD, text: 'LGTM' })
+  expect(comments.map(c => c.body)).toEqual(['LGTM', 'LGTM'])
+  expect(await ui.find({ text: /Couldn't comment/ })).toBeUndefined()
+  expect(await ui.find({ text: /✓ Commented as me/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Cancel closes the field and drops its text, posting nothing', async ($, on) => {
+  const { ui, comments } = await commentCard($, on)
+  await ui.press({ key: `comment:${READY}` })
+  await ui.input({ key: FIELD, text: 'half a thou', kind: 'change' })
+  await ui.press({ key: `comment-cancel:${READY}` })
+  expect(comments).toEqual([])
+  expect(await ui.find({ key: FIELD })).toBeUndefined()
+  expect(await ui.find({ key: `comment:${READY}` })).toBeDefined()
+  await ui.press({ key: `comment:${READY}` })
+  expect((await ui.find({ key: FIELD }))?.props.value).toBe('')
+  await ui.unmount()
+})
+
+test("what is typed survives the pane's redraws, a poll round's too; dismissing the card drops it", async ($, on) => {
+  const { ui, clock, comments } = await commentCard($, on)
+  await ui.press({ key: `comment:${READY}` })
+  await ui.input({ key: FIELD, text: 'half a thought', kind: 'change' })
+  await clock.advance(60_000)
+  await ui.press({ key: 'refresh' })
+  expect((await ui.find({ key: FIELD }))?.props.value).toBe('half a thought')
+  await ui.unmount()
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await again.find({ key: FIELD }))?.props.value).toBe('half a thought')
+  expect(comments).toEqual([])
+
+  await again.press({ key: `dismiss:${READY}` })
+  await again.unmount()
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const back = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await back.find({ key: FIELD })).toBeUndefined()
+  await back.press({ key: `comment:${READY}` })
+  expect((await back.find({ key: FIELD }))?.props.value).toBe('')
+  await back.unmount()
+})
+
+test('Comment comes last of the buttons, after the hand-offs, and a draft has it too', async ($, on) => {
+  const failing = mergeable({ mergeStateStatus: 'BLOCKED', statusCheckRollup: [check('build', 'COMPLETED', 'FAILURE')] })
+  const { ui } = await commentCard($, on, failing)
+  const row = (await ui.findAll({ type: 'Box' })).find(box => box.props.columnGap === 2 && JSON.stringify(box).includes(`comment:${READY}`))
+  expect(JSON.stringify(row).indexOf(`fix:${READY}`)).toBeLessThan(JSON.stringify(row).indexOf(`comment:${READY}`))
+  await ui.unmount()
+})
+
+test('a draft PR offers Comment', async ($, on) => {
+  const { ui } = await commentCard($, on, mergeable({ isDraft: true, mergeStateStatus: 'DRAFT' }))
+  expect(await ui.find({ text: /DRAFT/ })).toBeDefined()
+  expect(await ui.find({ key: `comment:${READY}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a merged or closed card offers no Comment', async ($, on) => {
+  const CLOSED = 'https://github.com/acme/api/pull/8'
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  fakeHost(on, clock, { [MERGED]: GH[MERGED], [CLOSED]: pr(CLOSED, { state: 'CLOSED' }), [RUNNING]: GH[RUNNING] })
+  await $.command.run({ command: 'pr-watch', args: `${MERGED} ${CLOSED} ${RUNNING}`, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /CLOSED/ })).toBeDefined()
+  expect(await ui.find({ key: `comment:${MERGED}` })).toBeUndefined()
+  expect(await ui.find({ key: `comment:${CLOSED}` })).toBeUndefined()
+  expect(await ui.find({ key: `comment:${RUNNING}` })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the desktop offers Comment and its field as the terminal does', async ($, on) => {
+  const { ui, comments } = await commentCard($, on)
+  await ui.unmount()
+  const desk = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await desk.press({ key: `comment:${READY}` })
+  await desk.input({ key: FIELD, text: '/retest' })
+  expect(comments.map(c => c.body)).toEqual(['/retest'])
+  expect(await desk.find({ text: /✓ Commented as me/ })).toBeDefined()
+  await desk.unmount()
+})
+
 // ---- The band layout ----------------------------------------------------------------------
 
 const BAND = {
@@ -2449,6 +2681,14 @@ test('in the band layout new PRs never open the pane; /pr-watch and Open pane do
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   await ui.press({ key: 'band-open' })
   expect(opens[1]).toEqual({ id: 'pr-watch', focus: true })
+  await ui.unmount()
+})
+
+test('the band has no Comment: commenting stays in the pane', IN_BAND, async ($, on) => {
+  await bandSession($, on, [RUNNING, FAILING])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', requestId: 'band' })
+  expect(lines(await ui.drawn()).join('\n')).not.toMatch(/Comment/)
+  expect(await ui.find({ type: 'Input' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -2891,6 +3131,21 @@ test('tide: only a moving card animates, every other frame, and nothing is blitt
   expect(blits).toHaveLength(1)
   await ui.unmount()
 })
+
+for (const theme of ['tide', 'aurora'] as const) {
+  test(`${theme}: Comment and its field sit on the rows under the art, on the card's glass`, { options: { theme } }, async ($, on) => {
+    await tideSession($, on, [FAILING])
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.press({ key: `comment:${FAILING}` })
+    expect((await ui.find({ key: `comment-text:${FAILING}` }))?.props.placeholder).toBe('Comment on #13 as me')
+    const below = (await ui.findAll({ type: 'Box' })).find(box => box.props.paddingX === 1 && JSON.stringify(box).includes('open #13 ↗'))
+    expect(below?.props.backgroundColor).toBeDefined()
+    expect(JSON.stringify(below)).toContain(`comment-text:${FAILING}`)
+    expect(JSON.stringify(below)).toContain(`comment-cancel:${FAILING}`)
+    expect(rasterRows((await ui.find({ key: `art:${FAILING}` })) as never).join('\n')).not.toMatch(/Comment/)
+    await ui.unmount()
+  })
+}
 
 test('tide off the terminal: the same rows as text over the glass, every link and button kept', TIDE, async ($, on) => {
   await tideSession($, on, [RUNNING, FAILING])
