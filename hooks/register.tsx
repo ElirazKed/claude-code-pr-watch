@@ -911,17 +911,33 @@ async function setComment($: EngineInterface, url: string, ask: CommentAsk | nul
   })
 }
 
+// Open or Cancel from a frame drawn before a post began (a quick click, another surface) waits
+// on it: overwriting its row would drop what it came to, and let a second Enter post again.
+// False: a post holds the row, nothing changed.
+async function setIdleComment($: EngineInterface, url: string, ask: CommentAsk | null) {
+  const at = await $.clock.now()
+  let isSet = false
+  await update($, commenting, all => {
+    isSet = !isBusy(all[url]?.busy, at)
+    if (!isSet) return all
+    const { [url]: _, ...rest } = all
+
+    return ask === null ? rest : { ...rest, [url]: ask }
+  })
+
+  return isSet
+}
+
 // Comment opens the field, the last post's word gone, and moves the keys onto it where the pane
 // holds them (a click, ctrl+x tab); where it doesn't, the field takes them once it does.
 async function openComment($: EngineInterface, pr: TrackedPr) {
-  await setComment($, pr.url, { isOpen: true })
+  if (!(await setIdleComment($, pr.url, { isOpen: true }))) return
   void $.ui.focus({ requestId: PANE, key: commentKey(pr.url) }).catch(() => undefined)
 }
 
 // Cancel: the field closes and its text goes, nothing posted.
 async function closeComment($: EngineInterface, url: string) {
-  drafts.delete(url)
-  await setComment($, url, null)
+  if (await setIdleComment($, url, null)) drafts.delete(url)
 }
 
 // Enter in the field posts its text as the login the poller found sees the repo, by that login's
@@ -931,7 +947,6 @@ async function closeComment($: EngineInterface, url: string) {
 // the text stays in the field and the card says why, to try again.
 async function postComment($: EngineInterface, pr: TrackedPr, text: string) {
   if (!isPostable(text)) return
-  drafts.set(pr.url, text)
   const busy = { at: await $.clock.now() }
   let isClaimed = false
   await update($, commenting, all => {
@@ -941,6 +956,7 @@ async function postComment($: EngineInterface, pr: TrackedPr, text: string) {
     return isClaimed ? { ...all, [pr.url]: { isOpen: true, busy } } : all
   })
   if (!isClaimed) return
+  drafts.set(pr.url, text)
   let ask: CommentAsk = { isOpen: true }
   try {
     const login = await pressLogin($, pr)
@@ -952,7 +968,8 @@ async function postComment($: EngineInterface, pr: TrackedPr, text: string) {
       ask = res.exitCode === 0 ? { done: { url: commentUrl(res.stdout) ?? pr.url, login } } : { isOpen: true, error: commentError(res.stderr || res.stdout, login) }
     }
   } catch {
-    ask = { isOpen: true, error: "Couldn't comment: gh api did not finish" }
+    // Cut off, not refused: GitHub may have taken it, so a retry could post it twice.
+    ask = { isOpen: true, error: "Couldn't tell whether it posted: gh api did not finish. Check the PR before trying again" }
   }
   if (ask.done !== undefined) drafts.delete(pr.url)
   // Only while the row is still this post's: not on a dismissed card.
@@ -1631,8 +1648,15 @@ export const register: Register = (on, options) => {
     const retries = await read($, retrying)
     const comments = await read($, commenting)
     // The login an open field will post as, for its placeholder.
+    // Only for a field that draws (an open card, a surface with Input), and results.json and
+    // gh's logins read once for all of them, not once per card on every redraw.
     const commentAs = new Map<string, string>()
-    for (const pr of list) if (comments[pr.url]?.isOpen === true) commentAs.set(pr.url, await pressLogin($, pr))
+    const fields = Input === null ? [] : list.filter(pr => pr.state === 'OPEN' && comments[pr.url]?.isOpen === true)
+    if (fields.length > 0) {
+      const { accounts } = await readShared($)
+      const known = await logins($)
+      for (const pr of fields) commentAs.set(pr.url, loginFor(accounts, ownerOf(pr), known))
+    }
     const upgrade = isNoticeOn ? await read($, newer) : null
     const budget = await read($, limits)
     const isHelpOpen = await read($, ghHelp)
