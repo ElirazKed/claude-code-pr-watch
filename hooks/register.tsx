@@ -38,7 +38,9 @@ import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine 
 import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
-import { NOT_FOUND, failedEntry, isUnreachable, keptEntries } from './cache'
+import { failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
+import { NO_LOGINS, everyLogin, isDue, loginFor, loginsOf, notFoundAs, tokenError, untriedBy } from './accounts'
+import type { Logins, Token } from './accounts'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
 import type { Bar, Rates } from './rate'
@@ -59,6 +61,8 @@ const refused = atom({ plugin: 'pr-watch', key: 'refused' } as const, {})
 const fixing = atom({ plugin: 'pr-watch', key: 'fixing' } as const, {})
 const addressing = atom({ plugin: 'pr-watch', key: 'addressing' } as const, {})
 const resolving = atom({ plugin: 'pr-watch', key: 'resolving' } as const, {})
+// Try again on a not-found card, while every login is asked.
+const retrying = atom({ plugin: 'pr-watch', key: 'retrying' } as const, {})
 // A newer pr-watch than this one, for the footer.
 const newer = atom({ plugin: 'pr-watch', key: 'newer' } as const, null)
 // GitHub's budget per login and a hold, for the gh meter.
@@ -160,13 +164,22 @@ const PRUNE_MS = 86_400_000
 const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 let homeDir: string | null | undefined
 let dir: string | null = null
-let loginsCache: Promise<{ active: string; others: string[] }> | null = null
-const tokens = new Map<string, Promise<string | null>>()
+// gh's logins as `gh auth status` last listed them, when gh was last asked and whether it
+// answered (accounts.ts's isDue says when it is asked again), and the reading under way, so
+// callers at once share one. A reading that lists none is never kept: the last good one stands.
+let loginsKept: Logins = NO_LOGINS
+let loginsAsked: { at: number; isOk: boolean } | undefined
+let loginsAsk: Promise<Logins> | null = null
+// Each login's token as gh last gave it, and when; when gh last wouldn't, and what the card
+// says then (isDue again, for both); and the asks under way.
+const tokens = new Map<string, { at: number; token: string }>()
+const tokenMisses = new Map<string, { at: number; error: string }>()
+const tokenAsks = new Map<string, Promise<Token>>()
 let prunedAt = 0
 
 const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, rates: {}, latest: { version: null, checkedAt: 0 } })
 
-async function gh($: EngineInterface, argv: string[], token?: string | null, cwd?: string, timeoutMs = GH_MS) {
+async function gh($: EngineInterface, argv: string[], token?: string, cwd?: string, timeoutMs = GH_MS) {
   return $.process.run(['gh', ...argv], {
     cwd,
     timeoutMs,
@@ -246,36 +259,75 @@ async function releaseLease($: EngineInterface) {
   await writeJson($, `${await root($)}/lease.json`, { owner: INSTANCE, until: 0 })
 }
 
-async function logins($: EngineInterface) {
-  loginsCache ??= (async () => {
-    const status = await gh($, ['auth', 'status', '--hostname', 'github.com'])
-    const text = `${status.stdout}\n${status.stderr}`
-    const all = [...text.matchAll(/account (\S+)[^\n]*\n\s*-\s*Active account: (true|false)/g)]
-    const active = all.find(m => m[2] === 'true')?.[1] ?? ''
+// gh's logins, read again every few minutes (a login added or switched to shows): the last
+// good reading stands meanwhile, and is awaited only where there is none yet, or with
+// `isFresh` (before a round calls a PR not found).
+async function logins($: EngineInterface, isFresh = false, timeoutMs = GH_MS): Promise<Logins> {
+  // The time first: callers at once then see each other's ask, never start one each.
+  const at = await $.clock.now()
+  if (loginsAsk === null && (isFresh || isDue(loginsAsked, at))) {
+    loginsAsk = (async () => {
+      const status = await gh($, ['auth', 'status', '--hostname', 'github.com'], undefined, undefined, timeoutMs).catch(() => null)
+      const read = status === null ? null : loginsOf(`${status.stdout}\n${status.stderr}`)
+      loginsAsked = { at: await $.clock.now(), isOk: read !== null }
+      if (read !== null) loginsKept = read
 
-    return { active, others: all.map(m => m[1] ?? '').filter(login => login !== '' && login !== active) }
-  })()
-
-  return loginsCache
-}
-
-// The active account needs no token; another account's comes from gh, once per process.
-async function tokenFor($: EngineInterface, login: string): Promise<string | null> {
-  if (login === '' || login === (await logins($)).active) return null
-  if (!tokens.has(login)) {
-    tokens.set(
-      login,
-      gh($, ['auth', 'token', '--hostname', 'github.com', '--user', login]).then(r => (r.exitCode === 0 ? r.stdout.trim() : null)),
-    )
+      return loginsKept
+    })().finally(() => (loginsAsk = null))
   }
 
-  return (await tokens.get(login)) ?? null
+  return loginsAsk !== null && (isFresh || loginsKept === NO_LOGINS) ? loginsAsk : loginsKept
+}
+
+// A login's own token, from gh, never written anywhere. Every call made as a login carries
+// it, the active one's too: gh's active account is whichever was switched to last, so a call
+// without a token may run as anyone. A token is asked of gh again every few minutes (a login
+// logged in again has a new one); where gh won't give it then, the last one it gave stands,
+// and where it never gave one, that is said, never stood in for.
+async function tokenFor($: EngineInterface, login: string, timeoutMs = GH_MS): Promise<Token> {
+  if (login === '') return { error: tokenError('') }
+  const at = await $.clock.now()
+  const good = tokens.get(login)
+  const miss = tokenMisses.get(login)
+  const isKept = (good !== undefined && !isDue({ at: good.at, isOk: true }, at)) || (miss !== undefined && !isDue({ at: miss.at, isOk: false }, at))
+  if (isKept && !tokenAsks.has(login)) return good !== undefined ? { token: good.token } : { error: miss?.error ?? tokenError(login) }
+  const asking =
+    tokenAsks.get(login) ??
+    (async (): Promise<Token> => {
+      const res = await gh($, ['auth', 'token', '--hostname', 'github.com', '--user', login], undefined, undefined, timeoutMs).catch(() => null)
+      const said = res?.stdout.trim() ?? ''
+      const doneAt = await $.clock.now()
+      if (res !== null && res.exitCode === 0 && said !== '') {
+        tokens.set(login, { at: doneAt, token: said })
+        tokenMisses.delete(login)
+
+        return { token: said }
+      }
+      const error = tokenError(login)
+      tokenMisses.set(login, { at: doneAt, error })
+      const why = res === null ? 'gh auth token did not finish' : res.stderr.trim().split('\n')[0] || `gh auth token exited ${res.exitCode}`
+      const http = { status: null, headers: {}, body: '' }
+      await logFailure($, { login, size: 0, ms: doneAt - at, http, failure: 'other', error: `${error}: ${why}` })
+      const last = tokens.get(login)
+
+      return last !== undefined ? { token: last.token } : { error }
+    })().finally(() => tokenAsks.delete(login))
+  tokenAsks.set(login, asking)
+
+  return asking
+}
+
+// The login a press acts as: the one the poller found sees the owner's repos, else the active
+// one, which polls the owners no other login was found for. Never another: a press whose
+// login has no token says so on the card.
+async function pressLogin($: EngineInterface, pr: TrackedPr): Promise<string> {
+  return loginFor((await readShared($)).accounts, ownerOf(pr), await logins($))
 }
 
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
 // One batch's call, timed, and what GitHub said: the status and headers, and the reply.
-async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string | null, timeoutMs = GH_MS) {
+async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string, timeoutMs = GH_MS) {
   const startedAt = await $.clock.now()
   // A call past its timeout throws: it fails as a timeout, rather than losing the round.
   const res = await gh($, argv, token, undefined, timeoutMs).catch(() => ({
@@ -291,7 +343,7 @@ async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string
 async function failureIn($: EngineInterface, login: string, size: number, call: { http: Http; reply: { error: string | null }; ms: number }) {
   if (call.reply.error === null) return null
   const failure: CallFailure = failureOf(call.reply.error, call.http)
-  await logFailure($, { login: login || (await logins($)).active, size, ms: call.ms, http: call.http, failure, error: call.reply.error })
+  await logFailure($, { login, size, ms: call.ms, http: call.http, failure, error: call.reply.error })
 
   return failure
 }
@@ -317,9 +369,9 @@ async function logFailure($: EngineInterface, call: CallLog) {
 // it and may take no more than is left (callBudget); the rest are `left` for the next round,
 // as they were. A secondary limit stops the asking (`waitMs`: how long every session holds
 // off), and spent points stop this login's. Neither is a card's error: the gh meter says it
-// (rate.ts), and the PRs keep what they have.
+// (rate.ts), and the PRs keep what they have. Every batch goes as `login`, with its token; where
+// that won't come, nothing is asked, and the PRs fail as on a timeout: none is called not found.
 async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
-  const token = await tokenFor($, login)
   const out = {
     found: new Map<string, GhPr>(),
     missing: [] as PrRef[],
@@ -332,6 +384,19 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
     isLatestAsked: false,
     waitMs: null as number | null,
   }
+  // The token, too, comes inside the lease: a keyring that hangs never outlives it.
+  const tokenBudget = callBudget(until, await $.clock.now(), GH_MS)
+  if (tokenBudget === null) {
+    out.left.push(...refs)
+
+    return out
+  }
+  const token = await tokenFor($, login, tokenBudget)
+  if ('error' in token) {
+    for (const ref of refs) out.failed.set(ref.url, token.error)
+
+    return out
+  }
   const parts = chunks(refs)
   for (const [i, part] of parts.entries()) {
     const budget = callBudget(until, await $.clock.now(), GH_MS)
@@ -342,13 +407,13 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
     }
     const argv = ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`, '-i']
     out.isLatestAsked ||= withLatest && i === 0
-    let call = await askBatch($, part, argv, token, budget)
+    let call = await askBatch($, part, argv, token.token, budget)
     let failure = await failureIn($, login, part.length, call)
     if (failure === 'timeout') {
       const retry = callBudget(until, (await $.clock.now()) + RETRY_MS, GH_MS)
       if (retry !== null) {
         await $.clock.sleep(RETRY_MS)
-        call = await askBatch($, part, argv, token, retry)
+        call = await askBatch($, part, argv, token.token, retry)
         failure = await failureIn($, login, part.length, call)
       }
     }
@@ -404,57 +469,86 @@ async function fetchRefs(
   let latest: string | null = null
   let isAsking = withLatest
   let waitMs: number | null = null
-  const { active, others } = await logins($)
-  // The active account polls the owners no other account was found for.
-  const nameOf = (login: string) => login || active
+  const known = await logins($)
   const isLow = (login: string) => isRound && lowUntil(seen, login, at) !== null
   const saw = (login: string, r: { rate: RateLimit | null; rateAt: number }) => {
     const graphql = bucketOf(r.rate, r.rateAt)
-    if (graphql !== null) seen = withSeen(seen, nameOf(login), { graphql })
+    if (graphql !== null) seen = withSeen(seen, login, { graphql })
   }
+  // The logins that answered "not found" for each PR, by url: the card names them.
+  const missedBy = new Map<string, string[]>()
+  const missedAs = (login: string, refs: readonly PrRef[]) => refs.forEach(ref => missedBy.set(ref.url, [...(missedBy.get(ref.url) ?? []), login]))
+  // The active account polls the owners no other account was found for, and those whose
+  // login has logged out since.
   const byLogin = new Map<string, PrRef[]>()
-  for (const ref of refs) byLogin.set(accounts[ownerOf(ref)] ?? '', [...(byLogin.get(accounts[ownerOf(ref)] ?? '') ?? []), ref])
-  const needed = [...new Set([...byLogin.keys()].map(nameOf))]
+  for (const ref of refs) {
+    const login = loginFor(accounts, ownerOf(ref), known)
+    byLogin.set(login, [...(byLogin.get(login) ?? []), ref])
+  }
+  const needed = [...byLogin.keys()]
 
   let missing: PrRef[] = []
   for (const [login, group] of byLogin) {
     if (waitMs !== null) break
-    if (isLow(nameOf(login))) continue
+    if (isLow(login)) continue
     const r = await query($, group, login, until, isAsking)
     if (r.isLatestAsked) isAsking = false
     waitMs = r.waitMs
     saw(login, r)
-    r.found.forEach((pr, url) => found.set(url, pr))
+    r.found.forEach((pr, url) => {
+      found.set(url, pr)
+      // Remembered as a login that has logged out, and seen as this one: this one from now on.
+      const ref = group.find(x => x.url === url)
+      const owner = ref === undefined ? '' : ownerOf(ref)
+      if (owner !== '' && accounts[owner] !== undefined && accounts[owner] !== login) accounts[owner] = login
+    })
     r.failed.forEach((error, url) => errors.set(url, { error, isMiss: false }))
+    missedAs(login, r.missing)
     missing.push(...r.missing)
     latest = r.latest ?? latest
   }
   if (missing.length > 0 && waitMs === null) {
-    // "Not found" only once every other account was asked and answered: one that failed, ran
-    // out of time or is low on points might see them yet.
+    // "Not found" only once every logged-in account was asked and answered: one that failed,
+    // ran out of time, is low on points or gave no token might see them yet. Before any is
+    // called that, gh's logins are read again, so one logged in since is asked too.
     let isSure = true
-    for (const login of [active, ...others]) {
-      const untried = missing.filter(ref => (accounts[ownerOf(ref)] ?? '') !== login && (login !== active || ownerOf(ref) in accounts))
-      if (untried.length === 0) continue
-      if (isLow(login)) {
-        isSure = false
-
-        continue
+    let order = everyLogin(known)
+    for (const isAgain of [false, true]) {
+      if (isAgain) {
+        const budget = callBudget(until, await $.clock.now(), GH_MS)
+        if (missing.length === 0 || waitMs !== null || !isSure || budget === null) break
+        order = everyLogin(await logins($, true, budget))
       }
-      const r = await query($, untried, login, until)
-      waitMs = r.waitMs
-      saw(login, r)
-      if (r.failed.size > 0 || r.left.length > 0) isSure = false
-      r.found.forEach((pr, url) => {
-        found.set(url, pr)
-        const ref = untried.find(x => x.url === url)
-        if (ref !== undefined) accounts[ownerOf(ref)] = login
-      })
-      missing = missing.filter(ref => !r.found.has(ref.url))
-      if (missing.length === 0 || waitMs !== null) break
+      for (const login of order) {
+        const untried = untriedBy(missing, missedBy, login)
+        if (untried.length === 0) continue
+        if (isLow(login)) {
+          isSure = false
+
+          continue
+        }
+        const r = await query($, untried, login, until)
+        waitMs = r.waitMs
+        saw(login, r)
+        if (r.failed.size > 0 || r.left.length > 0) isSure = false
+        // A PR never read says why it still isn't: as a failure, which passes.
+        r.failed.forEach((error, url) => {
+          if (!errors.has(url)) errors.set(url, { error, isMiss: false })
+        })
+        missedAs(login, r.missing)
+        r.found.forEach((pr, url) => {
+          found.set(url, pr)
+          errors.delete(url)
+          const ref = untried.find(x => x.url === url)
+          if (ref !== undefined) accounts[ownerOf(ref)] = login
+        })
+        missing = missing.filter(ref => !r.found.has(ref.url))
+        if (missing.length === 0 || waitMs !== null) break
+      }
     }
     // Held by a secondary limit, the rest were not all asked: they wait, as they were.
-    if (waitMs === null && isSure) for (const ref of missing) errors.set(ref.url, { error: NOT_FOUND, isMiss: true })
+    // With gh's logins unread, the others were never asked: no PR is called not found.
+    if (waitMs === null && isSure && order.length > 0) for (const ref of missing) errors.set(ref.url, { error: notFoundAs(missedBy.get(ref.url) ?? []), isMiss: true })
   }
 
   return { found, errors, rates: seen, needed, latest, waitMs, asked: withLatest && !isAsking }
@@ -464,13 +558,14 @@ async function fetchRefs(
 // and the points again, for the gh meter. It counts against no limit. Only a round asks, in
 // what is left of its lease, never every session; asked counts as checked, answered or not.
 async function askRest($: EngineInterface, rates: Rates, at: number, until: number): Promise<Rates> {
-  const { active, others } = await logins($)
   let seen = rates
-  for (const login of [...new Set([active, ...others])]) {
+  for (const login of everyLogin(await logins($))) {
     if (!isRestDue(seen, login, at)) continue
     const budget = callBudget(until, await $.clock.now(), REST_CALL_MS)
     if (budget === null) break
-    const res = await gh($, ['api', 'rate_limit'], await tokenFor($, login), undefined, budget).catch(() => null)
+    // A login gh gives no token for is not asked as another: it counts as asked, unanswered.
+    const token = await tokenFor($, login, budget)
+    const res = 'token' in token ? await gh($, ['api', 'rate_limit'], token.token, undefined, budget).catch(() => null) : null
     const read = res !== null && res.exitCode === 0 ? restOf(res.stdout, await $.clock.now()) : null
     seen = withSeen(seen, login, { ...read, askedAt: at })
   }
@@ -564,17 +659,21 @@ async function apply($: EngineInterface, shared: Shared) {
   const at = await $.clock.now()
   const list = (await read($, prs)).map(full)
   // The person's own reviews never toast, whichever of their gh accounts wrote them.
-  const { active, others } = await logins($)
+  const mine = everyLogin(await logins($))
   const moved: string[] = []
   const next = list.map(current => {
     const entry = shared.prs[current.url]
     if (entry === undefined) return current
     const error = entry.error ?? null
+    // Never read, as no login could see it: the card offers Try again.
+    const isNotFound = isMiss(entry)
     // No newer data, yet the error may have come or gone: a failure that lasted keeps the
     // entry's time, so "checked 2m ago" stays the age of what the card shows.
-    if (current.checkedAt !== null && entry.at <= current.checkedAt) return error === current.error ? current : { ...current, error }
-    if (entry.pr === undefined) return { ...current, error, checkedAt: current.checkedAt ?? entry.at }
-    const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, [active, ...others], entry.pr.author?.login)
+    if (current.checkedAt !== null && entry.at <= current.checkedAt) {
+      return error === current.error && isNotFound === current.isNotFound ? current : { ...current, error, isNotFound }
+    }
+    if (entry.pr === undefined) return { ...current, error, isNotFound, checkedAt: current.checkedAt ?? entry.at }
+    const { fresh, seen } = newReviews(entry.pr, current.reviewSeen, mine, entry.pr.author?.login)
     const pr: TrackedPr = {
       ...current,
       title: entry.pr.title,
@@ -586,6 +685,7 @@ async function apply($: EngineInterface, shared: Shared) {
       reviewSeen: seen,
       checkedAt: entry.at,
       error,
+      isNotFound: false,
     }
     const said = reviewToasts(fresh, pr.number)
     for (const text of said) $.ui.toast(text)
@@ -600,7 +700,7 @@ async function apply($: EngineInterface, shared: Shared) {
   await update($, prs, () => next)
   await update($, now, () => at)
   await update($, limits, current => {
-    const shown = limitsOf(shared, [active, ...others])
+    const shown = limitsOf(shared, mine)
 
     return JSON.stringify(current) === JSON.stringify(shown) ? current : shown
   })
@@ -700,6 +800,32 @@ async function fetchNow($: EngineInterface, refs: PrRef[]) {
   await apply($, await publish($, refs, await $.clock.now()))
 }
 
+// Try again on a card no login could see: asked now as every login, the five-minute skip
+// (cache.ts) notwithstanding. Found, the card fills and the mark goes; not, the card says again
+// who was asked, gh's logins read afresh first (fetchRefs). A second press while it asks does
+// nothing.
+async function tryAgain($: EngineInterface, pr: TrackedPr) {
+  const busy = { at: await $.clock.now() }
+  let isClaimed = false
+  await update($, retrying, all => {
+    isClaimed = !isBusy(all[pr.url], busy.at)
+
+    return isClaimed ? { ...all, [pr.url]: busy } : all
+  })
+  if (!isClaimed) return
+  try {
+    await fetchNow($, [refOf(pr)])
+  } catch {
+    // The card says what it said: the button comes back to press again.
+  } finally {
+    await update($, retrying, all => {
+      const { [pr.url]: _, ...rest } = all
+
+      return all[pr.url]?.at === busy.at ? rest : all
+    })
+  }
+}
+
 async function setAsk($: EngineInterface, url: string, ask: MergeAsk | null) {
   await update($, merging, all => {
     const { [url]: _, ...rest } = all
@@ -735,21 +861,25 @@ const BUSY: Record<MergeRun['action'], string> = {
   'cancel-auto': 'Cancelling auto-merge…',
 }
 
-// Runs gh pr merge as the account the poller found sees the repo (its token, never kept),
-// then asks GitHub again at once so the card shows what happened.
+// Runs gh pr merge as the account the poller found sees the repo (its token, never written
+// anywhere), and only as that one, then asks GitHub again at once so the card shows what
+// happened.
 async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   const method = run.action === 'cancel-auto' ? undefined : run.method
   const busy = { action: run.action, at: await $.clock.now() }
   if (!(await claimMerge($, pr.url, { method, busy }))) return
   let ask: MergeAsk = { method }
   try {
-    const login = (await readShared($)).accounts[ownerOf(pr)] ?? ''
-    const res = await gh($, mergeArgv(pr.url, run), await tokenFor($, login))
-    if (res.exitCode !== 0) {
-      const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
-      ask = { method: isMethodRefused ? undefined : method, error: message }
-      if (isMethodRefused && method !== undefined) {
-        await update($, refused, all => ({ ...all, [pr.repo]: [...new Set([...(all[pr.repo] ?? []), method])] }))
+    const got = await tokenFor($, await pressLogin($, pr))
+    if ('error' in got) ask = { method, error: got.error }
+    else {
+      const res = await gh($, mergeArgv(pr.url, run), got.token)
+      if (res.exitCode !== 0) {
+        const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
+        ask = { method: isMethodRefused ? undefined : method, error: message }
+        if (isMethodRefused && method !== undefined) {
+          await update($, refused, all => ({ ...all, [pr.repo]: [...new Set([...(all[pr.repo] ?? []), method])] }))
+        }
       }
     }
   } catch {
@@ -819,7 +949,14 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
   const busy = { at: await $.clock.now() }
   if (!(await claimHandoff($, 'fix', pr.url, busy))) return
   try {
-    const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
+    const got = await tokenFor($, await pressLogin($, pr))
+    // No token for that login: nothing is read as another one.
+    if ('error' in got) {
+      await settleHandoff($, 'fix', pr.url, busy.at, { error: got.error })
+
+      return
+    }
+    const { token } = got
     let failures: Failure[]
     let problem: string | null = null
     try {
@@ -868,8 +1005,13 @@ async function collectThreads($: EngineInterface, pr: TrackedPr) {
   const busy = { at: await $.clock.now() }
   if (!(await claimHandoff($, 'address', pr.url, busy))) return
   try {
-    const token = await tokenFor($, (await readShared($)).accounts[ownerOf(pr)] ?? '')
-    const res = await gh($, ['api', 'graphql', '-f', `query=${threadsQuery(refOf(pr))}`], token)
+    const got = await tokenFor($, await pressLogin($, pr))
+    if ('error' in got) {
+      await settleHandoff($, 'address', pr.url, busy.at, { error: got.error })
+
+      return
+    }
+    const res = await gh($, ['api', 'graphql', '-f', `query=${threadsQuery(refOf(pr))}`], got.token)
     const reply = parseThreads(res.stdout, res.stderr)
     if ('error' in reply) {
       await settleHandoff($, 'address', pr.url, busy.at, { error: `Couldn't read the review threads: ${reply.error}` })
@@ -1216,6 +1358,11 @@ export const register: Register = (on, options) => {
   ownVersion = undefined
   isPaneDrawn = false
   toldVersion = null
+  // gh's logins and their tokens are read again: one may have been added or logged out.
+  loginsKept = NO_LOGINS
+  loginsAsked = undefined
+  tokens.clear()
+  tokenMisses.clear()
 
   // A change in /config applies from the next round, no reload needed.
   on('config.set', async ($, e, next) => {
@@ -1360,9 +1507,11 @@ export const register: Register = (on, options) => {
     const touch = touched(String(e.tool), e as unknown as Record<string, unknown>, ran.text ?? '')
     let { acted, read: seen } = touch
     if (touch.resolve !== null && e.tool === 'Bash' && !ran.isError) {
-      // `git push`, `gh pr checks`: ask gh which PR that was, from the same directory.
+      // `git push`, `gh pr checks`: ask gh which PR that was, from the same directory, as
+      // Claude's own gh call ran (no token of ours). It only names the PR: rounds read it as
+      // the login that sees it.
       const num = shellCode(e.command).match(/\bgh\s+pr\s+[\w-]+\s+#?(\d+)\b/)?.[1]
-      const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], null, cwdOf(e.command))
+      const res = await gh($, ['pr', 'view', ...(num ? [num] : []), '--json', 'url', '-q', '.url'], undefined, cwdOf(e.command))
       const refs = res.exitCode === 0 ? findPrUrls(res.stdout) : []
       if (touch.resolve === 'acted') acted = refs
       else seen = refs
@@ -1405,6 +1554,7 @@ export const register: Register = (on, options) => {
     const asks = await read($, merging)
     const refusedBy = await read($, refused)
     const handoffs = await readHandoffs($)
+    const retries = await read($, retrying)
     const upgrade = isNoticeOn ? await read($, newer) : null
     const budget = await read($, limits)
     const isHelpOpen = await read($, ghHelp)
@@ -1709,6 +1859,18 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // A card no login could see: its error names the logins asked; Try again asks them all now.
+    const notFoundRow = (pr: TrackedPr) => {
+      if (!pr.isNotFound) return null
+      if (isBusy(retries[pr.url], at)) return <Text color={ink('suggestion')}>◌ Asking every gh login…</Text>
+
+      return (
+        <Box>
+          <Button key={`retry:${pr.url}`} label="Try again" onPress={() => tryAgain($, pr)} />
+        </Box>
+      )
+    }
+
     // Who reviewed, and the threads still open: "✓ alice approved · 💬 nadav commented" and
     // "3 unresolved threads (1 outdated)", each only when there is something to say.
     const reviewLines = (reviews: Reviews, threads: string) => {
@@ -1889,6 +2051,7 @@ export const register: Register = (on, options) => {
               ⚠ {pr.error}
             </Text>
           )}
+          {notFoundRow(pr)}
           {pr.state === 'OPEN' && handoffRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
 
@@ -1906,6 +2069,7 @@ export const register: Register = (on, options) => {
       const glass = variant.tones[pr.tone].fill ?? undefined
       const below = (
         <Box flexDirection="column" paddingX={1} backgroundColor={glass}>
+          {notFoundRow(pr)}
           {pr.state === 'OPEN' && handoffRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
           {linkRow(pr)}

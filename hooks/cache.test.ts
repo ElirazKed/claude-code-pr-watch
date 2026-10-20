@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { KEEP_MS, NOT_FOUND, QUIET_MS, UNREACHABLE_MS, failedEntry, isUnreachable, keptEntries } from './cache'
+import { KEEP_MS, NOT_FOUND, QUIET_MS, UNREACHABLE_MS, failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
 import type { Entry } from './cache'
 import type { GhPr } from './pr'
 
@@ -48,6 +48,14 @@ describe('a PR no account can see', () => {
   test('a first fetch that failed on the way (a 502, a hold) is no miss: the next round asks', async () => {
     expect(isUnreachable(failedEntry(undefined, 'gh: HTTP 502', T), T + 10_000)).toBe(false)
     expect(isUnreachable(undefined, T)).toBe(false)
+  })
+
+  test('a miss, however old, is one never read that no account could see: its card offers Try again', async () => {
+    expect(isMiss(failedEntry(undefined, 'Not found as octocat or hubot', T, true))).toBe(true)
+    expect(isMiss({ at: T - 10 * UNREACHABLE_MS, error: NOT_FOUND })).toBe(true)
+    expect(isMiss({ at: T, error: 'gh: HTTP 502' })).toBe(false)
+    expect(isMiss({ at: T, pr, error: NOT_FOUND })).toBe(false)
+    expect(isMiss(undefined)).toBe(false)
   })
 
   test("an older version's miss has the words and no flag; one with data is never left out", async () => {

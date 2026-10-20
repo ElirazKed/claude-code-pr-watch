@@ -152,8 +152,13 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // through prints its status and rate headers too, under -i. `budget.logins` are gh's logins,
 // the first active (another's token is "<login>-token"), and `budget.points` and
 // `budget.requests` what each has left (4000 and 4900 of 5000 by default), as the replies and
-// `gh api rate_limit` say; `restAsks` records each login /rate_limit was asked for. The time
-// zone (`date +%z`) is +0300.
+// `gh api rate_limit` say; `restAsks` records each login /rate_limit was asked for. A call
+// with no GH_TOKEN runs as the active login, as gh does; `tokens` records the GH_TOKEN of each
+// GraphQL call, and `mergeTokens` of each `gh pr merge` (undefined: none). `sight.owners`: the
+// owners a login can read (a login not in it reads every one). `auth.failStatus` and
+// `auth.failToken` (by login): how many of the next `gh auth status`, or `gh auth token` for
+// that login, fail; `auth.asks` records each ("status", or "token <login>"). The time zone
+// (`date +%z`) is +0300.
 // The terminal's environment: one that takes 24-bit colour, unless a test says otherwise.
 const TRUECOLOR_ENV: Record<string, string> = { COLORTERM: 'truecolor', TERM: 'xterm-ghostty' }
 // Inside tmux, where Claude Code paints 256 colours.
@@ -179,6 +184,10 @@ function fakeHost(
   const restAsks: string[] = []
   // Each GraphQL call's timeout.
   const timeouts: number[] = []
+  const tokens: (string | undefined)[] = []
+  const mergeTokens: (string | undefined)[] = []
+  const sight = { owners: {} as Record<string, string[]> }
+  const auth = { failStatus: 0, failToken: {} as Record<string, number>, asks: [] as string[] }
   on('env.get', ($, e) => ({ value: { HOME: '/home/me', ...env }[e.name] }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
@@ -194,6 +203,7 @@ function fakeHost(
     })
     if (e.argv[1] === 'pr' && e.argv[2] === 'merge') {
       merges.push([...e.argv])
+      mergeTokens.push(e.init?.env?.GH_TOKEN)
 
       return Promise.resolve(merge(e.argv)).then(reply => {
         if (reply.exitCode === 0) merged(gh, e.argv)
@@ -207,8 +217,25 @@ function fakeHost(
       return Promise.resolve(runLog(e.argv)).then(reply => out(reply.exitCode, reply.stdout ?? '', reply.stderr))
     }
     if (e.argv[0] === 'date') return out(0, '+0300\n')
-    if (e.argv[1] === 'auth' && e.argv[2] === 'token') return out(0, `${e.argv[e.argv.indexOf('--user') + 1]}-token\n`)
+    if (e.argv[1] === 'auth' && e.argv[2] === 'token') {
+      const user = String(e.argv[e.argv.indexOf('--user') + 1])
+      auth.asks.push(`token ${user}`)
+      if ((auth.failToken[user] ?? 0) > 0) {
+        auth.failToken[user] = (auth.failToken[user] ?? 0) - 1
+
+        return out(1, '', `no oauth token found for github.com account ${user}\n`)
+      }
+
+      return out(0, `${user}-token\n`)
+    }
     if (e.argv[1] === 'auth') {
+      auth.asks.push('status')
+      if (auth.failStatus > 0) {
+        auth.failStatus -= 1
+
+        return out(1, '', 'error connecting to api.github.com\n')
+      }
+
       return out(0, budget.logins.map((login, i) => `  ✓ Logged in to github.com account ${login} (keyring)\n  - Active account: ${i === 0}\n`).join(''))
     }
     // Who asks: another login's token, or the active one.
@@ -225,12 +252,16 @@ function fakeHost(
     const query = String(e.argv[4] ?? '').slice('query='.length)
     asked.push(query)
     timeouts.push(e.init?.timeoutMs ?? 0)
+    tokens.push(e.init?.env?.GH_TOKEN)
+    const canSee = (owner: string) => sight.owners[login]?.includes(owner) ?? true
     const urls: string[] = []
+    const seen: string[] = []
     const data: Record<string, unknown> = { rateLimit: { limit: 5000, remaining: budget.points[login] ?? 4000, resetAt: '2026-10-07T13:00:00Z' } }
     for (const [, i, owner, name, num] of query.matchAll(ALIAS)) {
       const url = `https://github.com/${owner}/${name}/pull/${num}`
       urls.push(url)
-      const fixture = gh[url] as Record<string, unknown> | undefined
+      const fixture = canSee(owner ?? '') ? (gh[url] as Record<string, unknown> | undefined) : undefined
+      if (fixture !== undefined) seen.push(url)
       data[`p${i}`] = fixture === undefined ? null : asGql(fixture, query)
     }
     const isHead = e.argv.includes('-i')
@@ -250,12 +281,12 @@ function fakeHost(
     }
     queries.push(urls)
     const body = JSON.stringify(errors.length === 0 ? { data } : { data, errors })
-    const reply = out(urls.every(url => url in gh) && errors.length === 0 ? 0 : 1, isHead ? httpHead('200 OK', rateHeaders(budget.points[login] ?? 4_000)) + body : body)
+    const reply = out(seen.length === urls.length && errors.length === 0 ? 0 : 1, isHead ? httpHead('200 OK', rateHeaders(budget.points[login] ?? 4_000)) + body : body)
 
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts }
+  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -810,11 +841,11 @@ async function mergeCard(
 ) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
-  const { merges } = fakeHost(on, clock, { [READY]: fixture }, undefined, undefined, merge)
+  const { merges, mergeTokens } = fakeHost(on, clock, { [READY]: fixture }, undefined, undefined, merge)
   await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, clock }
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, mergeTokens, clock }
 }
 
 // A gh reply that waits for `release()`, so a test can act while gh runs.
@@ -826,7 +857,7 @@ function held<T>(reply: T) {
 }
 
 test('a clean PR offers Squash & merge, asks first, and Confirm merges it', async ($, on) => {
-  const { ui, merges } = await mergeCard($, on, mergeable())
+  const { ui, merges, mergeTokens } = await mergeCard($, on, mergeable())
   expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Squash & merge')
 
   await ui.press({ key: `merge:${READY}` })
@@ -835,6 +866,8 @@ test('a clean PR offers Squash & merge, asks first, and Confirm merges it', asyn
   await ui.press({ key: `confirm:${READY}` })
 
   expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--squash']])
+  // As the active login, by its own token: never whichever account gh was switched to last.
+  expect(mergeTokens).toEqual(['me-token'])
   expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
   expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
   await ui.unmount()
@@ -1060,7 +1093,7 @@ async function fixCard(
   const fills: string[] = []
   const sent: string[] = []
   let box = ''
-  const { runs, asked, gate } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
+  const { runs, asked, gate, auth } = fakeHost(on, clock, fixtures, undefined, undefined, undefined, runLog)
   on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('prompt.fill', ($, e) => {
     fills.push(e.text)
@@ -1084,6 +1117,7 @@ async function fixCard(
     runs,
     asked,
     gate,
+    auth,
     fills,
     sent,
     box: () => box,
@@ -1861,7 +1895,7 @@ test('a PR no gh account can see is left out of rounds for five minutes, then as
   await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [GONE] } as never)
   await clock.advance(100)
   const gone = () => JSON.parse(files.get(RESULTS)?.text ?? '{}').prs?.[GONE]
-  expect(gone()).toMatchObject({ error: 'Not found, or no gh account can see it', isUnreachable: true })
+  expect(gone()).toMatchObject({ error: 'Not found as me', isUnreachable: true })
   queries.length = 0
   // Rounds at 12:00:10 … 12:04:10 leave it out; the one at 12:05:10 asks.
   await clock.advance(4 * 60_000 + 10_000)
@@ -2068,6 +2102,193 @@ test("an older version's results.json still reads, and its low `rate` holds noth
   expect(shared.rates.me.graphql.remaining).toBe(4_000)
   expect(shared.rate.remaining).toBe(4_000)
   expect((await ghFooter($)).lines).toEqual(['gh me ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  80% ↻1h'])
+})
+
+// ---- Several gh logins -------------------------------------------------------------------
+
+// A repo of hubot's, which only the hubot login can read; and one no login can, at first.
+const HUBOT_PR = 'https://github.com/hubot/tools/pull/8'
+const GONE = 'https://github.com/octocat/gone/pull/4'
+
+// The blip session, logged in as me (active) and hubot, each reading its own owner's repos
+// only, hubot's owner remembered as hubot's; then hubot's PR watched as well. `of(url)`: that
+// PR's entry in results.json.
+async function twoLogins($: Parameters<TestBody>[0], on: On, setup: (host: ReturnType<typeof fakeHost>) => void = () => undefined) {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  files.set(RESULTS, { text: JSON.stringify({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: { hubot: 'hubot' }, rate: null }), mtimeMs: NOON })
+  const session = await blipSession($, on, [], files, {
+    fixtures: { ...GH, [HUBOT_PR]: pr(HUBOT_PR, {}) },
+    setup: host => {
+      host.budget.logins = ['me', 'hubot']
+      host.sight.owners = { me: ['acme'], hubot: ['hubot'] }
+      setup(host)
+    },
+  })
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [HUBOT_PR] } as never)
+  await session.clock.advance(100)
+
+  return { ...session, of: (url: string) => JSON.parse(files.get(RESULTS)?.text ?? '{}').prs?.[url] }
+}
+
+test("every call carries its own login's token, the active one's too: a gh auth switch mid-session loses no PR", async ($, on) => {
+  const { clock, budget, tokens, of } = await twoLogins($, on)
+  expect(of(FAILING).pr.number).toBe(13)
+  expect(of(HUBOT_PR).pr.number).toBe(8)
+  // `gh auth switch` in some terminal: hubot is active now.
+  budget.logins = ['hubot', 'me']
+  tokens.length = 0
+  await clock.advance(6 * 60_000)
+  // Each round read both, each as its own login: none ran as whoever gh was switched to. The
+  // last, at 12:05:10.
+  for (const url of [FAILING, HUBOT_PR]) {
+    expect(of(url).at).toBe(NOON + 5 * 60_000 + 10_000)
+    expect(of(url).error).toBe(undefined)
+  }
+  expect(tokens.length).toBeGreaterThan(0)
+  expect(tokens.filter(token => token === undefined)).toEqual([])
+  expect(new Set(tokens)).toEqual(new Set(['me-token', 'hubot-token']))
+  // The logins were read again since: the gh meter has the active one first.
+  expect((await ghFooter($)).lines[0]).toMatch(/^gh hubot /)
+})
+
+test("a token gh won't give is no PR not found: nothing is asked as another login, and the next round asks again", async ($, on) => {
+  const { clock, queries, files, of } = await twoLogins($, on, host => void (host.auth.failToken.hubot = 1))
+  // hubot's PR was never asked about, as hubot or as me: a failure that passes, said at once
+  // on a card that has nothing else to show.
+  expect(queries.flat()).not.toContain(HUBOT_PR)
+  expect(of(HUBOT_PR)).toEqual({ at: NOON + 100, error: "Couldn't get hubot's gh token" })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /⚠ Couldn't get hubot's gh token/ })).toBeDefined()
+  expect(await ui.find({ key: `retry:${HUBOT_PR}` })).toBeUndefined()
+  await ui.unmount()
+  const logged = (files.get(ERRORS_LOG)?.text ?? '').trim().split('\n').map(line => JSON.parse(line))
+  expect(logged.at(-1)).toMatchObject({ login: 'hubot', class: 'other', error: "Couldn't get hubot's gh token: no oauth token found for github.com account hubot" })
+
+  // The round at 12:00:10 asks gh for it again, and reads the PR as hubot.
+  await clock.advance(10_500)
+  expect(of(HUBOT_PR).pr.number).toBe(8)
+  expect(of(HUBOT_PR).error).toBe(undefined)
+})
+
+test('a gh auth status that fails is not kept: no PR is asked as anyone, and the next round reads the logins again', async ($, on) => {
+  const { clock, queries, auth, entry } = await blipSession($, on, [], new Map(), { setup: host => void (host.auth.failStatus = 1) })
+  expect(queries).toEqual([])
+  expect(entry()).toEqual({ at: NOON, error: "Couldn't read gh's logins (gh auth status)" })
+  await clock.advance(10_500)
+  expect(auth.asks.filter(ask => ask === 'status')).toHaveLength(2)
+  expect(entry().pr.number).toBe(13)
+  expect(entry().error).toBe(undefined)
+})
+
+test('a PR no login can see names the logins asked, and Try again asks every one of them now', async ($, on) => {
+  const fixtures: Record<string, unknown> = { ...GH }
+  const { clock, queries, files, auth } = await blipSession($, on, [], new Map(), {
+    fixtures,
+    setup: host => {
+      host.budget.logins = ['me', 'hubot']
+      host.sight.owners = { me: ['acme'] }
+    },
+  })
+  auth.asks.length = 0
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [GONE] } as never)
+  await clock.advance(100)
+  const shared = () => JSON.parse(files.get(RESULTS)?.text ?? '{}')
+  // Asked as me, then hubot; gh's logins read again before it was called not found.
+  expect(queries.slice(-2)).toEqual([[GONE], [GONE]])
+  expect(auth.asks).toContain('status')
+  expect(shared().prs[GONE]).toMatchObject({ error: 'Not found as me or hubot', isUnreachable: true })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /⚠ Not found as me or hubot/ })).toBeDefined()
+  expect((await ui.find({ key: `retry:${GONE}` }))?.props.label).toBe('Try again')
+  await ui.unmount()
+
+  // Since then hubot was given access. Rounds leave it out for five minutes; Try again asks now.
+  fixtures[GONE] = pr(GONE, { title: 'Clean up old fixtures' })
+  await clock.advance(60_000)
+  expect(shared().prs[GONE].pr).toBe(undefined)
+  queries.length = 0
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `retry:${GONE}` })
+  await ui.unmount()
+  expect(queries).toEqual([[GONE], [GONE]])
+  expect(shared().prs[GONE].pr.title).toBe('Clean up old fixtures')
+  expect(shared().prs[GONE].isUnreachable).toBe(undefined)
+  expect(shared().accounts.octocat).toBe('hubot')
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /Clean up old fixtures/ })).toBeDefined()
+  expect(await ui.find({ text: /Not found/ })).toBeUndefined()
+  expect(await ui.find({ key: `retry:${GONE}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('with one login, the card names it and still offers Try again, which asks it again', async ($, on) => {
+  const { clock, queries } = await blipSession($, on)
+  await $.tool.call({ tool: 'mcp__pr-watch__watch', urls: [GONE] } as never)
+  await clock.advance(100)
+  queries.length = 0
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /⚠ Not found as me/ })).toBeDefined()
+  await ui.press({ key: `retry:${GONE}` })
+  expect(queries).toEqual([[GONE]])
+  expect(await ui.find({ text: /⚠ Not found as me/ })).toBeDefined()
+  expect(await ui.find({ key: `retry:${GONE}` })).toBeDefined()
+  await ui.unmount()
+})
+
+// #21 on acme, which only hubot can read, though me is gh's active login.
+async function hubotMerge($: Parameters<TestBody>[0], on: On) {
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  const host = fakeHost(on, clock, { [READY]: mergeable() })
+  host.budget.logins = ['me', 'hubot']
+  host.sight.owners = { me: [] }
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  return { ...host, clock }
+}
+
+test('a merge runs as the login that sees the repo, by its token', async ($, on) => {
+  const { mergeTokens } = await hubotMerge($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `merge:${READY}` })
+  await ui.press({ key: `confirm:${READY}` })
+  expect(mergeTokens).toEqual(['hubot-token'])
+  await ui.unmount()
+})
+
+test("a merge whose login gh gives no token for says so, and never runs as another login", async ($, on) => {
+  const clock = mock.clock(on, { now: NOON })
+  quietUi(on)
+  // A round another session ran found acme is hubot's; gh gives this one no token for hubot.
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const prs = { [READY]: { at: NOON, pr: mergeable() } }
+  files.set(RESULTS, { text: JSON.stringify({ fetchedAt: NOON, nextAt: NOON + 60_000, prs, accounts: { acme: 'hubot' }, rate: null }), mtimeMs: NOON })
+  const host = fakeHost(on, clock, { [READY]: mergeable() }, files)
+  host.budget.logins = ['me', 'hubot']
+  host.auth.failToken.hubot = 5
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: `merge:${READY}` })
+  await ui.press({ key: `confirm:${READY}` })
+  expect(host.merges).toEqual([])
+  expect(await ui.find({ text: /✗ Couldn't get hubot's gh token/ })).toBeDefined()
+  // Nor was the PR read as me meanwhile.
+  expect(host.tokens.filter(token => token !== 'hubot-token')).toEqual([])
+  await ui.unmount()
+})
+
+test("a token gh gave once stands where it won't give it again, so a locked keyring stops nothing", async ($, on) => {
+  const { clock, auth, of, tokens } = await twoLogins($, on)
+  await clock.advance(5 * 60_000)
+  auth.failToken.hubot = 99
+  tokens.length = 0
+  await clock.advance(2 * 60_000)
+  expect(auth.asks).toContain('token hubot')
+  expect(tokens).toContain('hubot-token')
+  expect(of(HUBOT_PR).at).toBe(NOON + 6 * 60_000 + 10_000)
+  expect(of(HUBOT_PR).error).toBe(undefined)
 })
 
 // ---- The band layout ----------------------------------------------------------------------

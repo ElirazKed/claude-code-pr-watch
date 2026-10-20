@@ -597,6 +597,7 @@ export function placeholder(ref: PrRef): TrackedPr {
     reviews: null,
     reviewSeen: null,
     isConflicted: false,
+    isNotFound: false,
   }
 }
 

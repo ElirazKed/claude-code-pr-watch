@@ -73,6 +73,9 @@ export type TrackedPr = {
   reviewSeen: number | null
   // GitHub can't merge the head into the base cleanly (draft or not): Resolve with Claude.
   isConflicted: boolean
+  // Never read, as no logged-in gh account could see it: its error names the logins asked,
+  // and the card offers Try again.
+  isNotFound: boolean
 }
 
 // A press's work under way, from when it started: a mark older than a run can take was left by
@@ -129,6 +132,8 @@ declare module 'claude-code' {
       addressing: Record<string, HandoffAsk>
       // Resolve with Claude, by PR url.
       resolving: Record<string, HandoffAsk>
+      // Try again on a not-found card, by PR url: while every login is asked.
+      retrying: Record<string, Busy>
       // Null while no newer version is known, or the notice is off.
       newer: Newer | null
       // GitHub's budget per login, and a hold, as the shared results last said.

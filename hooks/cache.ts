@@ -8,19 +8,23 @@ import type { GhPr } from './pr'
 // so a field they don't know is no harm to them.
 export type Entry = { at: number; pr?: GhPr; error?: string; failedSince?: number; isUnreachable?: true }
 
-// What a PR no logged-in gh account can see says.
+// What a PR no logged-in gh account could see said before the card named the logins asked
+// (accounts.ts's notFoundAs): an older version's entry may still say it.
 export const NOT_FOUND = 'Not found, or no gh account can see it'
 
 // A PR no account can see is asked about again only this often. A fetch that failed on the
 // way (a 502, a cut connection) is no such miss: the next round asks again.
 export const UNREACHABLE_MS = 300_000
 
-// Whether a round leaves this PR out: never read, no account could see it, UNREACHABLE_MS
-// ago at most. An older version's entry has no flag, only the words.
-export function isUnreachable(entry: Entry | undefined, at: number): boolean {
-  const isMiss = entry?.isUnreachable === true || entry?.error === NOT_FOUND
+// Whether a PR was never read because no account could see it: its card says who was asked,
+// and offers Try again. An older version's entry has no flag, only the words.
+export function isMiss(entry: Entry | undefined): boolean {
+  return entry !== undefined && entry.pr === undefined && (entry.isUnreachable === true || entry.error === NOT_FOUND)
+}
 
-  return entry !== undefined && entry.pr === undefined && isMiss && at - entry.at < UNREACHABLE_MS
+// Whether a round leaves this PR out: a miss (isMiss) UNREACHABLE_MS ago at most.
+export function isUnreachable(entry: Entry | undefined, at: number): boolean {
+  return entry !== undefined && isMiss(entry) && at - entry.at < UNREACHABLE_MS
 }
 
 // How long fetches may fail before a card that has data says so. GitHub's gateway drops a
