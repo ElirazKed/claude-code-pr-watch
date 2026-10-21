@@ -246,7 +246,8 @@ fn allot(counts: &[usize], width: usize) -> Vec<usize> {
         }
     }
     while used > width {
-        let Some(i) = (0..out.len()).max_by_key(|&i| out[i]) else {
+        // The first of the largest, as `indexOf(Math.max(...))` finds it.
+        let Some(i) = (0..out.len()).min_by_key(|&i| std::cmp::Reverse(out[i])) else {
             break;
         };
         out[i] -= 1;
@@ -347,7 +348,7 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
         let when = model
             .reads()
             .1
-            .map(|at| ago(model.now() - at))
+            .map(|at| ago(model.now().saturating_sub(at)))
             .unwrap_or_default();
         (
             format!("⚠ results.json didn't read ({when}): showing the last good copy"),
@@ -556,9 +557,9 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
             }
         }
         lines.push(Line::raw(""));
-        let next = shared.next_at - model.now();
+        let next = shared.next_at.saturating_sub(model.now());
         let said = match model.header().poll {
-            Poll::Mod if next > 0 => format!("next round in {}s", (next + 999) / 1000),
+            Poll::Mod if next > 0 => format!("next round in {}s", next.saturating_add(999) / 1000),
             Poll::Mod => "a round is due".to_owned(),
             poll => poll.words().to_owned(),
         };
@@ -1015,7 +1016,7 @@ fn verdict_color(verdict: Option<Verdict>) -> Color {
 /// "checked 12s ago", where the PR has data.
 fn checked(model: &Model, row: &Row) -> Option<String> {
     row.checked_at
-        .map(|at| format!("checked {}", ago(model.now() - at)))
+        .map(|at| format!("checked {}", ago(model.now().saturating_sub(at))))
 }
 
 /// The watchers line: "by @octocat  ◆ app-retry, web".
@@ -1096,7 +1097,7 @@ fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Li
             .merged_at
             .as_deref()
             .and_then(parse_iso)
-            .map(|at| ago(model.now() - at)),
+            .map(|at| ago(model.now().saturating_sub(at))),
         Some(pr) if pr.state == PrState::Open => reviews_of(pr)
             .map(|r| threads_beside(&d.headline, &r).note)
             .filter(|n| !n.is_empty()),
@@ -1308,6 +1309,8 @@ mod tests {
         assert_eq!(allot(&[1, 0, 99], 5), [1, 0, 4]);
         assert_eq!(allot(&[0, 0, 0], 5), [0, 0, 0]);
         assert_eq!(allot(&[3, 0, 0], 7), [7, 0, 0]);
+        // Too narrow for a cell each: the first of the largest gives one back.
+        assert_eq!(allot(&[1, 1, 1], 2), [0, 1, 1]);
         for width in 0..20 {
             for counts in [[1, 2, 3], [0, 5, 1], [9, 9, 9]] {
                 assert_eq!(allot(&counts, width).iter().sum::<usize>(), width);

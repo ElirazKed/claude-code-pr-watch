@@ -198,7 +198,8 @@ fn event_loop(terminal: &mut DefaultTerminal, mut reader: Reader, clock: &Clock)
         // Wait for a key or a resize until the next tick; only a message redraws.
         loop {
             let timeout = (last_tick + TICK).saturating_duration_since(Instant::now());
-            if event::poll(timeout)? {
+            // A tick that is due comes first, so a stream of keys can't hold it off.
+            if !timeout.is_zero() && event::poll(timeout)? {
                 let msg = match event::read()? {
                     Event::Key(key) => key_of(key).map(Msg::Key),
                     Event::Resize(width, height) => Some(Msg::Resize(width, height)),

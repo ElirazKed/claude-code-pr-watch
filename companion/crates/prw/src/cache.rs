@@ -118,7 +118,11 @@ impl Reader {
                 self.results = Some(Err(()));
                 return (!was_missing).then_some(Err(ReadFailure::Missing));
             }
-            Err(err) => return Some(Err(ReadFailure::Unreadable(err.to_string()))),
+            Err(err) => {
+                // Read it again next time, even if it comes back unchanged.
+                self.results = None;
+                return Some(Err(ReadFailure::Unreadable(err.to_string())));
+            }
         };
         let stamp = Stamp::of(&meta);
         if self.results == Some(Ok(stamp)) {
@@ -154,7 +158,8 @@ impl Reader {
             let Some(id) = session_id(&path) else {
                 continue;
             };
-            let Ok(meta) = entry.metadata() else {
+            // Follows a symlink, as reading it does.
+            let Ok(meta) = fs::metadata(&path) else {
                 continue;
             };
             if !meta.is_file() {

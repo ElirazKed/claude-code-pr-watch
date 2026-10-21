@@ -417,10 +417,12 @@ impl Model {
     /// Works out the lists and the header again, and puts the selection back on a row: the
     /// same PR where it is still listed, else the row where it was (or the last).
     fn rebuild(&mut self) {
-        let was = self.selected_index();
+        let mut was = self.selected_index();
         self.lists = lists_of(self.shared.as_ref(), &self.sessions, self.now);
         if !self.lists.iter().any(|l| l.id == self.list) {
+            // A different list: its first row, not the old list's place.
             self.list = ListId::All;
+            was = None;
         }
         self.header = header_of(self);
         let rows = &self.list().rows;
@@ -506,8 +508,10 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
                     model.read_ok_at = Some(at);
                 }
                 // Gone: nothing fetched (any more). The header waits for pr-watch again.
+                // A failed read before it went is no longer news.
                 Err(ReadFailure::Missing) => {
                     model.shared = None;
+                    model.read_failed_at = None;
                 }
                 // Torn or bad: the last good copy stands, and its age shows.
                 Err(ReadFailure::Unreadable(_)) => model.read_failed_at = Some(at),
@@ -694,7 +698,9 @@ fn header_of(model: &Model) -> Header {
     let poll = match &model.shared {
         None => Poll::Waiting,
         Some(_) if !is_mod_live => Poll::Nobody,
-        Some(shared) if shared.fetched_at > 0 && now - shared.next_at <= STALE_MS => Poll::Mod,
+        Some(shared) if shared.fetched_at > 0 && now.saturating_sub(shared.next_at) <= STALE_MS => {
+            Poll::Mod
+        }
         Some(_) => Poll::Stale,
     };
     let age = model
