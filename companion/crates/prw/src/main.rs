@@ -9,6 +9,9 @@ mod cache;
 mod theme;
 mod view;
 
+#[cfg(test)]
+mod render_tests;
+
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;

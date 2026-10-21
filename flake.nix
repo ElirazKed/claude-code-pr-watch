@@ -22,9 +22,9 @@
         prw = pkgs.rustPlatform.buildRustPackage {
           pname = "prw";
           inherit (cargoToml.workspace.package) version;
-          # Only the Rust sources and the status fixtures their tests read
-          # (include_str!): a change to the mod's code, the docs or the README
-          # leaves the store path (and so the build) as it was.
+          # Only the Rust sources, and the status fixtures and demo cache their
+          # tests read (include_str!): a change to the mod's code, the docs or the
+          # README leaves the store path (and so the build) as it was.
           src = lib.fileset.toSource {
             root = ./companion;
             fileset = lib.fileset.unions [
@@ -32,6 +32,7 @@
               ./companion/Cargo.lock
               ./companion/crates
               ./companion/fixtures
+              ./companion/demo
             ];
           };
           cargoLock.lockFile = ./companion/Cargo.lock;
