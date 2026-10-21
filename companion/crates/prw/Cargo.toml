@@ -1,0 +1,24 @@
+[package]
+name = "prw"
+description = "A terminal companion for the pr-watch Claude Code mod: every PR your agents touch, in one TUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["github", "pull-requests", "tui", "ratatui", "claude"]
+categories = ["command-line-utilities"]
+publish = false
+
+[[bin]]
+name = "prw"
+path = "src/main.rs"
+
+[dependencies]
+prw-core.workspace = true
+ratatui.workspace = true
+
+[lints]
+workspace = true

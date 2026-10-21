@@ -27,3 +27,35 @@ jobs:
         run: claude plugin validate .
       - name: Run the mod's tests
         run: claude plugin test .
+
+  companion:
+    name: companion (rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: companion
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: companion
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  companion-nix:
+    name: companion (nix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: Build with nix (runs the tests too)
+        run: nix build .#prw -L && ./result/bin/prw --version
+      - name: Flake check
+        run: nix flake check

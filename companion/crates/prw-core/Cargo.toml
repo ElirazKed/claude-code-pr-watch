@@ -1,0 +1,18 @@
+[package]
+name = "prw-core"
+description = "The pure kernel of prw: protocol types, status logic and layout, with no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
