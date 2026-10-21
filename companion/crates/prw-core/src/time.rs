@@ -3,7 +3,7 @@
 /// Milliseconds since the epoch of an ISO 8601 timestamp, as `Date.parse` gives them for
 /// the forms GitHub writes (`2026-10-07T11:50:00Z`) and their near relatives: `YYYY`,
 /// `YYYY-MM` or `YYYY-MM-DD`, then optionally `T` (or `t`, or a space) and `HH:MM`, `:SS`,
-/// a fraction (milliseconds; further digits ignored), and `Z` or `±HH:MM`. `None` where
+/// a fraction (milliseconds; further digits ignored), and `Z`, `±HH:MM` or `±HHMM`. `None` where
 /// `Date.parse` gives `NaN`, or where the text is outside these forms.
 ///
 /// As in V8, a day up to 31 rolls over into the next month (`2026-02-30` is March 2nd), and
@@ -46,9 +46,8 @@ pub fn parse_iso(text: &str) -> Option<i64> {
         let is_utc = at.eat(b'Z') || at.eat(b'z');
         if !is_utc && let Some(sign) = at.sign() {
             let hours = at.digits(2)?;
-            if !at.eat(b':') {
-                return None;
-            }
+            // `+02:00`, or `+0200`, which Date.parse reads too.
+            at.eat(b':');
             let minutes = at.digits(2)?;
             if hours > 23 || minutes > 59 {
                 return None;
@@ -138,8 +137,10 @@ mod tests {
     #[test]
     fn reads_what_date_parse_reads() {
         // Each from node's Date.parse.
-        let cases: [(&str, Option<i64>); 20] = [
+        let cases: [(&str, Option<i64>); 22] = [
             ("2026-10-07T11:50:00Z", Some(1_791_373_800_000)),
+            ("2026-10-07T11:50:00+0200", Some(1_791_366_600_000)),
+            ("2026-10-07T11:50:00+02", None),
             ("2026-10-07T11:50:00.123Z", Some(1_791_373_800_123)),
             ("2026-10-07T11:50:00.1Z", Some(1_791_373_800_100)),
             ("2026-10-07T11:50:00.123456Z", Some(1_791_373_800_123)),

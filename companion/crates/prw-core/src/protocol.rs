@@ -187,7 +187,10 @@ pub struct LoginRates {
 pub struct Bucket {
     pub limit: i64,
     pub remaining: i64,
+    /// Times read as every other time here (`ms`): a fractional one doesn't drop the bucket.
+    #[serde(deserialize_with = "ms")]
     pub reset_at: i64,
+    #[serde(deserialize_with = "ms")]
     pub seen_at: i64,
 }
 
@@ -339,6 +342,15 @@ mod tests {
                 ..LoginRates::default()
             }
         );
+    }
+
+    #[test]
+    fn a_fractional_bucket_time_rounds_up_and_keeps_the_bucket() {
+        let rates: LoginRates = serde_json::from_value(
+            json!({"core": {"limit": 5000, "remaining": 4999, "resetAt": 10.5, "seenAt": 3}}),
+        )
+        .unwrap();
+        assert_eq!(rates.core.map(|b| b.reset_at), Some(11));
     }
 
     #[test]

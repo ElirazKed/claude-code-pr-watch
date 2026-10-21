@@ -571,7 +571,8 @@ fn still(stage: Stage, tone: Tone, pill: PillKind, headline: impl Into<String>) 
 /// Merged, closed, draft, conflicted, or CI: what outranks review.
 fn status_of(pr: &GhPr, checks: &Checks, kept: Option<&Reviews>) -> Said {
     let (passed, total, pending) = (checks.passed, checks.total, checks.pending);
-    let ci = format!("{} · {passed}/{total} passed", activity(checks));
+    // Only a draft or a running CI says it.
+    let ci = || format!("{} · {passed}/{total} passed", activity(checks));
 
     match pr.state {
         PrState::Merged => return still(Stage::Merged, Tone::Merged, PillKind::Merged, "Merged"),
@@ -593,7 +594,7 @@ fn status_of(pr: &GhPr, checks: &Checks, kept: Option<&Reviews>) -> Said {
             "Draft"
         };
         let headline = if pending > 0 {
-            format!("{draft} · {ci}")
+            format!("{draft} · {}", ci())
         } else {
             draft.to_owned()
         };
@@ -651,7 +652,13 @@ fn status_of(pr: &GhPr, checks: &Checks, kept: Option<&Reviews>) -> Said {
         };
     }
     if pending > 0 {
-        return Said(Stage::Checks, Tone::Warning, PillKind::CiRunning, ci, true);
+        return Said(
+            Stage::Checks,
+            Tone::Warning,
+            PillKind::CiRunning,
+            ci(),
+            true,
+        );
     }
 
     settled(pr, kept)

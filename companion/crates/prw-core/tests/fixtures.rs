@@ -60,7 +60,14 @@ fn card_of(pr: &GhPr) -> Card {
 }
 
 fn cases() -> Vec<Case> {
-    let start = SOURCE.find('[').expect("status.ts holds a JSON array");
+    // After the export, so a `[` in the header comment can't be taken for the array's start.
+    let export = SOURCE
+        .find("export default")
+        .expect("status.ts exports its cases");
+    let start = export
+        + SOURCE[export..]
+            .find('[')
+            .expect("status.ts holds a JSON array");
     serde_json::from_str(SOURCE[start..].trim_end()).expect("status.ts's array is JSON")
 }
 
