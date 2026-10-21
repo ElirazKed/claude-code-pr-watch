@@ -10,16 +10,20 @@ import type { Depth, Look, Mode, Role, ThemeName } from './theme'
 import {
   MERGE_LABEL,
   STEPS,
+  afterServerError,
   ago,
   cwdOf,
   derive,
   findPrUrls,
   isActive,
   isBusy,
+  isServerError,
   mergeArgv,
   mergeError,
   mergeOf,
   mergeQuestion,
+  mergeReadArgv,
+  mergeReadOf,
   metaOf,
   nextMethod,
   pickMethod,
@@ -919,7 +923,9 @@ const BUSY: Record<MergeRun['action'], string> = {
 
 // Runs gh pr merge as the account the poller found sees the repo (its token, never written
 // anywhere), and only as that one, then asks GitHub again at once so the card shows what
-// happened.
+// happened. A server error (a 502, a gateway timeout) says nothing of whether it went through:
+// RETRY_MS on, the PR is read again as the same login, and the run counts as done, runs once
+// more, or shows the error it had, as afterServerError says (pr.ts).
 async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   const method = run.action === 'cancel-auto' ? undefined : run.method
   const busy = { action: run.action, at: await $.clock.now() }
@@ -929,7 +935,14 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
     const got = await tokenFor($, await pressLogin($, pr))
     if ('error' in got) ask = { method, error: got.error }
     else {
-      const res = await gh($, mergeArgv(pr.url, run), got.token)
+      let res = await gh($, mergeArgv(pr.url, run), got.token)
+      if (res.exitCode !== 0 && isServerError(res.stderr || res.stdout)) {
+        await $.clock.sleep(RETRY_MS)
+        const view = await gh($, mergeReadArgv(pr.url), got.token).catch(() => null)
+        const next = afterServerError(run, view !== null && view.exitCode === 0 ? mergeReadOf(view.stdout) : null)
+        if (next === 'done') res = { ...res, exitCode: 0 }
+        else if (next === 'retry') res = await gh($, mergeArgv(pr.url, run), got.token)
+      }
       if (res.exitCode !== 0) {
         const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
         ask = { method: isMethodRefused ? undefined : method, error: message }

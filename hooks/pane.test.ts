@@ -277,6 +277,18 @@ function fakeHost(
 
       return out(0, JSON.stringify({ resources, rate: resources.core }))
     }
+    // A PR read again after a merge GitHub answered with a server error: what it says now.
+    if (e.argv[1] === 'pr' && e.argv[2] === 'view' && e.argv.includes('state,autoMergeRequest')) {
+      reads.push([...e.argv])
+      const fixture = gh[String(e.argv[3])] as Record<string, unknown> | undefined
+      if (fixture === undefined || reads.fail > 0) {
+        reads.fail = Math.max(0, reads.fail - 1)
+
+        return out(1, '', 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n')
+      }
+
+      return out(0, JSON.stringify({ autoMergeRequest: fixture.autoMergeRequest ?? null, state: fixture.state }))
+    }
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     const issue = String(e.argv[4] ?? '').match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/)
     if (e.argv[1] === 'api' && issue !== null) {
@@ -948,20 +960,23 @@ const mergeable = (extra: Record<string, unknown> = {}) =>
     ...extra,
   })
 
-// Watches #21 as `fixture` and draws the pane; `merges` is every `gh pr merge` argv since.
+// Watches #21 as `fixture` and draws the pane; `merges` is every `gh pr merge` argv since, and
+// `reads` every read of the PR after one. `merge` is handed GitHub's PRs too, to change them
+// as a merge that fails yet goes through does.
 async function mergeCard(
   $: Parameters<TestBody>[0],
   on: On,
   fixture: Record<string, unknown>,
-  merge?: (argv: readonly string[]) => MergeReply | Promise<MergeReply>,
+  merge?: (argv: readonly string[], gh: Record<string, unknown>) => MergeReply | Promise<MergeReply>,
 ) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
-  const { merges, mergeTokens } = fakeHost(on, clock, { [READY]: fixture }, undefined, undefined, merge)
+  const gh: Record<string, unknown> = { [READY]: fixture }
+  const { merges, mergeTokens, reads } = fakeHost(on, clock, gh, undefined, undefined, merge && (argv => merge(argv, gh)))
   await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, mergeTokens, clock }
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, mergeTokens, reads, clock }
 }
 
 // A gh reply that waits for `release()`, so a test can act while gh runs.
@@ -1147,6 +1162,92 @@ test('once every method is refused, the card keeps the error and offers no butto
 
   expect(await ui.find({ text: '✗ Squash merges are not allowed on this repository.' })).toBeDefined()
   expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+// What gh pr merge says when GitHub's gateway gives up on it.
+const MERGE_502 = 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n'
+
+test('a merge GitHub answered with a 502 but made shows Merged, not the 502', async ($, on) => {
+  // The gateway stopped waiting; the merge went through behind it.
+  const late = (argv: readonly string[], gh: Record<string, unknown>) => (merged(gh, argv), { exitCode: 1, stderr: MERGE_502 })
+  const { ui, merges, reads, clock } = await mergeCard($, on, mergeable(), late)
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--squash']])
+  expect(reads).toHaveLength(1)
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  expect(await ui.find({ text: /^✗/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a 502 that left the PR open is merged once more, as the same login', async ($, on) => {
+  let calls = 0
+  const flaky = () => ((calls += 1), calls === 1 ? { exitCode: 1, stderr: MERGE_502 } : { exitCode: 0 })
+  const { ui, merges, mergeTokens, clock } = await mergeCard($, on, mergeable(), flaky)
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  // Not before RETRY_MS: GitHub may be finishing it.
+  await clock.advance(1_000)
+  expect(merges).toHaveLength(1)
+  await clock.advance(1_100)
+  await pressed
+
+  expect(merges).toEqual([
+    ['gh', 'pr', 'merge', READY, '--squash'],
+    ['gh', 'pr', 'merge', READY, '--squash'],
+  ])
+  expect(mergeTokens).toEqual(['me-token', 'me-token'])
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a merge tried again after a 502 shows what the second try said, and only once more', async ($, on) => {
+  const said = [MERGE_502, 'X Pull request acme/app#21 is not mergeable: the base branch policy prohibits the merge.\n']
+  let calls = 0
+  const { ui, merges, clock } = await mergeCard($, on, mergeable(), () => ({ exitCode: 1, stderr: said[calls++] ?? MERGE_502 }))
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toHaveLength(2)
+  expect(await ui.find({ text: '✗ Pull request acme/app#21 is not mergeable: the base branch policy prohibits the merge.' })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a 502 where the PR can't be read again shows the 502, runs nothing more and refuses no method", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const host = fakeHost(on, clock, { [READY]: mergeable() }, undefined, undefined, () => ({ exitCode: 1, stderr: MERGE_502 }))
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  host.reads.fail = 1
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(host.merges).toHaveLength(1)
+  expect(host.reads.map(argv => argv.slice(1))).toEqual([['pr', 'view', READY, '--json', 'state,autoMergeRequest']])
+  expect(await ui.find({ text: '✗ HTTP 502: Bad Gateway (https://api.github.com/graphql)' })).toBeDefined()
+  expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Squash & merge')
+  await ui.unmount()
+})
+
+test("a 502 on Cancel auto-merge that turned it off anyway says nothing went wrong", async ($, on) => {
+  const auto = mergeable({ mergeStateStatus: 'BLOCKED', autoMergeRequest: { enabledAt: '2026-10-07T11:00:00Z', mergeMethod: 'SQUASH' } })
+  const { ui, merges, clock } = await mergeCard($, on, auto, (argv, gh) => (merged(gh, argv), { exitCode: 1, stderr: 'gh: Server Error (HTTP 503)\n' }))
+  const pressed = ui.press({ key: `cancel-auto:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--disable-auto']])
+  expect(await ui.find({ text: /^✗/ })).toBeUndefined()
   await ui.unmount()
 })
 
