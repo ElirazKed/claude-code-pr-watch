@@ -991,7 +991,7 @@ fn merge_words(pr: &GhPr, merge: &Mergeable) -> Option<(String, Color)> {
     } else if read_only {
         ("Read-only here: you can't merge".to_owned(), DIM)
     } else if merge.can_auto {
-        ("Waiting · auto-merge can be turned on".to_owned(), BLUE)
+        ("Auto-merge can be turned on".to_owned(), BLUE)
     } else {
         let why = match pr.merge_state_status {
             Some(MergeStateStatus::Behind) => format!("Behind {base}"),
@@ -1132,8 +1132,9 @@ fn detail_checks(
         ]),
         Line::from(bar(checks, iw)),
     ];
+    // What CI is doing, unless the headline says it already (CI running, a draft).
     let doing = activity(checks);
-    if !doing.is_empty() {
+    if !doing.is_empty() && !row.pr.derived.headline.contains(&doing) {
         head.push(Line::from(span(clip(&doing, iw), fg(YELLOW))));
     }
     let rows = check_lines(pr, iw).into_iter().map(|(_, l)| l).collect();
