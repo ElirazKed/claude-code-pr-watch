@@ -1,13 +1,17 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  afterServerError,
   cwdOf,
   derive,
   findPrUrls,
   isBusy,
+  isServerError,
   mergeArgv,
   mergeError,
   mergeOf,
+  mergeReadArgv,
+  mergeReadOf,
   mergeQuestion,
   mergeableOf,
   methodsOf,
@@ -519,6 +523,65 @@ describe('merging', () => {
     expect(mergeError('GraphQL: Pull request Auto merge is not allowed for this repository (enablePullRequestAutoMerge)').message).toBe(
       'Pull request Auto merge is not allowed for this repository',
     )
+  })
+
+  // GitHub's side giving up, as gh says it: go-gh's HTTPError, gh api's, an older gh's GraphQL
+  // client, GraphQL's own timeouts, and a gateway's page.
+  const SERVER_ERRORS = [
+    'HTTP 502: Bad Gateway (https://api.github.com/graphql)',
+    'HTTP 503: Service Unavailable (https://api.github.com/graphql)',
+    'HTTP 504: Gateway Timeout (https://api.github.com/graphql)',
+    'gh: Server Error (HTTP 502)',
+    'non-200 OK status code: 502 Bad Gateway body: "<html><body><h1>502 Bad Gateway</h1></body></html>"',
+    'GraphQL: Something went wrong while executing your query. This may be the result of a timeout, or it could be a GitHub bug. Please include `ABCD:1234` when reporting this issue.',
+    "GraphQL: We couldn't respond to your request in time. Sorry about that. Please try resubmitting your request and contact us if the problem persists.",
+    'X Pull request acme/app#7 could not be merged: 500 Internal Server Error',
+  ]
+
+  test("GitHub's side giving up is a server error, in each of gh's wordings", async () => {
+    for (const said of SERVER_ERRORS) expect([said, isServerError(said)]).toEqual([said, true])
+  })
+
+  test("a refusal, a 4xx or a branch named 502 is no server error", async () => {
+    for (const said of [
+      'GraphQL: Squash merges are not allowed on this repository. (mergePullRequest)',
+      'X Pull request acme/app#7 is not mergeable: the base branch policy prohibits the merge.',
+      'HTTP 401: Bad credentials (https://api.github.com/graphql)',
+      'HTTP 404: Not Found (https://api.github.com/graphql)',
+      'GraphQL: Required status check "fix-502" is failing (mergePullRequest)',
+      'GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)',
+    ]) {
+      expect([said, isServerError(said)]).toEqual([said, false])
+    }
+  })
+
+  test('a server error never refuses a method, whatever else its page says', async () => {
+    for (const said of SERVER_ERRORS) expect(mergeError(said).isMethodRefused).toBe(false)
+    expect(mergeError('HTTP 502: Squash merges are not allowed on this repository (https://api.github.com/graphql)').isMethodRefused).toBe(false)
+    expect(mergeError('HTTP 502: Bad Gateway (https://api.github.com/graphql)').message).toBe('HTTP 502: Bad Gateway (https://api.github.com/graphql)')
+  })
+
+  test('the PR is read again as gh pr view state and auto-merge', async () => {
+    const url = 'https://github.com/acme/app/pull/7'
+    expect(mergeReadArgv(url)).toEqual(['pr', 'view', url, '--json', 'state,autoMergeRequest'])
+    expect(mergeReadOf('{"autoMergeRequest":null,"state":"MERGED"}\n')).toEqual({ state: 'MERGED', isAuto: false })
+    expect(mergeReadOf('{"autoMergeRequest":{"mergeMethod":"SQUASH"},"state":"OPEN"}')).toEqual({ state: 'OPEN', isAuto: true })
+    for (const stdout of ['', 'null', '{"autoMergeRequest":null}', '<html>502</html>']) expect(mergeReadOf(stdout)).toBe(null)
+  })
+
+  test('after a server error: merged is done, still open is tried once more, anything else keeps the error', async () => {
+    const merge = { action: 'merge', method: 'squash' } as const
+    const auto = { action: 'auto', method: 'squash' } as const
+    const cancel = { action: 'cancel-auto' } as const
+    const open = { state: 'OPEN', isAuto: false }
+    const openAuto = { state: 'OPEN', isAuto: true }
+    const done = { state: 'MERGED', isAuto: false }
+    const closed = { state: 'CLOSED', isAuto: false }
+    expect([merge, auto, cancel].map(run => afterServerError(run, null))).toEqual(['failed', 'failed', 'failed'])
+    expect([done, open, openAuto, closed].map(read => afterServerError(merge, read))).toEqual(['done', 'retry', 'retry', 'failed'])
+    // Auto-merge turned on, or GitHub merged it at once: done.
+    expect([done, open, openAuto, closed].map(read => afterServerError(auto, read))).toEqual(['done', 'retry', 'done', 'failed'])
+    expect([done, open, openAuto, closed].map(read => afterServerError(cancel, read))).toEqual(['failed', 'done', 'retry', 'failed'])
   })
 
   test('busy only for as long as a run can take; a mark with no start time is no mark', async () => {

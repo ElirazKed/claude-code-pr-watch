@@ -135,6 +135,7 @@ A card offers a merge button once GitHub would merge the PR now (open, not a dra
 - **Which account:** `gh pr merge` runs as the gh account that can see the repo, the one the poller reads it with, by that login's own token. If gh won't give that token, the card says so and nothing runs: never as another account.
 - **While it runs:** the card says so (*Merging…*), and a second press does nothing. If a reload cuts the run off, the buttons come back after 2 minutes.
 - **When GitHub says no:** its message shows on the card. If it refused the method itself (say, a ruleset that allows only rebase), that method isn't offered for the repo again this session.
+- **When GitHub stumbles:** a 502, 503 or 504 (or GitHub's own timeout) doesn't say whether the merge went through, so the card doesn't take it as a no. Two seconds later the PR is read again, as the same account. If it merged (or auto-merge turned on or off, as asked), the card just shows that. If it is still open as before, the merge runs once more, and if that fails too, its error shows. If the PR can't be read, the first error shows.
 
 ## Comment
 
@@ -181,8 +182,9 @@ A card whose branch conflicts with its base (*⚠ CONFLICTS*, or *Draft · merge
 
 Every session on the machine shares **one** poller, so 30 sessions watching 30 PRs cost about one GitHub call every 20–60 seconds, not 30.
 
-- Each session lists its PRs in `~/.cache/pr-watch/sessions/`. The file's modified time is its heartbeat.
-- When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that.
+- Each session lists its PRs in `~/.cache/pr-watch/sessions/`, with its agent, project folder and directory. The file's modified time is its heartbeat.
+- When the shared results are due, one session takes a short lease and fetches every live session's PRs in batched GraphQL queries, 20 PRs each, one after another. It writes them to `~/.cache/pr-watch/results.json`, and the other sessions read that. The file is written whole (to a temp file, then renamed over it), so a reader never catches it half-written.
+- Other programs can share the cache too: [companion/PROTOCOL.md](companion/PROTOCOL.md) says what each file holds and how to read it.
 - By default it polls every 20s while CI is running somewhere and every 60s otherwise.
 - Each query costs 1 point of GitHub's GraphQL rate limit (5,000 an hour), so 40 watched PRs cost 2 points a round. Smaller queries also keep a round of busy PRs inside GitHub's own timeout. It asks only for what the card shows: of reviews, the reviewers and their states; of threads, whether each is resolved or outdated, never what anyone wrote (Address with Claude asks that of one PR, on its press).
 - **A round never outlives its 30-second lease:** a query starts only with 5 seconds of it left, and may take no longer than is left. A batch with no time left waits, untouched, for the next round, which asks it first.
@@ -223,6 +225,7 @@ Claude Code doesn't say when a third-party marketplace has a newer version, and 
 claude --plugin-dir .                # load it from this folder for one session
 claude plugin validate .             # what it hooks and calls, and anything the engine would refuse
 claude plugin test .                 # the *.test.ts suites
+sh companion/fixtures/update.sh      # regenerate the status fixtures after a change to what a card says
 ```
 
 `tsc -p .` type-checks once Claude Code has loaded the mod, which writes `.claude-plugin/types/`.

@@ -444,7 +444,63 @@ export function mergeError(stderr: string): { message: string; isMethodRefused: 
     .filter(line => line !== '' && !/^To (?:have|use|merge)\b/.test(line))
   const message = lines.join(' ') || 'gh pr merge failed'
 
-  return { message, isMethodRefused: METHOD_REFUSED.test(message) }
+  // GitHub having a moment refuses no method, whatever its page says.
+  return { message, isMethodRefused: !isServerError(message) && METHOD_REFUSED.test(message) }
+}
+
+// GitHub's side gave up, in gh's words: "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+// "gh: Server Error (HTTP 503)", an older gh's "non-200 OK status code: 504 Gateway Timeout
+// body: …", a gateway's page ("502 Bad Gateway", "Service Unavailable"), or GraphQL's own
+// timeout ("Something went wrong while executing your query. This may be the result of a
+// timeout", "couldn't respond to your request in time"). Such an answer says nothing of whether
+// the merge went through: GitHub often finishes it after the gateway has stopped waiting.
+const SERVER_ERROR = new RegExp(
+  [
+    String.raw`\bHTTP(?:/[\d.]+)? 5\d\d\b`,
+    String.raw`\bstatus(?: code)?:? 5\d\d\b`,
+    String.raw`\b(?:Bad Gateway|Service Unavailable|Gateway Time-?out|Internal Server Error)\b`,
+    String.raw`\bThis may be the result of a timeout\b`,
+    String.raw`\bcouldn't respond to your request in time\b`,
+  ].join('|'),
+  'i',
+)
+
+export const isServerError = (said: string) => SERVER_ERROR.test(said)
+
+// What gh pr merge needs to know of a PR after GitHub stumbled: one `gh pr view` (GraphQL, as
+// the poller asks), as the same login.
+export const mergeReadArgv = (url: string) => ['pr', 'view', url, '--json', 'state,autoMergeRequest']
+
+export type MergeRead = { state: string; isAuto: boolean }
+
+// `gh pr view --json state,autoMergeRequest`'s answer; null where it isn't one.
+export function mergeReadOf(stdout: string): MergeRead | null {
+  try {
+    const read = JSON.parse(stdout) as { state?: unknown; autoMergeRequest?: unknown } | null
+    if (typeof read?.state !== 'string') return null
+
+    return { state: read.state, isAuto: read.autoMergeRequest != null }
+  } catch {
+    return null
+  }
+}
+
+// After a gh pr merge GitHub answered with a server error (isServerError), as the PR reads
+// now: `done` (it went through: no error, the fetch after shows it), `retry` (it didn't, and
+// the PR is as it was: run it once more), or `failed` (the PR can't be read, or has moved on
+// otherwise: the first error stands).
+export function afterServerError(run: MergeRun, read: MergeRead | null): 'done' | 'retry' | 'failed' {
+  if (read === null) return 'failed'
+  const isOpen = read.state === 'OPEN'
+  switch (run.action) {
+    case 'merge':
+      return read.state === 'MERGED' ? 'done' : isOpen ? 'retry' : 'failed'
+    // gh merges at once where nothing is left to wait for.
+    case 'auto':
+      return read.state === 'MERGED' || (isOpen && read.isAuto) ? 'done' : isOpen ? 'retry' : 'failed'
+    case 'cancel-auto':
+      return !isOpen ? 'failed' : read.isAuto ? 'retry' : 'done'
+  }
 }
 
 // gh runs well inside this (its own timeouts stop it sooner; a collection's longest is a token,

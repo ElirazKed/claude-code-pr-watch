@@ -10,16 +10,20 @@ import type { Depth, Look, Mode, Role, ThemeName } from './theme'
 import {
   MERGE_LABEL,
   STEPS,
+  afterServerError,
   ago,
   cwdOf,
   derive,
   findPrUrls,
   isActive,
   isBusy,
+  isServerError,
   mergeArgv,
   mergeError,
   mergeOf,
   mergeQuestion,
+  mergeReadArgv,
+  mergeReadOf,
   metaOf,
   nextMethod,
   pickMethod,
@@ -46,6 +50,8 @@ import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
 import type { Bar, Rates } from './rate'
 import type { GhPr, MergeRun, PrRef } from './pr'
+import { isTemp, placeOf, sessionFile, tempPath, urlsIn } from './protocol'
+import type { Place } from './protocol'
 
 const PANE = 'pr-watch'
 const TITLE = 'Pull requests'
@@ -117,7 +123,9 @@ const VERDICT_COLOUR: Record<Verdict, 'success' | 'error' | 'suggestion' | undef
 // Every session lists the PRs it watches under ~/.cache/pr-watch/sessions/ (the file's mtime
 // is its heartbeat); whichever session finds the shared results due takes a short lease and
 // fetches every live session's PRs in one batched query, and the rest read results.json.
-// So N sessions cost one GitHub call per round, not N.
+// So N sessions cost one GitHub call per round, not N. Other readers and writers (the `prw`
+// companion) share these files: companion/PROTOCOL.md says what each holds, and what a reader
+// may meet in them.
 
 type Shared = {
   fetchedAt: number
@@ -164,12 +172,20 @@ const GH_MS = 20_000
 const REST_CALL_MS = 5_000
 // How long every session holds off after a secondary limit that names no retry-after.
 const LIMIT_WAIT_MS = 60_000
+// Session files and temp files untouched this long are removed, at most every PRUNE_EVERY_MS.
 const PRUNE_MS = 86_400_000
+const PRUNE_EVERY_MS = 3_600_000
+// `mv` and `rm` on the cache's own files answer at once, or not at all.
+const FILE_OP_MS = 5_000
 
 // Survives /clear (the module stays loaded), unlike the session id.
 const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 let homeDir: string | null | undefined
 let dir: string | null = null
+// Where this session runs, for its session file: from the session start, and again whenever
+// the engine says the directory changed (classic.CwdChanged), never asked per tick.
+let place: Place | null = null
+let placeSeq = 0
 // gh's logins as `gh auth status` last listed them, when gh was last asked and whether it
 // answered (accounts.ts's isDue says when it is asked again), and the reading under way, so
 // callers at once share one. A reading that lists none is never kept: the last good one stands.
@@ -213,6 +229,10 @@ async function readJson<T>($: EngineInterface, path: string): Promise<T | null> 
   }
 }
 
+// In place: a reader may catch the file half-written. Every tick's writes (lease.json, the
+// session file) go this way, as an exec each tick costs more than a torn read does (a reader
+// takes one as absent, readJson's null, and reads again next tick); results.json alone is
+// written whole (writeResults).
 async function writeJson($: EngineInterface, path: string, value: unknown) {
   try {
     await $.fs.write(path, JSON.stringify(value))
@@ -221,17 +241,49 @@ async function writeJson($: EngineInterface, path: string, value: unknown) {
   }
 }
 
+// results.json, which every reader reads whole, is written whole: to a temp file beside it,
+// then moved over it, a rename a reader sees all or nothing of. `$.fs` has no rename, so it is
+// an `mv`, once a round. Where that fails, the file is written in place as before, so the round
+// is shared all the same; a temp file left behind is taken over by this session's next round,
+// or pruned (liveUrls).
+async function writeResults($: EngineInterface, shared: Shared) {
+  const path = `${await root($)}/results.json`
+  const temp = tempPath(path, INSTANCE)
+  try {
+    await $.fs.write(temp, JSON.stringify(shared))
+    const moved = await $.process.run(['mv', '-f', temp, path], { timeoutMs: FILE_OP_MS })
+    if (moved.exitCode === 0) return
+  } catch {
+    // Written in place below.
+  }
+  await writeJson($, path, shared)
+}
+
 async function readShared($: EngineInterface): Promise<Shared> {
   return { ...empty(), ...(await readJson<Shared>($, `${await root($)}/results.json`)) }
 }
 
-// This session's watch list; written every tick, so its mtime says the session is alive.
-async function announce($: EngineInterface, urls: readonly string[]) {
-  await writeJson($, `${await root($)}/sessions/${INSTANCE}.json`, { urls })
+// Where the session runs, for its session file: the directory, and its project root's folder
+// as its name (a `cd` into a subfolder doesn't rename it). Where the engine won't say the root,
+// the directory names it. Only the latest call lands: the session start's read, left running,
+// never overwrites a later classic.CwdChanged's.
+async function readPlace($: EngineInterface, cwd: string) {
+  const seq = ++placeSeq
+  const at = placeOf(cwd, await $.session.root().catch(() => cwd))
+  if (seq === placeSeq) place = at
 }
 
+// This session's watch list, and who and where it is (protocol.ts); written every tick, so its
+// mtime says the session is alive.
+async function announce($: EngineInterface, urls: readonly string[]) {
+  await writeJson($, `${await root($)}/sessions/${INSTANCE}.json`, sessionFile(urls, place))
+}
+
+// Every live session's PRs: an older mod's file, a newer one's and the companion's alike
+// (urlsIn), one cut off mid-write listing none this time.
 async function liveUrls($: EngineInterface, at: number): Promise<string[]> {
-  const base = `${await root($)}/sessions`
+  const cache = await root($)
+  const base = `${cache}/sessions`
   let entries: Awaited<ReturnType<EngineInterface['fs']['list']>> = []
   try {
     entries = await $.fs.list(base)
@@ -239,18 +291,28 @@ async function liveUrls($: EngineInterface, at: number): Promise<string[]> {
     return []
   }
   const live = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && at - f.mtimeMs < ALIVE_MS)
-  const lists = await Promise.all(live.map(f => readJson<{ urls?: string[] }>($, `${base}/${f.name}`)))
-  if (at - prunedAt > 3_600_000) {
+  const isPruneDue = at - prunedAt > PRUNE_EVERY_MS
+  // Listed beside the session reads, not after them: the round waits on neither alone.
+  const [lists, temps] = await Promise.all([
+    Promise.all(live.map(f => readJson<unknown>($, `${base}/${f.name}`))),
+    isPruneDue ? $.fs.list(cache).catch(() => []) : Promise.resolve([]),
+  ])
+  if (isPruneDue) {
     prunedAt = at
-    const dead = entries.filter(f => f.kind === 'file' && at - f.mtimeMs > PRUNE_MS).map(f => `${base}/${f.name}`)
-    if (dead.length > 0) void $.process.run(['rm', '-f', ...dead], { timeoutMs: 5_000 }).catch(() => undefined)
+    // Exited sessions' files, and temp files a write left beside results.json (writeResults).
+    const dead = [
+      ...entries.filter(f => f.kind === 'file' && at - f.mtimeMs > PRUNE_MS).map(f => `${base}/${f.name}`),
+      ...temps.filter(f => f.kind === 'file' && isTemp(f.name) && at - f.mtimeMs > PRUNE_MS).map(f => `${cache}/${f.name}`),
+    ]
+    if (dead.length > 0) void $.process.run(['rm', '-f', ...dead], { timeoutMs: FILE_OP_MS }).catch(() => undefined)
   }
 
-  return [...new Set(lists.flatMap(list => list?.urls ?? []))]
+  return [...new Set(lists.flatMap(urlsIn))]
 }
 
 // A lease, not a lock: plain files have no atomic create, so claim, wait, and re-read. Two
-// sessions racing past this costs one duplicate round, never a missed one.
+// sessions racing past this costs one duplicate round, never a missed one. Written in place
+// (writeJson): a lease read torn is no lease held, so at worst that costs a duplicate round too.
 async function takeLease($: EngineInterface, at: number): Promise<boolean> {
   const path = `${await root($)}/lease.json`
   const held = await readJson<{ owner: string; until: number }>($, path)
@@ -624,7 +686,7 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, l
   // session set while this one asked stands too: this round's nextAt never cuts it short.
   if (waitMs !== null) shared.heldUntil = Math.max(shared.heldUntil ?? 0, (await $.clock.now()) + waitMs)
   shared.nextAt = Math.max(shared.nextAt, shared.heldUntil ?? 0)
-  await writeJson($, `${await root($)}/results.json`, shared)
+  await writeResults($, shared)
 
   return shared
 }
@@ -869,7 +931,9 @@ const BUSY: Record<MergeRun['action'], string> = {
 
 // Runs gh pr merge as the account the poller found sees the repo (its token, never written
 // anywhere), and only as that one, then asks GitHub again at once so the card shows what
-// happened.
+// happened. A server error (a 502, a gateway timeout) says nothing of whether it went through:
+// RETRY_MS on, the PR is read again as the same login, and the run counts as done, runs once
+// more, or shows the error it had, as afterServerError says (pr.ts).
 async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   const method = run.action === 'cancel-auto' ? undefined : run.method
   const busy = { action: run.action, at: await $.clock.now() }
@@ -879,7 +943,14 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
     const got = await tokenFor($, await pressLogin($, pr))
     if ('error' in got) ask = { method, error: got.error }
     else {
-      const res = await gh($, mergeArgv(pr.url, run), got.token)
+      let res = await gh($, mergeArgv(pr.url, run), got.token)
+      if (res.exitCode !== 0 && isServerError(res.stderr || res.stdout)) {
+        await $.clock.sleep(RETRY_MS)
+        const view = await gh($, mergeReadArgv(pr.url), got.token).catch(() => null)
+        const next = afterServerError(run, view !== null && view.exitCode === 0 ? mergeReadOf(view.stdout) : null)
+        if (next === 'done') res = { ...res, exitCode: 0 }
+        else if (next === 'retry') res = await gh($, mergeArgv(pr.url, run), got.token)
+      }
       if (res.exitCode !== 0) {
         const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
         ask = { method: isMethodRefused ? undefined : method, error: message }
@@ -1489,6 +1560,9 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
+    // Off the start path: until the root is read, the directory names the session.
+    place = placeOf(e.cwd)
+    void readPlace($, e.cwd)
     await $.command.register({
       name: 'pr-watch',
       description: 'Open the PR pane; /pr-watch <url> watches a PR, /pr-watch stop <number|url|all> stops, /pr-watch theme <name> restyles it',
@@ -1531,6 +1605,15 @@ export const register: Register = (on, options) => {
 
     return next(e)
   })
+
+  // A `cd`, a /cd or a worktree move: the session file says where the session runs from its
+  // next tick. A subagent running in a directory of its own (a worktree, a spawn `cwd`) fires
+  // none, and one sharing the session's directory moves the session's: no `agent_id` to check.
+  on('classic.CwdChanged', async ($, e, next) => {
+    await readPlace($, e.new_cwd)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // A /clear ends the conversation with no session.start after it; the engine may close the
   // pane and start the state over, so carry the PRs across and restore once it has settled.

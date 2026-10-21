@@ -161,7 +161,10 @@ const ALIAS = /p(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ pullRe
 // (`gh api … /issues/<n>/comments`) goes in `comments`: its argv, the body its stdin carried and
 // its GH_TOKEN; `posting.reply`, when set, says how it ends (now, or once a promise settles),
 // and by default it posts, GitHub answering with the new comment's link. The time zone
-// (`date +%z`) is +0300.
+// (`date +%z`) is +0300. `mv` renames a file in memory (`moves.done` records each from and to;
+// the next `moves.fail` of them fail) and `rm` removes them. `gh pr view <url> --json
+// state,autoMergeRequest` answers from `gh` (`reads` records each argv; the next `reads.fail`
+// of them answer a 502).
 // The terminal's environment: one that takes 24-bit colour, unless a test says otherwise.
 const TRUECOLOR_ENV: Record<string, string> = { COLORTERM: 'truecolor', TERM: 'xterm-ghostty' }
 // Inside tmux, where Claude Code paints 256 colours.
@@ -193,6 +196,8 @@ function fakeHost(
   const auth = { failStatus: 0, failToken: {} as Record<string, number>, asks: [] as string[] }
   const comments: { argv: string[]; body: unknown; token: string | undefined }[] = []
   const posting: { reply: ((body: unknown) => RunReply | Promise<RunReply>) | null } = { reply: null }
+  const moves = { done: [] as [string, string][], fail: 0 }
+  const reads = Object.assign([] as string[][], { fail: 0 })
   on('env.get', ($, e) => ({ value: { HOME: '/home/me', ...env }[e.name] }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
@@ -222,6 +227,26 @@ function fakeHost(
       return Promise.resolve(runLog(e.argv)).then(reply => out(reply.exitCode, reply.stdout ?? '', reply.stderr))
     }
     if (e.argv[0] === 'date') return out(0, '+0300\n')
+    // A rename, as `mv` makes one: the file moves, its mtime with it.
+    if (e.argv[0] === 'mv') {
+      const [from = '', to = ''] = e.argv.slice(-2)
+      const file = files.get(from)
+      if (file === undefined || moves.fail > 0) {
+        moves.fail = Math.max(0, moves.fail - 1)
+
+        return out(1, '', `mv: rename ${from} to ${to}: Operation not permitted\n`)
+      }
+      files.delete(from)
+      files.set(to, file)
+      moves.done.push([from, to])
+
+      return out(0, '')
+    }
+    if (e.argv[0] === 'rm') {
+      for (const path of e.argv.slice(2)) files.delete(path)
+
+      return out(0, '')
+    }
     if (e.argv[1] === 'auth' && e.argv[2] === 'token') {
       const user = String(e.argv[e.argv.indexOf('--user') + 1])
       auth.asks.push(`token ${user}`)
@@ -251,6 +276,18 @@ function fakeHost(
       const resources = { core: one(budget.requests[login] ?? 4_900, REQUESTS_RESET), graphql: one(budget.points[login] ?? 4_000, POINTS_RESET) }
 
       return out(0, JSON.stringify({ resources, rate: resources.core }))
+    }
+    // A PR read again after a merge GitHub answered with a server error: what it says now.
+    if (e.argv[1] === 'pr' && e.argv[2] === 'view' && e.argv.includes('state,autoMergeRequest')) {
+      reads.push([...e.argv])
+      const fixture = gh[String(e.argv[3])] as Record<string, unknown> | undefined
+      if (fixture === undefined || reads.fail > 0) {
+        reads.fail = Math.max(0, reads.fail - 1)
+
+        return out(1, '', 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n')
+      }
+
+      return out(0, JSON.stringify({ autoMergeRequest: fixture.autoMergeRequest ?? null, state: fixture.state }))
     }
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     const issue = String(e.argv[4] ?? '').match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/)
@@ -299,7 +336,7 @@ function fakeHost(
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth, comments, posting }
+  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth, comments, posting, moves, reads }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -496,6 +533,84 @@ test("one session's round fetches every live session's PRs in a single query", a
   expect(queries.map(q => [...q].sort())).toEqual([[RUNNING, FAILING].sort()])
   const shared = JSON.parse(files.get('/home/me/.cache/pr-watch/results.json')?.text ?? '{}')
   expect(Object.keys(shared.prs).sort()).toEqual([FAILING, RUNNING].sort())
+})
+
+const CACHE = '/home/me/.cache/pr-watch'
+
+// A session started in `cwd` (its project root `root`), watching #12; the clock past its first tick.
+async function startSession($: Parameters<TestBody>[0], on: On, files: Map<string, { text: string; mtimeMs: number }>, cwd = '/work/app', root = cwd) {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const host = fakeHost(on, clock, GH, files)
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd }))
+  on('session.root', () => ({ value: root }))
+  on('classic.CwdChanged', () => ({}))
+  await $.session.start({ source: 'startup', cwd } as never)
+  await $.command.run({ command: 'pr-watch', args: RUNNING, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  host.queries.length = 0
+  await clock.advance(10_500)
+
+  return { ...host, clock }
+}
+
+const sessionFiles = (files: Map<string, { text: string }>) =>
+  [...files].filter(([path]) => path.startsWith(`${CACHE}/sessions/`) && !/\/(?:other|gone|torn)\.json$/.test(path)).map(([, f]) => JSON.parse(f.text))
+
+test("a session's file says who wrote it, which agent, and where it runs; a cd moves it, not its name", async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const { clock } = await startSession($, on, files, '/work/app', '/work/app')
+  expect(sessionFiles(files)).toEqual([{ urls: [RUNNING], writer: 'mod', agent: 'claude', name: 'app', cwd: '/work/app' }])
+
+  await $.classic.CwdChanged({ old_cwd: '/work/app', new_cwd: '/work/app/hooks' })
+  await clock.advance(10_000)
+  expect(sessionFiles(files)).toEqual([{ urls: [RUNNING], writer: 'mod', agent: 'claude', name: 'app', cwd: '/work/app/hooks' }])
+})
+
+test('results.json lands whole, by a rename from a temp file beside it', async ($, on) => {
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const { moves } = await startSession($, on, files)
+  const results = `${CACHE}/results.json`
+
+  expect(moves.done.length).toBeGreaterThan(0)
+  for (const [from, to] of moves.done) expect([from.startsWith(`${results}.`) && from.endsWith('.tmp'), to]).toEqual([true, results])
+  expect([...files.keys()].filter(path => path.endsWith('.tmp'))).toEqual([])
+  expect(Object.keys(JSON.parse(files.get(results)?.text ?? '{}').prs)).toEqual([RUNNING])
+})
+
+test('where the rename fails, results.json is written in place, so the round is shared all the same', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  const { moves } = fakeHost(on, clock, GH, files)
+  moves.fail = 99
+  await $.command.run({ command: 'pr-watch', args: RUNNING, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+
+  expect(moves.done).toEqual([])
+  expect(Object.keys(JSON.parse(files.get(`${CACHE}/results.json`)?.text ?? '{}').prs)).toEqual([RUNNING])
+})
+
+test("a torn session file or lease reads as none, the companion's file counts, and a day-old temp file goes", async ($, on) => {
+  const at = Date.parse('2026-10-07T12:00:00Z')
+  const files = new Map<string, { text: string; mtimeMs: number }>()
+  // Cut off mid-write: no PRs from it this round, and no lease held.
+  files.set(`${CACHE}/sessions/torn.json`, { text: '{"urls":["https://github.com/acme/api/pu', mtimeMs: at })
+  files.set(`${CACHE}/lease.json`, { text: '{"owner":"lz-other","unt', mtimeMs: at })
+  // The companion's session, with fields this version doesn't read.
+  const companion = { urls: [FAILING], writer: 'prw', agent: 'codex', name: 'api', cwd: '/src/api', since: at }
+  files.set(`${CACHE}/sessions/other.json`, { text: JSON.stringify(companion), mtimeMs: at })
+  // A rename that never came, a day ago; and one another session is about to make.
+  files.set(`${CACHE}/results.json.lz-gone.tmp`, { text: '{"fetchedAt":', mtimeMs: at - 86_400_000 - 1 })
+  files.set(`${CACHE}/results.json.lz-busy.tmp`, { text: '{"fetchedAt":', mtimeMs: at })
+  const { queries } = await startSession($, on, files)
+
+  expect(queries.map(q => [...q].sort())).toEqual([[RUNNING, FAILING].sort()])
+  expect(files.has(`${CACHE}/results.json.lz-gone.tmp`)).toBe(false)
+  expect(files.has(`${CACHE}/results.json.lz-busy.tmp`)).toBe(true)
+  expect(files.has(`${CACHE}/sessions/torn.json`)).toBe(true)
 })
 
 test('a session reads a fresh round another session ran, and asks GitHub nothing', async ($, on) => {
@@ -845,20 +960,23 @@ const mergeable = (extra: Record<string, unknown> = {}) =>
     ...extra,
   })
 
-// Watches #21 as `fixture` and draws the pane; `merges` is every `gh pr merge` argv since.
+// Watches #21 as `fixture` and draws the pane; `merges` is every `gh pr merge` argv since, and
+// `reads` every read of the PR after one. `merge` is handed GitHub's PRs too, to change them
+// as a merge that fails yet goes through does.
 async function mergeCard(
   $: Parameters<TestBody>[0],
   on: On,
   fixture: Record<string, unknown>,
-  merge?: (argv: readonly string[]) => MergeReply | Promise<MergeReply>,
+  merge?: (argv: readonly string[], gh: Record<string, unknown>) => MergeReply | Promise<MergeReply>,
 ) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
-  const { merges, mergeTokens } = fakeHost(on, clock, { [READY]: fixture }, undefined, undefined, merge)
+  const gh: Record<string, unknown> = { [READY]: fixture }
+  const { merges, mergeTokens, reads } = fakeHost(on, clock, gh, undefined, undefined, merge && (argv => merge(argv, gh)))
   await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
   await clock.advance(100)
 
-  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, mergeTokens, clock }
+  return { ui: await $.ui.mount({ ...PANE, surface: 'terminal' }), merges, mergeTokens, reads, clock }
 }
 
 // A gh reply that waits for `release()`, so a test can act while gh runs.
@@ -1044,6 +1162,92 @@ test('once every method is refused, the card keeps the error and offers no butto
 
   expect(await ui.find({ text: '✗ Squash merges are not allowed on this repository.' })).toBeDefined()
   expect(await ui.find({ key: `merge:${READY}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+// What gh pr merge says when GitHub's gateway gives up on it.
+const MERGE_502 = 'HTTP 502: Bad Gateway (https://api.github.com/graphql)\n'
+
+test('a merge GitHub answered with a 502 but made shows Merged, not the 502', async ($, on) => {
+  // The gateway stopped waiting; the merge went through behind it.
+  const late = (argv: readonly string[], gh: Record<string, unknown>) => (merged(gh, argv), { exitCode: 1, stderr: MERGE_502 })
+  const { ui, merges, reads, clock } = await mergeCard($, on, mergeable(), late)
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--squash']])
+  expect(reads).toHaveLength(1)
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  expect(await ui.find({ text: /^✗/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a 502 that left the PR open is merged once more, as the same login', async ($, on) => {
+  let calls = 0
+  const flaky = () => ((calls += 1), calls === 1 ? { exitCode: 1, stderr: MERGE_502 } : { exitCode: 0 })
+  const { ui, merges, mergeTokens, clock } = await mergeCard($, on, mergeable(), flaky)
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  // Not before RETRY_MS: GitHub may be finishing it.
+  await clock.advance(1_000)
+  expect(merges).toHaveLength(1)
+  await clock.advance(1_100)
+  await pressed
+
+  expect(merges).toEqual([
+    ['gh', 'pr', 'merge', READY, '--squash'],
+    ['gh', 'pr', 'merge', READY, '--squash'],
+  ])
+  expect(mergeTokens).toEqual(['me-token', 'me-token'])
+  expect(await ui.find({ text: /✓ MERGED/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a merge tried again after a 502 shows what the second try said, and only once more', async ($, on) => {
+  const said = [MERGE_502, 'X Pull request acme/app#21 is not mergeable: the base branch policy prohibits the merge.\n']
+  let calls = 0
+  const { ui, merges, clock } = await mergeCard($, on, mergeable(), () => ({ exitCode: 1, stderr: said[calls++] ?? MERGE_502 }))
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toHaveLength(2)
+  expect(await ui.find({ text: '✗ Pull request acme/app#21 is not mergeable: the base branch policy prohibits the merge.' })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a 502 where the PR can't be read again shows the 502, runs nothing more and refuses no method", async ($, on) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const host = fakeHost(on, clock, { [READY]: mergeable() }, undefined, undefined, () => ({ exitCode: 1, stderr: MERGE_502 }))
+  await $.command.run({ command: 'pr-watch', args: READY, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  host.reads.fail = 1
+  await ui.press({ key: `merge:${READY}` })
+  const pressed = ui.press({ key: `confirm:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(host.merges).toHaveLength(1)
+  expect(host.reads.map(argv => argv.slice(1))).toEqual([['pr', 'view', READY, '--json', 'state,autoMergeRequest']])
+  expect(await ui.find({ text: '✗ HTTP 502: Bad Gateway (https://api.github.com/graphql)' })).toBeDefined()
+  expect((await ui.find({ key: `merge:${READY}` }))?.props.label).toBe('Squash & merge')
+  await ui.unmount()
+})
+
+test("a 502 on Cancel auto-merge that turned it off anyway says nothing went wrong", async ($, on) => {
+  const auto = mergeable({ mergeStateStatus: 'BLOCKED', autoMergeRequest: { enabledAt: '2026-10-07T11:00:00Z', mergeMethod: 'SQUASH' } })
+  const { ui, merges, clock } = await mergeCard($, on, auto, (argv, gh) => (merged(gh, argv), { exitCode: 1, stderr: 'gh: Server Error (HTTP 503)\n' }))
+  const pressed = ui.press({ key: `cancel-auto:${READY}` })
+  await clock.advance(2_100)
+  await pressed
+
+  expect(merges).toEqual([['gh', 'pr', 'merge', READY, '--disable-auto']])
+  expect(await ui.find({ text: /^✗/ })).toBeUndefined()
   await ui.unmount()
 })
 
