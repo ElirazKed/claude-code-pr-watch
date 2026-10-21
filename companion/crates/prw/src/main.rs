@@ -36,12 +36,17 @@ enum Command {
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
-    // The first argument decides; there are no subcommands yet.
-    match args.into_iter().next().as_deref() {
-        None => Command::Run,
+    // At most one argument; there are no subcommands yet.
+    let mut args = args.into_iter();
+    let command = match args.next().as_deref() {
+        None => return Command::Run,
         Some("-h" | "--help") => Command::Help,
         Some("-V" | "--version") => Command::Version,
-        Some(other) => Command::Unknown(other.to_owned()),
+        Some(other) => return Command::Unknown(other.to_owned()),
+    };
+    match args.next() {
+        None => command,
+        Some(extra) => Command::Unknown(extra),
     }
 }
 
@@ -70,9 +75,11 @@ fn main() -> ExitCode {
 }
 
 /// Takes over the terminal, runs until a quit key, and gives it back.
-/// `ratatui::init` also installs a panic hook that restores the terminal first.
+/// `ratatui::try_init` also installs a panic hook that restores the terminal first.
+/// A failed init (say, stdout is not a terminal) is reported, not a panic, and
+/// undoes whatever part of the setup had already happened (raw mode).
 fn run() -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     let result = event_loop(&mut terminal);
     ratatui::restore();
     result
@@ -159,6 +166,10 @@ mod tests {
         assert_eq!(parse(&["--help"]), Command::Help);
         assert_eq!(parse(&["-h"]), Command::Help);
         assert_eq!(parse(&["watch"]), Command::Unknown("watch".into()));
+        assert_eq!(
+            parse(&["--version", "extra"]),
+            Command::Unknown("extra".into())
+        );
     }
 
     #[test]
