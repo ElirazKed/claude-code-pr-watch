@@ -6,8 +6,11 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: skeleton (step 1 of the plan).** It opens a box that shows the terminal's width and the layout
-it would use, follows resizes, and quits on `q`, Esc or Ctrl-C. Nothing reads PRs yet.
+**Status: step 3 of the plan: core ports, parity with the mod.** `prw-core` reads the shared files
+(`PROTOCOL.md`) and works out each PR's card as the mod does (`derive`, checks, merge options, reviews,
+urgency order), held to the mod's own fixtures (`fixtures/`). The binary is still the skeleton: it opens
+a box that shows the terminal's width and the layout it would use, follows resizes, and quits on `q`,
+Esc or Ctrl-C. Nothing reads PRs on screen yet.
 
 ## Build and run
 
@@ -44,5 +47,6 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 ## Crates
 
-- `crates/prw-core`: the pure kernel (no I/O), tested with properties.
+- `crates/prw-core`: the pure kernel (no I/O): protocol types and status logic, tested with properties
+  and against the mod's fixtures (`tests/fixtures.rs`).
 - `crates/prw`: the binary: terminal, files, `gh`.
