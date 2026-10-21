@@ -185,6 +185,7 @@ let dir: string | null = null
 // Where this session runs, for its session file: from the session start, and again whenever
 // the engine says the directory changed (classic.CwdChanged), never asked per tick.
 let place: Place | null = null
+let placeSeq = 0
 // gh's logins as `gh auth status` last listed them, when gh was last asked and whether it
 // answered (accounts.ts's isDue says when it is asked again), and the reading under way, so
 // callers at once share one. A reading that lists none is never kept: the last good one stands.
@@ -264,9 +265,12 @@ async function readShared($: EngineInterface): Promise<Shared> {
 
 // Where the session runs, for its session file: the directory, and its project root's folder
 // as its name (a `cd` into a subfolder doesn't rename it). Where the engine won't say the root,
-// the directory names it.
+// the directory names it. Only the latest call lands: the session start's read, left running,
+// never overwrites a later classic.CwdChanged's.
 async function readPlace($: EngineInterface, cwd: string) {
-  place = placeOf(cwd, await $.session.root().catch(() => cwd))
+  const seq = ++placeSeq
+  const at = placeOf(cwd, await $.session.root().catch(() => cwd))
+  if (seq === placeSeq) place = at
 }
 
 // This session's watch list, and who and where it is (protocol.ts); written every tick, so its
@@ -287,11 +291,15 @@ async function liveUrls($: EngineInterface, at: number): Promise<string[]> {
     return []
   }
   const live = entries.filter(f => f.kind === 'file' && f.name.endsWith('.json') && at - f.mtimeMs < ALIVE_MS)
-  const lists = await Promise.all(live.map(f => readJson<unknown>($, `${base}/${f.name}`)))
-  if (at - prunedAt > PRUNE_EVERY_MS) {
+  const isPruneDue = at - prunedAt > PRUNE_EVERY_MS
+  // Listed beside the session reads, not after them: the round waits on neither alone.
+  const [lists, temps] = await Promise.all([
+    Promise.all(live.map(f => readJson<unknown>($, `${base}/${f.name}`))),
+    isPruneDue ? $.fs.list(cache).catch(() => []) : Promise.resolve([]),
+  ])
+  if (isPruneDue) {
     prunedAt = at
     // Exited sessions' files, and temp files a write left beside results.json (writeResults).
-    const temps = await $.fs.list(cache).catch(() => [])
     const dead = [
       ...entries.filter(f => f.kind === 'file' && at - f.mtimeMs > PRUNE_MS).map(f => `${base}/${f.name}`),
       ...temps.filter(f => f.kind === 'file' && isTemp(f.name) && at - f.mtimeMs > PRUNE_MS).map(f => `${cache}/${f.name}`),
@@ -1599,7 +1607,8 @@ export const register: Register = (on, options) => {
   })
 
   // A `cd`, a /cd or a worktree move: the session file says where the session runs from its
-  // next tick.
+  // next tick. A subagent running in a directory of its own (a worktree, a spawn `cwd`) fires
+  // none, and one sharing the session's directory moves the session's: no `agent_id` to check.
   on('classic.CwdChanged', async ($, e, next) => {
     await readPlace($, e.new_cwd)
 
