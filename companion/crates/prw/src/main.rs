@@ -1,58 +1,93 @@
 //! `prw`: the terminal companion for the pr-watch mod.
 //!
-//! Skeleton (step 1 of the plan): a bordered box that shows the terminal's
-//! width and the layout `prw_core::layout` picks for it, redrawn on resize.
+//! The kernel (step 4 of the plan): a read-only TUI over the mod's shared cache. It reads
+//! `results.json` and the session files (`cache`), feeds what it read to the model
+//! (`prw_core::ui::update`) as messages, and draws the model (`view`) after each one.
+//! It never writes to the cache.
+
+mod cache;
+mod theme;
+mod view;
 
 use std::io;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant, SystemTime};
 
-use prw_core::layout;
+use prw_core::parse_shared;
+use prw_core::ui::{Cmd, Key, Model, Msg, update};
+use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
-use ratatui::{DefaultTerminal, Frame};
+
+use crate::cache::{Reader, default_dir, ms_of};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How often the files are looked at, and ages move on.
+const TICK: Duration = Duration::from_secs(1);
 
 const HELP: &str = "\
 prw: every PR your agents touch, in one terminal
 
 Usage: prw [OPTIONS]
 
-Options:
-  -h, --help     Print this help
-  -V, --version  Print the version
+Shows the PRs the pr-watch mod polls, from its shared cache. Read-only: prw never
+writes to the cache, and never asks GitHub anything (yet).
 
-Keys: q, Esc or Ctrl-C quits.
+Options:
+      --cache <DIR>  The cache to read [env: PRW_CACHE] [default: ~/.cache/pr-watch]
+      --demo         Show a cache as if it were live: every session file counts as
+                     just written, and the clock starts at results.json's last round
+                     (for companion/demo, whose files never change)
+  -h, --help         Print this help
+  -V, --version      Print the version
+
+Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q quit.
 ";
+
+/// How to run.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    cache: Option<PathBuf>,
+    is_demo: bool,
+}
 
 /// What the command line asked for.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    Run,
+    Run(Options),
     Help,
     Version,
     Unknown(String),
+    /// A flag that takes a value, without one.
+    Missing(&'static str),
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
-    // At most one argument; there are no subcommands yet.
+    let mut options = Options::default();
     let mut args = args.into_iter();
-    let command = match args.next().as_deref() {
-        None => return Command::Run,
-        Some("-h" | "--help") => Command::Help,
-        Some("-V" | "--version") => Command::Version,
-        Some(other) => return Command::Unknown(other.to_owned()),
-    };
-    match args.next() {
-        None => command,
-        Some(extra) => Command::Unknown(extra),
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Command::Help,
+            "-V" | "--version" => return Command::Version,
+            "--demo" => options.is_demo = true,
+            "--cache" => match args.next() {
+                Some(dir) if !dir.is_empty() => options.cache = Some(dir.into()),
+                _ => return Command::Missing("--cache"),
+            },
+            other => match other.strip_prefix("--cache=") {
+                Some("") => return Command::Missing("--cache"),
+                Some(dir) => options.cache = Some(dir.into()),
+                None => return Command::Unknown(other.to_owned()),
+            },
+        }
     }
+    Command::Run(options)
 }
 
 fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
-        Command::Run => match run() {
+        Command::Run(options) => match run(&options) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("prw: {err}");
@@ -71,6 +106,46 @@ fn main() -> ExitCode {
             eprintln!("prw: unknown argument '{arg}'\n\n{HELP}");
             ExitCode::from(2)
         }
+        Command::Missing(flag) => {
+            eprintln!("prw: {flag} needs a value\n\n{HELP}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The cache to read: `--cache`, else `$PRW_CACHE`, else the mod's.
+fn cache_dir(options: &Options) -> PathBuf {
+    let env = std::env::var("PRW_CACHE").ok().filter(|d| !d.is_empty());
+    options
+        .cache
+        .clone()
+        .or_else(|| env.map(PathBuf::from))
+        .unwrap_or_else(|| default_dir(std::env::var("HOME").ok().as_deref()))
+}
+
+/// The time the model sees (ms): the wall clock, or, in a demo, the wall clock moved so it
+/// starts just after the cache's last round.
+struct Clock {
+    offset: i64,
+}
+
+impl Clock {
+    fn new(dir: &std::path::Path, is_demo: bool) -> Self {
+        let wall = ms_of(SystemTime::now());
+        let fetched_at = std::fs::read_to_string(dir.join("results.json"))
+            .ok()
+            .and_then(|text| parse_shared(&text).ok())
+            .map_or(0, |shared| shared.fetched_at);
+        let offset = if is_demo && fetched_at > 0 {
+            fetched_at + 12_000 - wall
+        } else {
+            0
+        };
+        Self { offset }
+    }
+
+    fn now(&self) -> i64 {
+        ms_of(SystemTime::now()).saturating_add(self.offset)
     }
 }
 
@@ -78,110 +153,156 @@ fn main() -> ExitCode {
 /// `ratatui::try_init` also installs a panic hook that restores the terminal first.
 /// A failed init (say, stdout is not a terminal) is reported, not a panic, and
 /// undoes whatever part of the setup had already happened (raw mode).
-fn run() -> io::Result<()> {
+fn run(options: &Options) -> io::Result<()> {
+    let dir = cache_dir(options);
+    let clock = Clock::new(&dir, options.is_demo);
+    let reader = Reader::new(dir, options.is_demo);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-    let result = event_loop(&mut terminal);
+    let result = event_loop(&mut terminal, reader, &clock);
     ratatui::restore();
     result
 }
 
-fn event_loop(terminal: &mut DefaultTerminal) -> io::Result<()> {
+fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
+    let mut quit = false;
+    let model = msgs.into_iter().fold(model, |model, msg| {
+        let (model, cmds) = update(model, msg);
+        quit |= cmds.contains(&Cmd::Quit);
+        model
+    });
+    (model, quit)
+}
+
+fn event_loop(terminal: &mut DefaultTerminal, mut reader: Reader, clock: &Clock) -> io::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = reader.dir().display().to_string();
+    let shown = match dir.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("~{rest}"),
+        _ => dir,
+    };
+    let ctx = view::Ctx {
+        dir: &shown,
+        home: &home,
+    };
+    let size = terminal.size()?;
+    let (mut model, _) = feed(
+        Model::new(size.width, size.height),
+        reader.poll(clock.now()),
+    );
+    let mut last_tick = Instant::now();
     loop {
-        terminal.draw(render)?;
-        // Blocks until something happens; a resize (or any other event)
-        // falls through to the next draw, which reads the new size.
-        if let Event::Key(key) = event::read()?
-            && is_quit(key)
-        {
-            return Ok(());
+        terminal.draw(|frame| view::render(frame, &model, ctx))?;
+        // Wait for a key or a resize until the next tick; only a message redraws.
+        loop {
+            let timeout = (last_tick + TICK).saturating_duration_since(Instant::now());
+            if event::poll(timeout)? {
+                let msg = match event::read()? {
+                    Event::Key(key) => key_of(key).map(Msg::Key),
+                    Event::Resize(width, height) => Some(Msg::Resize(width, height)),
+                    _ => None,
+                };
+                let Some(msg) = msg else { continue };
+                let (next, quit) = feed(model, [msg]);
+                if quit {
+                    return Ok(());
+                }
+                model = next;
+            } else {
+                last_tick = Instant::now();
+                let now = clock.now();
+                (model, _) = feed(model, reader.poll(now).into_iter().chain([Msg::Tick(now)]));
+            }
+            break;
         }
     }
 }
 
-fn is_quit(key: KeyEvent) -> bool {
-    key.kind == KeyEventKind::Press
-        && match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => true,
-            KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::CONTROL),
-            _ => false,
-        }
-}
-
-fn render(frame: &mut Frame) {
-    let area = frame.area();
-    let width = area.width;
-    let chosen = layout(width);
-    let block = Block::bordered()
-        .title(" prw ")
-        .title_bottom(Line::from(" q quit ").right_aligned());
-    let body = Paragraph::new(Line::from(format!(
-        "width {width} · layout {}",
-        chosen.name()
-    )))
-    .block(block);
-    frame.render_widget(body, area);
+/// A terminal key as the model takes it; `None` for a release or a key it doesn't use.
+fn key_of(key: KeyEvent) -> Option<Key> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    Some(match key.code {
+        KeyCode::Char('c') if is_ctrl => Key::CtrlC,
+        KeyCode::Char(_) if is_ctrl => return None,
+        KeyCode::Char(c) => Key::Char(c),
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Esc => Key::Esc,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    fn screen(width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        terminal.draw(render).expect("draw");
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect()
-    }
-
-    #[test]
-    fn shows_the_width_and_the_layout_it_chose() {
-        for (width, name) in [
-            (120, "three panes"),
-            (84, "strip"),
-            (49, "side"),
-            (30, "too narrow"),
-        ] {
-            let text = screen(width, 4);
-            assert!(text.contains(" prw "), "{width}: {text}");
-            assert!(
-                text.contains(&format!("width {width} · layout {name}")),
-                "{width}: {text}"
-            );
-        }
-    }
 
     #[test]
     fn parses_the_flags() {
         let parse = |args: &[&str]| parse_args(args.iter().map(|&s| s.to_owned()));
-        assert_eq!(parse(&[]), Command::Run);
+        assert_eq!(parse(&[]), Command::Run(Options::default()));
         assert_eq!(parse(&["--version"]), Command::Version);
         assert_eq!(parse(&["-V"]), Command::Version);
         assert_eq!(parse(&["--help"]), Command::Help);
         assert_eq!(parse(&["-h"]), Command::Help);
         assert_eq!(parse(&["watch"]), Command::Unknown("watch".into()));
+        assert_eq!(parse(&["--version", "extra"]), Command::Version);
+        let demo = Options {
+            cache: Some("companion/demo".into()),
+            is_demo: true,
+        };
         assert_eq!(
-            parse(&["--version", "extra"]),
-            Command::Unknown("extra".into())
+            parse(&["--cache", "companion/demo", "--demo"]),
+            Command::Run(demo)
         );
+        assert_eq!(
+            parse(&["--cache=/tmp/c"]),
+            Command::Run(Options {
+                cache: Some("/tmp/c".into()),
+                is_demo: false
+            })
+        );
+        assert_eq!(parse(&["--cache"]), Command::Missing("--cache"));
+        assert_eq!(parse(&["--cache="]), Command::Missing("--cache"));
     }
 
     #[test]
-    fn quits_on_q_esc_and_ctrl_c_only() {
+    fn maps_the_keys_and_ignores_releases() {
         let press = |code, modifiers| KeyEvent::new(code, modifiers);
-        assert!(is_quit(press(KeyCode::Char('q'), KeyModifiers::NONE)));
-        assert!(is_quit(press(KeyCode::Esc, KeyModifiers::NONE)));
-        assert!(is_quit(press(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-        assert!(!is_quit(press(KeyCode::Char('c'), KeyModifiers::NONE)));
-        assert!(!is_quit(press(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(
+            key_of(press(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(Key::Char('q'))
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+            Some(Key::Char('G'))
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Key::Esc)
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Key::CtrlC)
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            key_of(press(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(Key::BackTab)
+        );
         let mut release = press(KeyCode::Char('q'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
-        assert!(!is_quit(release));
+        assert_eq!(key_of(release), None);
     }
 }

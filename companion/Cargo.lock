@@ -1044,8 +1044,10 @@ dependencies = [
 name = "prw"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "prw-core",
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]
