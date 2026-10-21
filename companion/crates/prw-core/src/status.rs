@@ -764,3 +764,62 @@ fn settled(pr: &GhPr, kept: Option<&Reviews>) -> Said {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept() -> Mergeable {
+        Mergeable {
+            methods: vec![MergeMethod::Squash],
+            can_merge: true,
+            can_auto: true,
+            is_auto: false,
+            auto_method: None,
+            can_cancel_auto: false,
+        }
+    }
+
+    fn open(merge_state_status: MergeStateStatus) -> GhPr {
+        GhPr {
+            state: PrState::Open,
+            merge_state_status: Some(merge_state_status),
+            ..GhPr::default()
+        }
+    }
+
+    #[test]
+    fn an_older_mods_entry_keeps_the_merge_row_it_had() {
+        assert_eq!(merge_of(&open(MergeStateStatus::Clean), &kept()), kept());
+        let behind = merge_of(&open(MergeStateStatus::Behind), &kept());
+        assert_eq!(
+            behind,
+            Mergeable {
+                can_merge: false,
+                ..kept()
+            }
+        );
+        let conflicted = merge_of(&open(MergeStateStatus::Dirty), &kept());
+        assert!(!conflicted.can_merge && !conflicted.can_auto);
+        assert_eq!(conflicted.methods, kept().methods);
+        let draft = GhPr {
+            is_draft: true,
+            ..open(MergeStateStatus::Clean)
+        };
+        assert!(!merge_of(&draft, &kept()).can_merge);
+    }
+
+    #[test]
+    fn its_own_merge_facts_or_a_finished_pr_ignore_what_was_kept() {
+        let fresh = GhPr {
+            repository: Some(RepoMerge::default()),
+            ..open(MergeStateStatus::Clean)
+        };
+        assert_eq!(merge_of(&fresh, &kept()), mergeable_of(&fresh));
+        let merged = GhPr {
+            state: PrState::Merged,
+            ..GhPr::default()
+        };
+        assert_eq!(merge_of(&merged, &kept()), Mergeable::default());
+    }
+}

@@ -17,14 +17,23 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+/// A value as `T`, where it reads as one. An array never does: serde reads a struct from one
+/// by position (`["octocat"]` as an author), where the TypeScript reads no field of it. Lists
+/// go through [`lenient_vec`] instead.
+pub(crate) fn read<T: DeserializeOwned>(value: Value) -> Option<T> {
+    match value {
+        Value::Array(_) => None,
+        value => T::deserialize(value).ok(),
+    }
+}
+
 /// A field that doesn't read as `T` reads as `T::default()`.
 pub(crate) fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned + Default,
 {
-    let value = Value::deserialize(d)?;
-    Ok(T::deserialize(value).unwrap_or_default())
+    Ok(read(Value::deserialize(d)?).unwrap_or_default())
 }
 
 /// A list whose items each read leniently: an item that doesn't read as `T` is
@@ -52,7 +61,7 @@ fn vec_of<T: DeserializeOwned + Default>(value: Value) -> Option<Vec<T>> {
         Value::Array(items) => Some(
             items
                 .into_iter()
-                .map(|item| T::deserialize(item).unwrap_or_default())
+                .map(|item| read(item).unwrap_or_default())
                 .collect(),
         ),
         _ => None,
@@ -87,7 +96,7 @@ pub(crate) fn map_of<T: DeserializeOwned>(value: Value) -> BTreeMap<String, T> {
     match value {
         Value::Object(map) => map
             .into_iter()
-            .filter_map(|(key, value)| T::deserialize(value).ok().map(|t| (key, t)))
+            .filter_map(|(key, value)| read(value).map(|t| (key, t)))
             .collect(),
         _ => BTreeMap::new(),
     }

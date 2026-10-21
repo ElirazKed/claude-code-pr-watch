@@ -416,6 +416,19 @@ mod tests {
     }
 
     #[test]
+    fn an_array_where_an_object_belongs_is_absent_not_read_by_position() {
+        let pr: GhPr = serde_json::from_value(json!({
+            "author": ["octocat"],
+            "repository": [true, true, true, "SQUASH", "ADMIN"],
+            "statusCheckRollup": [["StatusContext", "build"]],
+        }))
+        .unwrap();
+        assert_eq!(pr.author, None);
+        assert_eq!(pr.repository, None);
+        assert_eq!(pr.status_check_rollup, Some(vec![CheckItem::default()]));
+    }
+
+    #[test]
     fn a_state_key_is_kept_apart_from_its_value() {
         let items: Vec<CheckItem> =
             serde_json::from_value(json!([{"name": "a"}, {"state": null}, {"state": "PENDING"}]))

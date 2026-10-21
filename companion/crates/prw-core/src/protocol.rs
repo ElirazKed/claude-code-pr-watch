@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::gh::GhPr;
-use crate::lenient::{lenient, map_of, ms, ms_of, ms_opt, string_enum, strings};
+use crate::lenient::{lenient, map_of, ms, ms_of, ms_opt, read, string_enum, strings};
 
 /// `results.json`: what GitHub said about every watched PR, and the poll's own state.
 ///
@@ -48,18 +48,6 @@ pub struct Shared {
     pub extra: Map<String, Value>,
 }
 
-/// The fields [`Shared`] knows, as `results.json` names them.
-const SHARED_FIELDS: [&str; 8] = [
-    "fetchedAt",
-    "nextAt",
-    "prs",
-    "accounts",
-    "rate",
-    "rates",
-    "latest",
-    "heldUntil",
-];
-
 impl Shared {
     /// `results.json`'s fields, each read leniently; the rest go to [`Shared::extra`].
     fn from_fields(mut fields: Map<String, Value>) -> Self {
@@ -68,11 +56,10 @@ impl Shared {
         let next_at = ms_of(&take("nextAt")).unwrap_or(0);
         let prs = map_of(take("prs"));
         let accounts = map_of(take("accounts"));
-        let rate = RateLimit::deserialize(take("rate")).ok();
+        let rate = read(take("rate"));
         let rates = map_of(take("rates"));
-        let latest = Latest::deserialize(take("latest")).unwrap_or_default();
+        let latest = read(take("latest")).unwrap_or_default();
         let held_until = ms_of(&take("heldUntil"));
-        debug_assert!(SHARED_FIELDS.iter().all(|key| !fields.contains_key(*key)));
 
         Self {
             fetched_at,
