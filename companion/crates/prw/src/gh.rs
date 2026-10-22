@@ -102,11 +102,13 @@ impl Gh for System {
                 }
             }
         };
+        // Killed: its pipes are left to their threads, as a child gh started may still hold
+        // them open, and a join would wait on it.
+        let status = status.ok_or(RunError::Timeout)?;
         let (stdout, stderr) = (
             stdout.join().unwrap_or_default(),
             stderr.join().unwrap_or_default(),
         );
-        let status = status.ok_or(RunError::Timeout)?;
         Ok(Ran {
             stdout,
             stderr,

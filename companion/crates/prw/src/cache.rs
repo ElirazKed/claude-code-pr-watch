@@ -203,7 +203,7 @@ impl Reader {
 }
 
 /// A session file's `<id>`: its name without `.json`. `None` for anything else (a `.tmp`).
-fn session_id(path: &Path) -> Option<String> {
+pub fn session_id(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let id = name.strip_suffix(".json")?;
     (!id.is_empty() && !id.starts_with('.')).then(|| id.to_owned())

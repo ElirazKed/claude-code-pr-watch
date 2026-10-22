@@ -8,7 +8,7 @@
 //! `results.json` whole, through a temp file renamed over it. The failure log is
 //! `prw-errors.log`: the mod's `errors.log` is its own.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use prw_core::ui::{PollerSaid, Session, is_live};
 use prw_core::{parse_lease, parse_session};
 use serde_json::{Map, Value};
 
-use crate::cache::ms_of;
+use crate::cache::{ms_of, session_id};
 use crate::gh::{Clock, Gh, RunError, ms};
 use crate::round::{Auth, Ctx, GH_MS};
 
@@ -102,25 +102,40 @@ impl Files {
         }
     }
 
-    /// Every session file that parses, with its mtime (a torn one is left out this time).
-    fn sessions(&self) -> Vec<Session> {
+    /// Every session file, with its mtime. A torn one (written in place) keeps its last good
+    /// parse in `kept`, so a live mod caught mid-write still counts as live; one never parsed
+    /// is left out this time. `kept` forgets files that went.
+    fn sessions(&self, kept: &mut HashMap<String, SessionFile>) -> Vec<Session> {
         let Ok(entries) = fs::read_dir(self.dir.join("sessions")) else {
+            kept.clear();
             return Vec::new();
         };
-        entries
+        let found: Vec<Session> = entries
             .flatten()
             .filter_map(|entry| {
-                let name = entry.file_name().into_string().ok()?;
-                let id = name.strip_suffix(".json")?.to_owned();
-                let meta = fs::metadata(entry.path()).ok()?;
-                let file = parse_session(&fs::read_to_string(entry.path()).ok()?)?;
+                let path = entry.path();
+                let id = session_id(&path)?;
+                let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
+                let parsed = fs::read_to_string(&path)
+                    .ok()
+                    .as_deref()
+                    .and_then(parse_session);
+                let file = match parsed {
+                    Some(file) => {
+                        kept.insert(id.clone(), file.clone());
+                        file
+                    }
+                    None => kept.get(&id)?.clone(),
+                };
                 Some(Session {
                     id,
                     file,
                     mtime: ms_of(meta.modified().ok()?),
                 })
             })
-            .collect()
+            .collect();
+        kept.retain(|id, _| found.iter().any(|s| &s.id == id));
+        found
     }
 
     /// `prw`'s session file: its own PRs. Written every tick, so its mtime says it is alive.
@@ -186,6 +201,8 @@ pub struct Poller<G: Gh, C: Clock> {
     pruned_at: i64,
     /// When the last round this poller ran started (its `fetchedAt`).
     polled_at: Option<i64>,
+    /// Each session file's last good parse, for one caught torn.
+    kept: HashMap<String, SessionFile>,
 }
 
 impl<G: Gh, C: Clock> Poller<G, C> {
@@ -201,6 +218,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             search_error: None,
             pruned_at: 0,
             polled_at: None,
+            kept: HashMap::new(),
         }
     }
 
@@ -233,14 +251,20 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let is_search_due = self
             .searched_at
             .is_none_or(|was| at.saturating_sub(was) >= SEARCH_MS);
-        if is_search_due && held <= at {
+        let shared = if is_search_due && held <= at {
             self.search(shared.as_ref(), at);
-        }
+            // The search may have taken a while (each gh call up to GH_MS), and another
+            // writer may have run a round meanwhile: the time and the file as they are now.
+            self.files.read_raw().map(shared_of)
+        } else {
+            shared
+        };
         let own = self.own_urls();
         self.files.announce(&own);
+        let at = self.clock.now();
         let next_at = shared.as_ref().map_or(0, |s| s.next_at);
         if at >= next_at {
-            let sessions = self.files.sessions();
+            let sessions = self.files.sessions(&mut self.kept);
             let lease = self.files.read_lease();
             if should_poll(&sessions, lease.as_ref(), next_at, at) && self.take_lease(at) {
                 self.round(&sessions, &own, at);
@@ -330,8 +354,9 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         }
         let before_raw = self.files.read_raw().unwrap_or_default();
         let before = shared_of(before_raw.clone());
-        // Held by a secondary limit: nobody asks GitHub anything until the wait is over.
-        if before.held_until.is_some_and(|held| held > at) {
+        // Held by a secondary limit: nobody asks GitHub anything until the wait is over. A
+        // round another writer ran just before the lease was taken isn't run again.
+        if before.held_until.is_some_and(|held| held > at) || before.next_at > at {
             return;
         }
         let refs = due(&urls, &object(before_raw.get("prs")), at);
@@ -577,6 +602,33 @@ mod tests {
         let lease: Value =
             serde_json::from_str(&fs::read_to_string(dir.0.join("lease.json")).unwrap()).unwrap();
         assert_eq!(lease["owner"], "someone");
+    }
+
+    #[test]
+    fn a_round_starts_from_the_time_after_the_search() {
+        let dir = Dir::new("late");
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let start = now();
+        // Every look at the clock moves it on a second: the search's gh calls take time.
+        let mut poller = Poller::new(files, gh(), FakeClock::new(start, 1_000));
+        let said = poller.tick();
+        assert!(said.polled_at.is_some_and(|at| at > start + 2_000));
+    }
+
+    #[test]
+    fn a_torn_session_file_keeps_its_last_good_parse() {
+        let dir = Dir::new("torn");
+        mod_session(&dir.0, &[THEIRS]);
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut kept = HashMap::new();
+        assert_eq!(files.sessions(&mut kept)[0].file.urls, [THEIRS]);
+        fs::write(dir.0.join("sessions/m1.json"), r#"{"urls": ["#).unwrap();
+        let sessions = files.sessions(&mut kept);
+        assert!(sessions[0].is_mod());
+        assert_eq!(sessions[0].file.urls, [THEIRS]);
+        fs::remove_file(dir.0.join("sessions/m1.json")).unwrap();
+        assert_eq!(files.sessions(&mut kept), Vec::<Session>::new());
+        assert_eq!(kept, HashMap::new());
     }
 
     #[test]

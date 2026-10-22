@@ -342,10 +342,7 @@ fn open_count(model: &Model) -> usize {
 fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
     let width = usize_of(r.width).saturating_sub(2);
     let said = model.header();
-    let (text, colour) = if let Some(error) = model.poller().and_then(|p| p.error.as_deref()) {
-        // prw's own poller can't find a login's PRs: the first thing to fix.
-        (format!("⚠ {error}"), YELLOW)
-    } else if model.is_waiting() {
+    let (text, colour) = if model.is_waiting() {
         (format!("Reading {}", ctx.dir), DIM)
     } else if said.is_read_failing {
         let when = model
@@ -357,6 +354,10 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
             format!("⚠ results.json didn't read ({when}): showing the last good copy"),
             YELLOW,
         )
+    } else if let Some(error) = model.poller().and_then(|p| p.error.as_deref()) {
+        // prw's own poller can't find a login's PRs: after a cache that won't read, the
+        // thing to fix.
+        (format!("⚠ {error}"), YELLOW)
     } else if said.live == 0 {
         (
             "No live sessions: showing every PR in results.json".to_owned(),
