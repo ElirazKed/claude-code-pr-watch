@@ -161,6 +161,28 @@ pub struct PollerSaid {
     pub polled_at: Option<i64>,
     /// Why it couldn't find a login's PRs, where it couldn't (no token, nobody logged in).
     pub error: Option<String>,
+    /// The saved searches of `config.toml`, in its order, as last run.
+    pub searches: Vec<Listed>,
+    /// What was wrong with `config.toml`, where something was.
+    pub problems: Vec<String>,
+}
+
+/// A saved search as `prw`'s poller last ran it (and as `companion/demo/searches.json` has
+/// the demo's).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Listed {
+    pub name: String,
+    /// As `config.toml` has it.
+    pub query: String,
+    /// What it found, at most [`crate::config::SEARCH_CAP`], each once.
+    pub urls: Vec<String>,
+    /// How many PRs match in all ("30 of 112").
+    pub total: u64,
+    /// Why the last search failed, where it did (what it found before stays).
+    pub error: Option<String>,
+    /// Whether any search of it has come back yet.
+    pub is_searched: bool,
 }
 
 /// What the binary should do after a message.
@@ -194,6 +216,8 @@ pub enum ListId {
     Session(String),
     /// The live older-mod files with no name, together.
     Unnamed,
+    /// A saved search, by its name.
+    Search(String),
 }
 
 /// One PR in a list.
@@ -220,6 +244,8 @@ pub struct List {
     pub agent: Option<String>,
     /// Where its session runs (session lists only).
     pub cwd: Option<String>,
+    /// The saved search it lists (search lists only).
+    pub search: Option<Listed>,
     /// Most urgent first.
     pub rows: Vec<Row>,
 }
@@ -370,7 +396,9 @@ impl Model {
 
     /// The live session files.
     pub fn live_sessions(&self) -> impl Iterator<Item = &Session> {
-        self.sessions.iter().filter(|s| is_live(s.mtime, self.now))
+        self.sessions
+            .iter()
+            .filter(|s| s.file.is_session() && is_live(s.mtime, self.now))
     }
 
     /// The time of the last message that carried one (ms).
@@ -506,7 +534,14 @@ impl Model {
     fn rebuild(&mut self) {
         let mut was = self.selected_index();
         let own = self.poller.as_ref().map(|p| p.own.as_str());
-        self.lists = lists_of(self.shared.as_ref(), &self.sessions, self.now, own);
+        let searches = self.poller.as_ref().map_or(&[][..], |p| &p.searches);
+        self.lists = lists_of(
+            self.shared.as_ref(),
+            &self.sessions,
+            self.now,
+            own,
+            searches,
+        );
         if !self.lists.iter().any(|l| l.id == self.list) {
             // A different list: its first row, not the old list's place.
             self.list = ListId::All;
@@ -721,16 +756,22 @@ pub fn tracked_of(url: &str, entry: Option<&Entry>) -> Tracked {
 }
 
 /// The lists for these files at `now`: All, then `own`'s (this `prw`'s session file, its
-/// "My PRs"), then each live session (by label, then id), then the unnamed older-mod
-/// sessions together. Each list's rows in urgency order.
+/// "My PRs"), then the saved `searches`, then each live session (by label, then id), then
+/// the unnamed older-mod sessions together. Each list's rows in urgency order. All is the
+/// sessions' PRs: a search's finds are in its own list only, and files that are no
+/// session's (`prw`'s searches) list nothing.
 #[must_use]
 pub fn lists_of(
     shared: Option<&Shared>,
     sessions: &[Session],
     now: i64,
     own: Option<&str>,
+    searches: &[Listed],
 ) -> Vec<List> {
-    let mut live: Vec<&Session> = sessions.iter().filter(|s| is_live(s.mtime, now)).collect();
+    let mut live: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.file.is_session() && is_live(s.mtime, now))
+        .collect();
     live.sort_by_cached_key(|&s| {
         let is_own = own == Some(s.id.as_str());
         (
@@ -742,13 +783,7 @@ pub fn lists_of(
     });
     let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
-    // Who watches each URL, in list order.
-    let mut watchers: HashMap<&str, Vec<&Session>> = HashMap::new();
-    for session in &live {
-        for url in unique(&session.file.urls) {
-            watchers.entry(url).or_default().push(session);
-        }
-    }
+    let watchers = watchers_of(&live);
     let row = |url: &str| {
         let entry = prs.and_then(|prs| prs.get(url));
         let by = watchers.get(url).map(Vec::as_slice).unwrap_or_default();
@@ -774,25 +809,19 @@ pub fn lists_of(
     } else {
         unique(live.iter().flat_map(|s| &s.file.urls))
     };
-    // Each card derived once: every list's URLs are among All's.
-    let by_url: HashMap<&str, Row> = all_urls.iter().map(|&url| (url, row(url))).collect();
-    // `order` over the cards, each row following its card (URLs are unique in a list).
+    // Each card derived once.
+    let by_url: HashMap<&str, Row> = all_urls
+        .iter()
+        .copied()
+        .chain(
+            searches
+                .iter()
+                .flat_map(|s| s.urls.iter().map(String::as_str)),
+        )
+        .map(|url| (url, row(url)))
+        .collect();
     let rows_of = |urls: Vec<&str>| -> Vec<Row> {
-        let mut rows: Vec<Option<Row>> = urls
-            .into_iter()
-            .map(|url| Some(by_url[url].clone()))
-            .collect();
-        let at: HashMap<String, usize> = rows
-            .iter()
-            .flatten()
-            .enumerate()
-            .map(|(i, r)| (r.pr.url.clone(), i))
-            .collect();
-        let cards = rows.iter().flatten().map(|r| r.pr.clone()).collect();
-        order(cards)
-            .iter()
-            .filter_map(|pr| rows[at[&pr.url]].take())
-            .collect()
+        in_order(urls.into_iter().map(|url| by_url[url].clone()).collect())
     };
 
     let mut lists = vec![List {
@@ -800,17 +829,31 @@ pub fn lists_of(
         label: "All".to_owned(),
         agent: None,
         cwd: None,
+        search: None,
         rows: rows_of(all_urls),
     }];
-    for session in live.iter().filter(|s| !s.is_unnamed()) {
-        lists.push(List {
-            id: ListId::Session(session.id.clone()),
-            label: names[session.id.as_str()].clone(),
-            agent: session.agent().map(str::to_owned),
-            cwd: session.file.cwd.clone(),
-            rows: rows_of(unique(&session.file.urls)),
-        });
-    }
+    let session_list = |session: &Session| List {
+        id: ListId::Session(session.id.clone()),
+        label: names[session.id.as_str()].clone(),
+        agent: session.agent().map(str::to_owned),
+        cwd: session.file.cwd.clone(),
+        search: None,
+        rows: rows_of(unique(&session.file.urls)),
+    };
+    let (ours, theirs): (Vec<&&Session>, Vec<&&Session>) = live
+        .iter()
+        .filter(|s| !s.is_unnamed())
+        .partition(|s| own == Some(s.id.as_str()));
+    lists.extend(ours.into_iter().map(|s| session_list(s)));
+    lists.extend(searches.iter().map(|search| List {
+        id: ListId::Search(search.name.clone()),
+        label: search.name.clone(),
+        agent: None,
+        cwd: None,
+        search: Some(search.clone()),
+        rows: rows_of(unique(&search.urls)),
+    }));
+    lists.extend(theirs.into_iter().map(|s| session_list(s)));
     let unnamed: Vec<&&Session> = live.iter().filter(|s| s.is_unnamed()).collect();
     if !unnamed.is_empty() {
         lists.push(List {
@@ -818,11 +861,39 @@ pub fn lists_of(
             label: UNNAMED.to_owned(),
             agent: Some("claude".to_owned()),
             cwd: None,
+            search: None,
             rows: rows_of(unique(unnamed.iter().flat_map(|s| &s.file.urls))),
         });
     }
 
     lists
+}
+
+/// Who watches each URL, in list order.
+fn watchers_of<'a>(live: &[&'a Session]) -> HashMap<&'a str, Vec<&'a Session>> {
+    let mut watchers: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for &session in live {
+        for url in unique(&session.file.urls) {
+            watchers.entry(url).or_default().push(session);
+        }
+    }
+    watchers
+}
+
+/// Rows most urgent first: `order` over their cards, each row following its card (URLs are
+/// unique in a list).
+fn in_order(rows: Vec<Row>) -> Vec<Row> {
+    let at: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.pr.url.clone(), i))
+        .collect();
+    let cards = rows.iter().map(|r| r.pr.clone()).collect();
+    let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
+    order(cards)
+        .iter()
+        .filter_map(|pr| rows[at[&pr.url]].take())
+        .collect()
 }
 
 /// What each named session's list is called: its label, and where two live sessions share one
@@ -1011,6 +1082,67 @@ mod tests {
     const C: &str = "https://github.com/acme/web/pull/3";
 
     #[test]
+    fn saved_searches_come_after_my_prs_and_stay_out_of_all() {
+        let shared = Shared {
+            prs: [(A, open(1)), (B, open(2)), (C, open(3))]
+                .into_iter()
+                .map(|(u, e)| (u.to_owned(), e))
+                .collect(),
+            ..Shared::default()
+        };
+        let mine = SessionFile {
+            name: Some("My PRs".into()),
+            writer: Some(Writer::Prw),
+            ..watching(&[A])
+        };
+        let web = SessionFile {
+            name: Some("web".into()),
+            writer: Some(Writer::Mod),
+            ..watching(&[B])
+        };
+        // prw's searches file: polled, but no session.
+        let found = SessionFile {
+            writer: Some(Writer::Prw),
+            kind: Some(crate::protocol::FileKind::Searches),
+            ..watching(&[C])
+        };
+        let sessions = [
+            session("a-web", web, 100_000),
+            session("prw-1", mine, 100_000),
+            session("prw-1-searches", found, 100_000),
+        ];
+        let searches = [Listed {
+            name: "Review requests".into(),
+            urls: vec![C.into(), B.into()],
+            total: 40,
+            is_searched: true,
+            ..Listed::default()
+        }];
+        let lists = lists_of(Some(&shared), &sessions, 120_000, Some("prw-1"), &searches);
+        let ids: Vec<&ListId> = lists.iter().map(|l| &l.id).collect();
+        assert_eq!(
+            ids,
+            [
+                &ListId::All,
+                &ListId::Session("prw-1".into()),
+                &ListId::Search("Review requests".into()),
+                &ListId::Session("a-web".into()),
+            ]
+        );
+        let urls = |list: &List| -> Vec<String> {
+            let mut urls: Vec<String> = list.rows.iter().map(|r| r.pr.url.clone()).collect();
+            urls.sort();
+            urls
+        };
+        assert_eq!(urls(&lists[0]), [A, B]);
+        assert_eq!(urls(&lists[2]), [B, C]);
+        assert_eq!(lists[2].search.as_ref().map(|s| s.total), Some(40));
+        // A found PR a session watches shows its watcher.
+        let b = lists[2].rows.iter().find(|r| r.pr.url == B).unwrap();
+        assert_eq!(b.watchers, ["web"]);
+    }
+
+    #[test]
     fn all_then_a_list_per_live_session_and_the_unnamed_together() {
         let shared = Shared {
             prs: [(A, open(1)), (B, open(2)), (C, open(3))]
@@ -1040,7 +1172,7 @@ mod tests {
                 0,
             ),
         ];
-        let lists = lists_of(Some(&shared), &sessions, 120_000, None);
+        let lists = lists_of(Some(&shared), &sessions, 120_000, None, &[]);
         let said: Vec<(&ListId, &str, Option<&str>, usize)> = lists
             .iter()
             .map(|l| (&l.id, l.label.as_str(), l.agent.as_deref(), l.rows.len()))
@@ -1059,7 +1191,7 @@ mod tests {
         assert_eq!(a.watchers, ["prw-x", UNNAMED, UNNAMED]);
 
         // Nobody live: every PR in results.json, and no session lists.
-        let lists = lists_of(Some(&shared), &sessions, 10_000_000, None);
+        let lists = lists_of(Some(&shared), &sessions, 10_000_000, None, &[]);
         assert_eq!(lists.len(), 1);
         assert_eq!(lists[0].rows.len(), 3);
     }
@@ -1079,7 +1211,7 @@ mod tests {
             in_web("mgx1a2c-p7qd", "Web"),
             in_web("mgx1a2d-zz01", "docs"),
         ];
-        let lists = lists_of(None, &sessions, 120_000, None);
+        let lists = lists_of(None, &sessions, 120_000, None, &[]);
         let labels: Vec<&str> = lists.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["All", "docs", "web · k3x9", "Web · p7qd"]);
         assert_eq!(
@@ -1211,7 +1343,7 @@ mod tests {
             let said = PollerSaid {
                 own: "prw-1".into(),
                 polled_at: Some(1_000),
-                error: None,
+                ..PollerSaid::default()
             };
             read(
                 Model::new(120, 30),

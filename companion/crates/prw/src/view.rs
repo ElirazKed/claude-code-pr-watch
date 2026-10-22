@@ -373,6 +373,10 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
         // prw's own poller can't find a login's PRs: after a cache that won't read, the
         // thing to fix.
         (format!("⚠ {error}"), YELLOW)
+    } else if let Some(problem) = model.poller().and_then(|p| p.problems.first()) {
+        (format!("⚠ {problem}"), YELLOW)
+    } else if let Some(error) = model.list().search.as_ref().and_then(|s| s.error.as_ref()) {
+        (format!("⚠ {}: {error}", model.list().label), YELLOW)
     } else if said.live == 0 {
         (
             "No live sessions: showing every PR in results.json".to_owned(),
@@ -514,7 +518,44 @@ fn list_glyph(list: &List) -> Option<(&'static str, Color)> {
     match list.id {
         ListId::All => None,
         ListId::Session(_) | ListId::Unnamed => Some(agent_look(list.agent.as_deref())),
+        ListId::Search(_) => Some(("◎", ACCENT)),
     }
+}
+
+/// Whether a list goes under SESSIONS: an agent's session, not `prw`'s own lists (All, My
+/// PRs, the saved searches).
+fn is_sessions_list(model: &Model, list: &List) -> bool {
+    let own = model.poller().map(|p| p.own.as_str());
+    match &list.id {
+        ListId::All | ListId::Search(_) => false,
+        ListId::Session(id) => own != Some(id.as_str()),
+        ListId::Unnamed => true,
+    }
+}
+
+/// One list in the lists pane: ▌, the name, the mark between spaces, the count ("Claude
+/// session" fits in 22).
+fn list_line(list: &List, is_on: bool, w: usize) -> Line<'static> {
+    let bg = if is_on { SEL } else { INK };
+    let on = |style: Style| style.bg(bg);
+    let mut spans = vec![span(if is_on { "▌" } else { " " }, on(fg(ACCENT)))];
+    let count = list.rows.len().to_string();
+    let count_w = cells(&count).max(2);
+    let name_w = w.saturating_sub(1 + 3 + count_w);
+    let name = match list_glyph(list) {
+        Some((glyph, colour)) => {
+            spans.push(span(format!("{glyph} "), on(fg(colour))));
+            fit(&list.label, name_w.saturating_sub(2))
+        }
+        None => fit(&list.label, name_w),
+    };
+    spans.push(span(name, on(if is_on { bold(FG) } else { fg(BODY) })));
+    let (glyph, colour) = list
+        .worst()
+        .map_or((" ".to_owned(), DIM), |k| (mark(k), pill_color(k)));
+    spans.push(span(format!(" {glyph} "), on(fg(colour))));
+    spans.push(span(right(&count, count_w), on(fg(DIM))));
+    filled(spans, w, bg)
 }
 
 fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
@@ -526,33 +567,16 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
     let pad = || Span::raw(" ".repeat(ix));
     let section = |name: &str| Line::from(vec![pad(), span(name.to_owned(), label())]);
     let mut lines = vec![Line::raw(""), section("LISTS")];
+    let first_session = model
+        .lists()
+        .iter()
+        .position(|l| is_sessions_list(model, l));
     for (i, list) in model.lists().iter().enumerate() {
-        if i == 1 {
+        if Some(i) == first_session {
             lines.push(Line::raw(""));
             lines.push(section("SESSIONS"));
         }
-        let is_on = i == model.list_index();
-        let bg = if is_on { SEL } else { INK };
-        let on = |style: Style| style.bg(bg);
-        let mut spans = vec![span(if is_on { "▌" } else { " " }, on(fg(ACCENT)))];
-        // ▌, the name, the mark between spaces, the count: "Claude session" fits in 22.
-        let count = list.rows.len().to_string();
-        let count_w = cells(&count).max(2);
-        let name_w = w.saturating_sub(1 + 3 + count_w);
-        let name = match list_glyph(list) {
-            Some((glyph, colour)) => {
-                spans.push(span(format!("{glyph} "), on(fg(colour))));
-                fit(&list.label, name_w.saturating_sub(2))
-            }
-            None => fit(&list.label, name_w),
-        };
-        spans.push(span(name, on(if is_on { bold(FG) } else { fg(BODY) })));
-        let (glyph, colour) = list
-            .worst()
-            .map_or((" ".to_owned(), DIM), |k| (mark(k), pill_color(k)));
-        spans.push(span(format!(" {glyph} "), on(fg(colour))));
-        spans.push(span(right(&count, count_w), on(fg(DIM))));
-        lines.push(filled(spans, w, bg));
+        lines.push(list_line(list, i == model.list_index(), w));
     }
     let agents = agents_live(model);
     if !agents.is_empty() {
@@ -743,6 +767,14 @@ fn about(model: &Model, list: &List, home_dir: &str) -> String {
                 None => agent.to_owned(),
             }
         }
+        ListId::Search(_) => list.search.as_ref().map_or_else(String::new, |search| {
+            let shown = search.urls.len() as u64;
+            if search.total > shown {
+                format!("{} · {shown} of {}", search.query, search.total)
+            } else {
+                search.query.clone()
+            }
+        }),
     }
 }
 
@@ -775,13 +807,28 @@ fn table_empty(model: &Model, list: &List, iw: usize, ctx: Ctx) -> Option<Vec<Li
         )));
         return Some(lines);
     }
+    if let Some(search) = &list.search
+        && let Some(error) = &search.error
+    {
+        // The finds before stay listed; the error goes on the status line then.
+        if list.rows.is_empty() {
+            let mut lines = vec![Line::raw("")];
+            for l in wrap(&format!("⚠ {error}"), iw.saturating_sub(2), 4) {
+                lines.push(Line::from(span(format!(" {l}"), fg(YELLOW))));
+            }
+            return Some(lines);
+        }
+    }
     if !list.rows.is_empty() {
         return None;
     }
-    let say = if list.id == ListId::All && model.header().live == 0 {
-        " No PRs in results.json yet."
-    } else {
-        " Nothing here yet."
+    let say = match &list.search {
+        Some(search) if !search.is_searched => " Searching GitHub…",
+        Some(_) => " No open PR matches this search.",
+        None if list.id == ListId::All && model.header().live == 0 => {
+            " No PRs in results.json yet."
+        }
+        None => " Nothing here yet.",
     };
     Some(vec![
         Line::raw(""),
@@ -805,7 +852,12 @@ struct Columns {
 impl Columns {
     /// `▌`, the mark, a space, the number, then the title, the repo and the status.
     fn new(iw: usize, list: &List, chosen: Layout) -> Self {
-        let agent = if list.id == ListId::All { 2 } else { 0 };
+        // A session's PRs are all its agent's; All's and a search's are anyone's.
+        let agent = if matches!(list.id, ListId::All | ListId::Search(_)) {
+            2
+        } else {
+            0
+        };
         let longest = list.rows.iter().map(|r| r.pr.number).max().unwrap_or(0);
         let number = (format!("#{longest}").len() + 1).max(6);
         let rest = iw.saturating_sub(3 + number + agent + STATUS_W + 1);

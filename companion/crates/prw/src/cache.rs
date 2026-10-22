@@ -20,6 +20,16 @@ pub fn default_dir(home: Option<&str>) -> PathBuf {
     Path::new(home).join(".cache").join("pr-watch")
 }
 
+/// Where `config.toml` is by default: `$XDG_CONFIG_HOME/prw/`, else `~/.config/prw/`; none
+/// where neither is set.
+#[must_use]
+pub fn default_config(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    let set = |v: Option<&str>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
+    set(xdg)
+        .or_else(|| set(home).map(|home| home.join(".config")))
+        .map(|dir| dir.join("prw").join("config.toml"))
+}
+
 /// Milliseconds since the epoch (0 before it).
 #[must_use]
 pub fn ms_of(time: SystemTime) -> i64 {
@@ -212,6 +222,19 @@ pub fn session_id(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_toml_is_where_xdg_says_else_under_home() {
+        assert_eq!(
+            default_config(Some("/x/conf"), Some("/home/ada")),
+            Some(PathBuf::from("/x/conf/prw/config.toml"))
+        );
+        assert_eq!(
+            default_config(Some(""), Some("/home/ada")),
+            Some(PathBuf::from("/home/ada/.config/prw/config.toml"))
+        );
+        assert_eq!(default_config(None, None), None);
+    }
 
     /// A fresh directory under the system's temp dir, removed on drop.
     struct Dir(PathBuf);

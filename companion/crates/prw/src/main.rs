@@ -45,8 +45,8 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 
 use crate::actions::Runner;
-use crate::cache::{Reader, default_dir, ms_of};
-use crate::poller::{Files, Poller};
+use crate::cache::{Reader, default_config, default_dir, ms_of};
+use crate::poller::{ConfigFile, Files, Poller};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -63,9 +63,10 @@ Usage: prw [OPTIONS]
        prw unwatch (<PR URL>... | --all) [--agent <NAME>] [--session <NAME>]
        prw mcp [--agent <NAME>] [--session <NAME>]
 
-Shows the PRs the pr-watch mod polls, from its shared cache, and every open PR of each
-gh login (\"My PRs\"). When no Claude session's mod is polling, prw polls GitHub itself,
-sharing the cache's lease and rate limits with the mod as one more session.
+Shows the PRs the pr-watch mod polls, from its shared cache, every open PR of each gh
+login (\"My PRs\"), and a list per search saved in config.toml. When no Claude session's
+mod is polling, prw polls GitHub itself, sharing the cache's lease and rate limits with
+the mod as one more session.
 
 Commands:
   watch    Watch PRs for an agent that isn't Claude: each agent's session gets a list
@@ -80,6 +81,9 @@ Commands:
 
 Options:
       --cache <DIR>  The cache to use [env: PRW_CACHE] [default: ~/.cache/pr-watch]
+      --config <FILE>
+                     The saved searches, each a list [env: PRW_CONFIG] [default:
+                     $XDG_CONFIG_HOME/prw/config.toml, else ~/.config/prw/config.toml]
       --no-poll      Don't poll: only read the cache, and never write to it. GitHub is
                      asked only when you act on a PR (m, c, f)
       --demo         Show a cache as if it were live: every session file counts as
@@ -99,6 +103,7 @@ struct Options {
     /// The command; `None`: the TUI.
     sub: Option<cli::Command>,
     cache: Option<PathBuf>,
+    config: Option<PathBuf>,
     is_demo: bool,
     is_no_poll: bool,
     /// `watch` and `unwatch`: the PR URLs, as given.
@@ -130,7 +135,7 @@ enum Command {
 }
 
 /// The flags that take a value.
-const VALUED: [&str; 3] = ["--cache", "--agent", "--session"];
+const VALUED: [&str; 4] = ["--cache", "--config", "--agent", "--session"];
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
     let mut options = Options::default();
@@ -165,6 +170,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
             }
             match flag {
                 "--cache" => options.cache = Some(value.into()),
+                "--config" if is_tui => options.config = Some(value.into()),
+                "--config" => return Command::Unknown(flag.to_owned()),
                 _ if is_tui => return Command::Unknown(flag.to_owned()),
                 "--agent" => options.agent = Some(value),
                 _ => options.session = Some(value),
@@ -258,6 +265,16 @@ fn cache_dir(options: &Options) -> PathBuf {
         .unwrap_or_else(|| default_dir(std::env::var("HOME").ok().as_deref()))
 }
 
+/// The saved searches: `--config`, else `$PRW_CONFIG`, else the XDG place for it.
+fn config_path(options: &Options) -> Option<PathBuf> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    options
+        .config
+        .clone()
+        .or_else(|| var("PRW_CONFIG").map(PathBuf::from))
+        .or_else(|| default_config(var("XDG_CONFIG_HOME").as_deref(), var("HOME").as_deref()))
+}
+
 /// The time the model sees (ms): the wall clock, or, in a demo, the wall clock moved so it
 /// starts just after the cache's last round.
 struct Clock {
@@ -303,14 +320,19 @@ fn run(options: &Options) -> io::Result<()> {
             files.clone(),
         ))
     });
+    let demo = options.is_demo.then(|| demo_searches(&dir));
     let reader = Reader::new(dir, options.is_demo);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     // Pasted text comes whole, newlines too, rather than as keys that might act.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
     let stop = Arc::new(AtomicBool::new(false));
-    let said = files
-        .clone()
-        .map(|files| poller::spawn(Poller::new(files, gh::System, gh::Wall), Arc::clone(&stop)));
+    let said = demo.or_else(|| {
+        files.clone().map(|files| {
+            let config = config_path(options).map_or_else(ConfigFile::default, ConfigFile::at);
+            let poller = Poller::new(files, gh::System, gh::Wall).with_config(config);
+            poller::spawn(poller, Arc::clone(&stop))
+        })
+    });
     let (done, finished) = mpsc::channel();
     let hands = Hands {
         runner: runner.as_ref(),
@@ -334,6 +356,21 @@ fn run(options: &Options) -> io::Result<()> {
     }
     ratatui::restore();
     result
+}
+
+/// The demo's saved searches, as a poller would say them: `searches.json` beside its
+/// cache, as found (nothing is searched).
+fn demo_searches(dir: &std::path::Path) -> Receiver<PollerSaid> {
+    let searches = std::fs::read_to_string(dir.join("searches.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let (send, receive) = mpsc::channel();
+    let _ = send.send(PollerSaid {
+        searches,
+        ..PollerSaid::default()
+    });
+    receive
 }
 
 /// This run's name in the cache (`prw-<id>`): its session file, and the lease's owner.
@@ -507,6 +544,15 @@ mod tests {
         assert!(read_only.is_no_poll && !read_only.is_polling());
         assert!(Options::default().is_polling());
         assert_eq!(parse(&["--cache"]), Command::Missing("--cache"));
+        let Command::Run(configured) = parse(&["--config=/tmp/prw.toml"]) else {
+            panic!("--config runs")
+        };
+        assert_eq!(configured.config, Some(PathBuf::from("/tmp/prw.toml")));
+        // The saved searches are the TUI's.
+        assert_eq!(
+            parse(&["watch", "--config", "x.toml"]),
+            Command::Unknown("--config".into())
+        );
         assert_eq!(parse(&["--cache="]), Command::Missing("--cache"));
     }
 

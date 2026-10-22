@@ -19,9 +19,9 @@
 //!   `results.json`), [`batch`] (the batched query and what GitHub said, `hooks/batch.ts`),
 //!   [`accounts`] (which gh login asks), [`rate`] (each login's budget), [`entries`] (what a
 //!   failed fetch and a round do to an entry, `hooks/cache.ts`) and [`search`] (a login's
-//!   own open PRs).
-//! - Acting on a PR: [`act`] (what the action keys do to the screen), [`merge`] (what `m` runs and what GitHub's answer means), [`comment`]
-//!   (`c`), and the hand-offs [`handoff`] picks between, whose prompts are ports of the mod's:
+//!   own open PRs, and the saved searches [`config`] reads from `config.toml`).
+//! - Acting on a PR: [`act`] (what the action keys do to the screen), [`merge`] (what `m`
+//!   runs and what GitHub's answer means), [`comment`] (`c`), and the hand-offs [`handoff`] picks between, whose prompts are ports of the mod's:
 //!   [`fix`] (failing checks and their logs), [`resolve`] (conflicts) and [`address`] (open
 //!   review threads).
 //! - Watches from other agents: [`watch`] (`prw watch` and the MCP `watch` tool: one file per
@@ -36,6 +36,7 @@ pub mod act;
 pub mod address;
 pub mod batch;
 pub mod comment;
+pub mod config;
 pub mod entries;
 pub mod fix;
 pub mod gh;

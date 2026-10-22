@@ -6,11 +6,12 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 7 of the plan: actions.** `prw` shows the PRs your sessions watch, from the mod's shared
+**Status: step 8 of the plan: saved searches.** `prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
-gh logins authored and shows them as "My PRs", so it is of use without Claude running at all.
+gh logins authored and shows them as "My PRs", and a list for each GitHub search you save (below), so
+it is of use without Claude running at all.
 
 It takes part in the poll as one more session. It announces "My PRs" in its own session file, so a
 running mod fetches them in its rounds. When no mod is polling, it polls GitHub itself, for every live
@@ -62,6 +63,34 @@ cargo test --workspace
 `--cache <dir>` (or `PRW_CACHE`) uses another cache directory than `~/.cache/pr-watch`. `prw` runs
 `gh` from `PATH`, as each login (`gh auth token --user`), and never switches gh's active account.
 
+### Saved searches
+
+Each search in `~/.config/prw/config.toml` is a list of its own, beside All and My PRs:
+
+```toml
+[[search]]
+name = "Review requests"
+query = "is:open review-requested:@me"
+
+[[search]]
+name = "Team web"
+query = "is:open repo:acme/web"
+login = "octocat"   # only as this gh login; else as each, their finds together
+```
+
+The query is what you would type in GitHub's search box; `is:pr` is added where it doesn't say. Each
+list shows at most 30 PRs, and its title says how many match in all ("4 of 112"). With no
+`config.toml`, there is one list, "Review requests" as above; an empty file has none. The file is read
+again when it changes, and a file that won't read, or a search with no name or query, is said on the
+status line. At most 10 searches run.
+
+Searches run with the "My PRs" search, every minute, in one call per gh login (a point a search). A
+login low on points waits, keeping what it found. What they find is announced in a file of its own
+(`sessions/prw-<id>-searches.json`, `"kind": "searches"`), so the poll fetches those PRs as it does
+any session's. They stay out of All and the header's counts, which are your sessions' PRs.
+`--config <file>` (or `PRW_CONFIG`) reads another file; `$XDG_CONFIG_HOME/prw/config.toml` is used
+where that is set. `--no-poll` and `--demo` run no search (the demo shows `demo/searches.json`).
+
 ### The demo cache
 
 `demo/` is a hand-made cache: a `results.json` of acme/* PRs built from the status fixtures (CI
@@ -69,6 +98,7 @@ running, failed, conflicts, changes requested, comments to address, in review, r
 no gh account could see, one whose fetches have failed for a while) and four session files: two
 Claude sessions (`app-retry`, `web-checkout`), a Codex session written by `prw` (`billing`), and an
 older mod's file with only `urls` (listed as "Claude session"), which also watches a PR not read yet.
+`searches.json` is two saved searches as if searched, which `--demo` lists.
 
 Its files never change, so a session would read as dead (a session file is live while its mtime is
 under 60 s old) and the results as hours old. `--demo` shows it as if it were live: every session file
@@ -151,7 +181,8 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 - `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout, the
   TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`) and the poll's decisions, ported from
-  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), other agents' watches (`watch`),
+  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), the saved searches (`config`),
+  other agents' watches (`watch`),
   the MCP messages (`mcp`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
   and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), tested with properties and against the mod's fixtures
   (`tests/fixtures.rs`).

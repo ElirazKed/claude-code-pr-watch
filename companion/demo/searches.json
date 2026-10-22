@@ -1,0 +1,25 @@
+[
+  {
+    "name": "Review requests",
+    "query": "is:open review-requested:@me",
+    "isSearched": true,
+    "total": 3,
+    "urls": [
+      "https://github.com/acme/web/pull/93",
+      "https://github.com/acme/infra/pull/140",
+      "https://github.com/acme/billing/pull/59"
+    ]
+  },
+  {
+    "name": "Team web",
+    "query": "is:open repo:acme/web",
+    "isSearched": true,
+    "total": 112,
+    "urls": [
+      "https://github.com/acme/web/pull/88",
+      "https://github.com/acme/web/pull/91",
+      "https://github.com/acme/web/pull/93",
+      "https://github.com/acme/web/pull/97"
+    ]
+  }
+]
