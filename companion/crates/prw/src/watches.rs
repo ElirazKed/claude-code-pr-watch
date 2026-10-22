@@ -12,7 +12,7 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use prw_core::batch::PrRef;
-use prw_core::watch::{Group, Watch, finished, group_id, groups, is_group_id, parse_watch};
+use prw_core::watch::{Group, Watch, group_id, groups, is_done, is_group_id, parse_watch};
 use serde_json::{Map, Value};
 
 use crate::cache::session_id;
@@ -148,10 +148,8 @@ impl Watches {
     /// Watches whose PR was merged or closed over an hour ago, by `results.json`'s `prs`,
     /// removed.
     pub fn drop_finished(&self, prs: &Map<String, Value>, at: i64) {
-        let (paths, all): (Vec<PathBuf>, Vec<Watch>) = self.files().into_iter().unzip();
-        let done = finished(&all, prs, at);
-        for (path, w) in paths.iter().zip(&all) {
-            if done.iter().any(|d| std::ptr::eq(*d, w)) {
+        for (path, w) in self.files() {
+            if is_done(&w, prs, at) {
                 let _ = fs::remove_file(path);
             }
         }
@@ -295,7 +293,7 @@ mod tests {
         let dir = Dir::new("done");
         let watches = Watches::new(dir.0.clone());
         watches
-            .add(&refs(&[A, B]), "codex", "billing", None, 1)
+            .add(&refs(&[A, B]), "codex", "billing", None, 0)
             .unwrap();
         let prs: Map<String, Value> = [(A.to_owned(), json!({"at": 0, "pr": {"state": "CLOSED"}}))]
             .into_iter()

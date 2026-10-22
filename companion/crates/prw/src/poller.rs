@@ -271,7 +271,9 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let at = self.clock.now();
         // Every agent's watches, as their sessions; those of PRs long finished go.
         let raw = self.files.read_raw().unwrap_or_default();
-        self.watches.drop_finished(&object(raw.get("prs")), at);
+        let none = Map::new();
+        let prs = raw.get("prs").and_then(Value::as_object).unwrap_or(&none);
+        self.watches.drop_finished(prs, at);
         self.watches.announce(Scope::All);
         let next_at = shared.as_ref().map_or(0, |s| s.next_at);
         if at >= next_at {

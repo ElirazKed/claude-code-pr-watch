@@ -152,18 +152,21 @@ pub fn groups(watches: &[Watch]) -> Vec<Group> {
     out
 }
 
-/// Watches whose PR has been merged or closed for [`KEEP_MS`], by `results.json`'s `prs`:
-/// done with, so their files go.
+/// Whether a watch is done with: its PR merged or closed for [`KEEP_MS`], by `results.json`'s
+/// `prs`, and the watch itself older than that (a PR finished long ago and watched just now
+/// is shown for an hour, not dropped on the next tick).
+#[must_use]
+pub fn is_done(watch: &Watch, prs: &Map<String, Value>, at: i64) -> bool {
+    let entry = prs.get(&watch.url);
+    let since = entry.and_then(|e| e.get("at")).and_then(ms_of);
+    let is_old = |since: i64| at.saturating_sub(since) > KEEP_MS;
+    is_finished(entry) && since.is_some_and(is_old) && is_old(watch.added_at)
+}
+
+/// The watches [`is_done`]: their files go.
 #[must_use]
 pub fn finished<'a>(watches: &'a [Watch], prs: &Map<String, Value>, at: i64) -> Vec<&'a Watch> {
-    watches
-        .iter()
-        .filter(|w| {
-            let entry = prs.get(&w.url);
-            let since = entry.and_then(|e| e.get("at")).and_then(ms_of);
-            is_finished(entry) && since.is_some_and(|since| at.saturating_sub(since) > KEEP_MS)
-        })
-        .collect()
+    watches.iter().filter(|w| is_done(w, prs, at)).collect()
 }
 
 /// The agent an MCP client is, from the name its `initialize` gives (`codex-mcp-client`,
@@ -313,6 +316,10 @@ mod tests {
         .collect();
         assert_eq!(finished(&watches, &prs, KEEP_MS), Vec::<&Watch>::new());
         assert_eq!(finished(&watches, &prs, KEEP_MS + 1), [&watches[0]]);
+        // Watched again long after it merged: kept for an hour from the watch.
+        let late = [watch(A, "codex", "b", 5 * KEEP_MS)];
+        assert_eq!(finished(&late, &prs, 5 * KEEP_MS + 1), Vec::<&Watch>::new());
+        assert_eq!(finished(&late, &prs, 6 * KEEP_MS + 1), [&late[0]]);
         assert_eq!(
             finished(&watches, &Map::new(), KEEP_MS + 1),
             Vec::<&Watch>::new()
