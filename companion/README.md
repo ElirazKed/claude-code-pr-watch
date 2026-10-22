@@ -20,15 +20,16 @@ PR.
 
 On the selected PR, `m` merges, `c` comments, `f` hands it off and `o` opens it in the browser
 (below). Each goes as the gh login that sees the PR's repo (the one the poll uses), with that login's
-own token, whichever login `gh` has active. After a merge or a comment the PR is fetched again at once, so its card is
-current before the next round.
+own token, whichever login `gh` has active. After a merge or a comment the PR is fetched again at
+once, so its card is current before the next round.
 
 - **Merge** asks first on the bottom line: "Squash-merge #409 into main?", `y` to merge, `m` for the
   repo's next allowed method. Where GitHub won't merge yet, it offers auto-merge instead, and cancels
   one already on. A method the repo refuses is skipped next time; a server error is retried once, after
   checking whether the merge went through.
 - **Comment** opens a field on the bottom line: Enter posts, Alt-Enter is a new line, a paste goes in
-  whole, Esc keeps the draft for the next `c`. The text goes to `gh` on stdin, never in its arguments.
+  whole, Esc cancels. A post that fails keeps the text for the next `c`. The text goes to `gh` on
+  stdin, never in its arguments.
 - **Hand-offs** copy a prompt for the agent that runs the PR, as the mod drafts it: Resolve (conflicts
   with the base), Fix (failed checks, with the tail of each failed job's log) or Address (the open
   review threads, each comment cleaned of markup). With more than one, `f` asks which. The toast says

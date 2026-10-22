@@ -1,7 +1,7 @@
 //! Drawing the model: one function per pane, into the areas `prw_core::panes` gives. Nothing
 //! here decides anything the model hasn't; it lays out words the core worked out.
 
-use prw_core::act::{Ask, Copied, Look, Tone};
+use prw_core::act::{Ask, Copied, Look, Tone, prompt_body};
 use prw_core::gh::{GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
@@ -1438,35 +1438,12 @@ fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
     }
 }
 
-/// `line` cut into pieces of `width` cells, for text that must show whole.
-fn hard_wrap(line: &str, width: usize) -> Vec<String> {
-    let mut out = vec![String::new()];
-    let mut used = 0;
-    for c in line.chars() {
-        let w = c.width().unwrap_or(0);
-        if used + w > width.max(1) {
-            out.push(String::new());
-            used = 0;
-        }
-        if let Some(last) = out.last_mut() {
-            last.push(c);
-        }
-        used += w;
-    }
-    out
-}
-
 /// The prompt last copied, the whole screen, to read, or to select and copy by hand where
 /// the copy can't be confirmed (OSC 52). No border, so a selection takes only the text.
 fn prompt_pane(frame: &mut Frame, area: Rect, top: usize, copied: &Copied) {
     let width = usize_of(area.width);
     let height = usize_of(area.height).saturating_sub(2);
-    let body: Vec<String> = copied
-        .text
-        .replace('\t', "    ")
-        .split('\n')
-        .flat_map(|line| hard_wrap(line, width))
-        .collect();
+    let body = prompt_body(&copied.text, width);
     let top = top.min(body.len().saturating_sub(height));
     let shown = body.len().min(top + height);
     let head = format!(

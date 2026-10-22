@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::gh::{GhPr, PrState};
 use crate::handoff::{Kind, PrFacts, kinds_of};
 use crate::merge::{MergeError, MergeRun, done_words, label, next_method, run_for, standing};
@@ -287,6 +289,16 @@ impl Acts {
     #[must_use]
     pub const fn view(&self) -> Option<usize> {
         self.view
+    }
+
+    /// Keeps the `v` pane's first line where the prompt still fills a `width` × `height`
+    /// screen (the pane takes it whole, less its head and foot), so a key past the end, or
+    /// `G`, leaves it at the end rather than beyond it.
+    pub fn clamp_view(&mut self, width: usize, height: usize) {
+        if let (Some(top), Some(copied)) = (self.view, &self.copied) {
+            let body = prompt_body(&copied.text, width).len();
+            self.view = Some(top.min(body.saturating_sub(height.saturating_sub(2))));
+        }
     }
 
     /// Whether the keys are the bottom line's or the `v` pane's: then they type, answer or
@@ -647,15 +659,21 @@ impl Acts {
             });
         }
         let failing = summarize_checks(pr.checks()).failing;
-        self.pending.insert((facts.url.clone(), kind), target.to());
-        self.start(
+        let at = (facts.url.clone(), kind);
+        let cmds = self.start(
             Job::Collect {
                 kind,
                 facts,
                 failing,
             },
             now,
-        )
+        );
+        // Only a job that starts names whom its prompt is for; a refused press keeps the
+        // running one's.
+        if !cmds.is_empty() {
+            self.pending.insert(at, target.to());
+        }
+        cmds
     }
 
     /// Keeps a prompt for `v` and asks the binary to copy it.
@@ -700,7 +718,7 @@ impl Acts {
             }
             Outcome::CommentFailed(error) => {
                 self.say(
-                    format!("✗ {error} · c to try again: your text is kept"),
+                    format!("✗ {error} · c brings your text back"),
                     Tone::Bad,
                     now,
                 );
@@ -773,6 +791,34 @@ impl Acts {
             ),
         }
     }
+}
+
+/// The prompt as the `v` pane shows it, a line a row: tabs as spaces, each line cut into
+/// pieces of `width` cells so it shows whole.
+#[must_use]
+pub fn prompt_body(text: &str, width: usize) -> Vec<String> {
+    text.replace('\t', "    ")
+        .split('\n')
+        .flat_map(|line| hard_wrap(line, width))
+        .collect()
+}
+
+/// `line` cut into pieces of `width` cells, for text that must show whole.
+fn hard_wrap(line: &str, width: usize) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut used = 0;
+    for c in line.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width.max(1) {
+            out.push(String::new());
+            used = 0;
+        }
+        if let Some(last) = out.last_mut() {
+            last.push(c);
+        }
+        used += w;
+    }
+    out
 }
 
 fn lower_first(text: &str) -> String {

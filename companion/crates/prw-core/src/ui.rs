@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::act::{Acts, Done, Job, Offer, Target};
+use crate::act::{Acts, Ask, Done, Job, Offer, Target};
 use crate::layout::{Layout, layout};
 use crate::order::{Tracked, order};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
@@ -467,8 +467,8 @@ impl Model {
 
     /// The PR an action key acts on: the one an open question is about, else the selected
     /// one.
-    fn target(&self) -> Option<Target<'_>> {
-        let row = match self.acts.ask() {
+    fn target(&self, ask: Option<&Ask>) -> Option<Target<'_>> {
+        let row = match ask {
             Some(ask) => self
                 .list()
                 .rows
@@ -565,16 +565,13 @@ impl Model {
 
     fn key(&mut self, key: Key) -> Vec<Cmd> {
         if !self.is_help {
-            // Owned, so the actions can change while they look at it.
-            let owned = self
-                .target()
-                .map(|t| (t.row.clone(), t.pr.cloned(), t.login.to_owned()));
-            let target = owned.as_ref().map(|(row, pr, login)| Target {
-                row,
-                pr: pr.as_ref(),
-                login,
-            });
-            if let Some(cmds) = self.acts.key(key, target, self.now) {
+            // Taken out while they act, so the target borrows the rest without a copy.
+            let mut acts = std::mem::take(&mut self.acts);
+            let target = self.target(acts.ask());
+            let cmds = acts.key(key, target, self.now);
+            acts.clamp_view(usize::from(self.width), usize::from(self.height));
+            self.acts = acts;
+            if let Some(cmds) = cmds {
                 return cmds;
             }
         }
@@ -658,6 +655,9 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         Msg::Resize(width, height) => {
             model.width = width;
             model.height = height;
+            model
+                .acts
+                .clamp_view(usize::from(width), usize::from(height));
             Vec::new()
         }
         Msg::Key(key) => model.key(key),

@@ -292,8 +292,9 @@ fn f_on_a_conflict_copies_the_resolve_prompt_at_once() {
     let (model, cmds) = feed(model, keys("vjq"));
     assert_eq!(cmds, []);
     assert_eq!(model.acts().view(), None);
-    let (model, _) = feed(model, keys("vj"));
-    assert_eq!(model.acts().view(), Some(1));
+    // A prompt that fits the screen doesn't scroll, nor does G take it past its end.
+    let (model, _) = feed(model, keys("vjG"));
+    assert_eq!(model.acts().view(), Some(0));
     assert_eq!(
         model.acts().copied().map(|c| c.text.as_str()),
         Some(text.as_str())

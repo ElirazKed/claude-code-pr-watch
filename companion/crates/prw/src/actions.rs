@@ -220,6 +220,10 @@ impl<G: Gh, C: Clock> Runner<G, C> {
                     ),
                 };
                 if failures.is_empty() {
+                    // With no checks read, nothing says none fail: the read's error stands.
+                    if let Some(problem) = problem {
+                        return failed(problem);
+                    }
                     self.refresh(&facts.url);
                     return failed("No check is failing on the latest runs now".to_owned());
                 }
@@ -646,6 +650,27 @@ mod tests {
         assert_eq!(
             note.as_deref(),
             Some("Couldn't read the checks: gh: Something went wrong")
+        );
+    }
+
+    #[test]
+    fn checks_that_wont_read_with_no_names_say_why_not_that_none_fail() {
+        let dir = Dir::new("fix-unread-unnamed");
+        let gh = gh();
+        gh.on(starts(&["api", "graphql"]), |_| {
+            failed("", "gh: Something went wrong\n")
+        });
+        let done = runner(gh, &dir).run(Job::Collect {
+            kind: Kind::Fix,
+            facts: facts(),
+            failing: Vec::new(),
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::PromptFailed {
+                kind: Kind::Fix,
+                error: "Couldn't read the checks: gh: Something went wrong".to_owned(),
+            }
         );
     }
 

@@ -115,8 +115,13 @@ fn by_tool(name: &str, args: &[&str], text: &str) -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(text.as_bytes())
+    {
+        // Not left running, nor as a zombie.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
     }
     let deadline = Instant::now() + Duration::from_millis(COPY_MS);
     loop {
