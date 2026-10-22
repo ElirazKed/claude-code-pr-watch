@@ -9,7 +9,7 @@ use prw_core::batch::{parse_http, parse_reply, ref_from_url};
 use prw_core::entries::{failed_entry, kept_entries};
 use prw_core::poll::{Failure, Outcome, Pace, Round, due, merge, should_poll};
 use prw_core::protocol::{Lease, SessionFile, Writer};
-use prw_core::search::parse_hits;
+use prw_core::search::{MINE, parse_searches};
 use prw_core::ui::Session;
 use serde_json::{Map, Value, json};
 
@@ -200,7 +200,7 @@ proptest! {
         prop_assert!(stdout.ends_with(&http.body));
         let reply = parse_reply(&http.body, &stderr, &refs);
         prop_assert!(reply.error.is_some() || reply.found.len() + reply.missing.len() == refs.len());
-        let _ = parse_hits(&stdout, &stderr);
+        let _ = parse_searches(&stdout, &stderr, &[MINE]);
     }
 
     #[test]

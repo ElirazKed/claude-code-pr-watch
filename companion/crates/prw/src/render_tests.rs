@@ -4,7 +4,7 @@
 use proptest::prelude::*;
 use prw_core::act::{Done, Outcome};
 use prw_core::handoff::Kind;
-use prw_core::ui::{Key, Model, Msg, Session, update};
+use prw_core::ui::{Key, Model, Msg, PollerSaid, Session, update};
 use prw_core::{parse_session, parse_shared};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::view::{Ctx, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
+const SEARCHES: &str = include_str!("../../../demo/searches.json");
 const SESSIONS: [(&str, &str); 4] = [
     (
         "mh0w2b-k3p9x1aq",
@@ -348,4 +349,40 @@ fn v_shows_the_prompt_last_copied() {
     assert_says(&text, &["line 60 of the prompt", "lines 33-60 of 60"]);
     let closed = feed(end, [Msg::Key(Key::Esc)]);
     assert!(!screen(&closed, 84, 30).contains("line 60 of the prompt"));
+}
+
+/// The demo with its saved searches, as `--demo` shows them.
+fn searched(width: u16, height: u16) -> Model {
+    let searches = serde_json::from_str(SEARCHES).expect("the demo's searches.json reads");
+    feed(
+        demo(width, height),
+        [Msg::Poller(PollerSaid {
+            searches,
+            ..PollerSaid::default()
+        })],
+    )
+}
+
+#[test]
+fn saved_searches_are_lists_of_their_own() {
+    let model = searched(120, 30);
+    let text = screen(&model, 120, 30);
+    // The pane is 22 wide: "Review requests" is cut.
+    assert_says(
+        &text,
+        &["LISTS", "◎ Review reques…", "◎ Team web", "SESSIONS"],
+    );
+    // Above SESSIONS, with All.
+    let at = |word: &str| text.find(word).expect(word);
+    assert!(at("Team web") < at("SESSIONS"));
+    // Tab to Team web: what it asks, and how many GitHub found in all.
+    let web = feed(model, [Msg::Key(Key::Tab), Msg::Key(Key::Tab)]);
+    assert_says(
+        &screen(&web, 120, 30),
+        &[
+            "Team web  ·  is:open repo:acme/web · 4 of 112",
+            "◆ Keep the cart",
+            "#97",
+        ],
+    );
 }

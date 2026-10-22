@@ -213,6 +213,15 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// What a session file is, where it isn't a session's.
+    pub enum FileKind {
+        /// `prw`'s saved searches' finds: polled like a session's PRs, but no session, so
+        /// no list of sessions shows it (each `prw` lists its own searches).
+        Searches = "searches",
+    }
+}
+
 /// `sessions/<id>.json`: one session's watch list, and who and where it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -232,6 +241,18 @@ pub struct SessionFile {
     /// The directory the session runs in, absolute.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Absent: a session's file. Any kind (one this version doesn't know too) is polled as
+    /// a session's PRs are, but listed as no session.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<FileKind>,
+}
+
+impl SessionFile {
+    /// Whether a session wrote it: a list of its own, counted live (not `prw`'s searches).
+    #[must_use]
+    pub fn is_session(&self) -> bool {
+        self.kind.is_none()
+    }
 }
 
 /// A session file's text. `None` where it isn't a JSON object: torn or empty mid-write, so
@@ -380,10 +401,22 @@ mod tests {
             agent: Some("claude".into()),
             name: Some("app".into()),
             cwd: Some("/work/app/hooks".into()),
+            kind: None,
         };
         let text = r#"{"urls":["https://github.com/acme/app/pull/12"],"writer":"mod","agent":"claude","name":"app","cwd":"/work/app/hooks"}"#;
         assert_eq!(serde_json::to_string(&file).unwrap(), text);
         assert_eq!(parse_session(text), Some(file));
+        // prw's searches are marked; any kind, known or not, is no session's.
+        let searches =
+            parse_session(r#"{"urls": [], "writer": "prw", "kind": "searches"}"#).unwrap();
+        assert_eq!(searches.kind, Some(FileKind::Searches));
+        assert!(!searches.is_session());
+        assert!(
+            !parse_session(r#"{"urls": [], "kind": "later"}"#)
+                .unwrap()
+                .is_session()
+        );
+        assert!(parse_session(r#"{"urls": []}"#).unwrap().is_session());
     }
 
     #[test]

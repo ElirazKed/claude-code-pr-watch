@@ -134,6 +134,7 @@ impl Group {
             agent: Some(self.agent.clone()),
             name: Some(self.session.clone()),
             cwd: self.cwd.clone(),
+            kind: None,
         }
     }
 }

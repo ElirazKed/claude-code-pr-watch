@@ -4,8 +4,10 @@
 
 use proptest::prelude::*;
 use prw_core::gh::{GhPr, PrState};
-use prw_core::protocol::{SessionFile, Writer};
-use prw_core::ui::{Key, ListId, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update};
+use prw_core::protocol::{FileKind, SessionFile, Writer};
+use prw_core::ui::{
+    Key, ListId, Listed, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update,
+};
 use prw_core::{Entry, Shared};
 
 /// A handful of PRs, so reads overlap: the same URLs come and go.
@@ -74,9 +76,12 @@ fn session() -> impl Strategy<Value = Session> {
         writer,
         proptest::option::of(prop::sample::select(vec!["app", "web", "App"])),
         proptest::option::of(prop::sample::select(vec!["claude", "codex"])),
-        0_i64..300_000,
+        (
+            0_i64..300_000,
+            proptest::option::of(Just(FileKind::Searches)),
+        ),
     )
-        .prop_map(|(id, urls, writer, name, agent, mtime)| Session {
+        .prop_map(|(id, urls, writer, name, agent, (mtime, kind))| Session {
             id: id.to_owned(),
             file: SessionFile {
                 urls,
@@ -84,6 +89,7 @@ fn session() -> impl Strategy<Value = Session> {
                 agent: agent.map(str::to_owned),
                 name: name.map(str::to_owned),
                 cwd: None,
+                kind,
             },
             mtime,
         })
@@ -123,8 +129,17 @@ fn msg() -> impl Strategy<Value = Msg> {
         6 => key().prop_map(Msg::Key),
         1 => (0_u16..=300, 0_u16..=80).prop_map(|(w, h)| Msg::Resize(w, h)),
         1 => at().prop_map(Msg::Tick),
-        1 => (prop::sample::select(vec!["prw-1", "prw-9"]), proptest::option::of(at())).prop_map(|(own, polled_at)| {
-            Msg::Poller(PollerSaid { own: own.into(), polled_at, error: None })
+        1 => (
+            prop::sample::select(vec!["prw-1", "prw-9"]),
+            proptest::option::of(at()),
+            prop::collection::btree_map(prop::sample::select(vec!["Review", "Team", "prw-1"]), urls(), 0..3),
+        ).prop_map(|(own, polled_at, searches)| {
+            // Names are unique in config.toml; one may be a session's id.
+            let searches = searches
+                .into_iter()
+                .map(|(name, urls)| Listed { name: name.into(), urls, ..Listed::default() })
+                .collect();
+            Msg::Poller(PollerSaid { own: own.into(), polled_at, searches, ..PollerSaid::default() })
         }),
     ]
 }
@@ -160,7 +175,8 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
             model.shared(),
             model.sessions(),
             model.now(),
-            model.poller().map(|p| p.own.as_str())
+            model.poller().map(|p| p.own.as_str()),
+            model.poller().map_or(&[][..], |p| &p.searches),
         )[..]
     );
     Ok(())

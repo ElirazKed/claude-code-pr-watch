@@ -36,6 +36,7 @@ type SessionFile = {
   agent?: string          // the agent the session runs: 'claude' for the mod; 'codex', … through prw
   name?: string           // what a list of sessions calls it: the project root's folder name
   cwd?: string            // the directory the session runs in, absolute
+  kind?: 'searches'       // what the file is where it isn't a session's; absent: a session
 }
 ```
 
@@ -45,6 +46,8 @@ type SessionFile = {
 
 - **`<id>`:** the writer's own id. The mod uses `INSTANCE`, `<base-36 time>-<up to 8 random base-36 characters>`, which lasts as long as the loaded module (a `/clear` keeps it). `prw` uses `prw-<id>`, new each run. Only names ending in `.json` are session files.
 - **`prw`'s own file:** `{"urls": [...], "writer": "prw", "name": "My PRs"}`, with no `agent`: every open PR each gh login authored (one search per login, as that login, a minute apart), so whoever polls fetches them like any session's. It is written every 10 s while `prw` runs, and, unlike the mod's, removed when `prw` quits (giving back a lease it still holds).
+- **`prw`'s saved searches:** `sessions/prw-<id>-searches.json`, `{"urls": [...], "writer": "prw", "name": "Saved searches", "kind": "searches"}`: what the searches in `prw`'s `config.toml` found (at most 30 each, searched with the "My PRs" search, in the same call), so whoever polls fetches them too. Written and removed with `prw`'s own file; absent while they find nothing.
+- **`kind`:** a file with any `kind` (one a reader doesn't know too) is polled like a session's, but is no session: it lists nothing among the sessions, and doesn't count as one live. The mod polls every file's URLs and reads no `kind`.
 - **Other agents' sessions:** `sessions/prw-w-<hash>.json`, one per agent's session (`hash`: FNV-1a 64 of the agent, the session name and, where the folder named it, the folder: two projects in folders of one name are two sessions), `{"urls": [...], "writer": "prw", "agent": "codex", "name": "billing", "cwd": "..."}`: the watches in `companion/watches/` of that agent and session. Any `prw` TUI writes every one each tick, and a `prw mcp` writes its own; they write the same text, through a temp file in `companion/` renamed into `sessions/`. One whose last watch goes is removed.
 - **When it is written:** the mod writes its file on each 10 s tick (`$.clock.every(10_000)` → `tick` → `announce`), and only while it watches an open PR or one not read yet (`isActive`). A session that watches nothing writes nothing and soon stops counting as live.
 - **`name` and `cwd`:** these come from the session start (`session.start`'s `cwd`, and `$.session.root()` for `name`). They follow `classic.CwdChanged`, so a `cd`, `/cd` or worktree move shows on the next tick. `name` is the project root's last path segment (`placeOf`, `folderName`), so a `cd` into a subfolder moves `cwd` but doesn't rename the session. Until the start has said where the session runs, the file has neither field.

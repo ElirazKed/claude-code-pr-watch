@@ -1,5 +1,6 @@
 //! `prw`'s part in the poll, on a thread of its own: every tick it finds each gh login's
-//! own open PRs (a search a minute), says them in its session file, and, where the give-way
+//! own open PRs and the saved searches' (`config.toml`; one call a minute per login), says
+//! them in its session files, and, where the give-way
 //! rule lets it and the lease is its, runs the round for every live session as the mod does
 //! (`tick` and `publish` in `hooks/register.tsx`). The TUI learns what happened from the
 //! files, as it always has, and from a [`Said`] after each tick.
@@ -7,7 +8,8 @@
 //! Each tick also announces every agent's watches (`prw watch`, `prw mcp`) as their sessions,
 //! and drops the watches of PRs finished for an hour (`watches`).
 //!
-//! Writes: `sessions/prw-<id>.json` and `lease.json` in place (as the mod writes them), and
+//! Writes: `sessions/prw-<id>.json` (its own PRs), `sessions/prw-<id>-searches.json` (the
+//! searches' finds, `"kind": "searches"`) and `lease.json` in place (as the mod writes them), and
 //! `results.json` whole, through a temp file renamed over it. The failure log is
 //! `prw-errors.log`: the mod's `errors.log` is its own.
 
@@ -22,13 +24,17 @@ use std::thread;
 
 use prw_core::accounts::every_login;
 use prw_core::batch::PrRef;
+use prw_core::config::{Config, SEARCH_CAP, Search, parse_config, search_text};
 use prw_core::poll::{
     LEASE_MS, Outcome, Pace, Round, claim, due, may_take, merge, release, should_poll,
 };
-use prw_core::protocol::{Lease, SessionFile, Shared, Writer};
+use prw_core::protocol::{FileKind, Lease, SessionFile, Shared, Writer};
 use prw_core::rate::low_until;
-use prw_core::search::{SEARCH_MS, mine_query, parse_hits};
-use prw_core::ui::{PollerSaid, Session, is_live};
+use prw_core::search::{
+    Ask, Hits, MINE as MINE_ALIAS, SEARCH_MS, gather, mine, parse_searches, saved_alias,
+    searches_query,
+};
+use prw_core::ui::{Listed, PollerSaid, Session, is_live};
 use prw_core::{parse_lease, parse_session};
 use serde_json::{Map, Value};
 
@@ -74,6 +80,12 @@ impl Files {
 
     fn session_path(&self) -> PathBuf {
         self.dir.join("sessions").join(format!("{}.json", self.own))
+    }
+
+    fn searches_path(&self) -> PathBuf {
+        self.dir
+            .join("sessions")
+            .join(format!("{}-searches.json", self.own))
     }
 
     pub fn log_path(&self) -> PathBuf {
@@ -153,6 +165,7 @@ impl Files {
             agent: None,
             name: Some(MINE.to_owned()),
             cwd: None,
+            kind: None,
         };
         let _ = fs::create_dir_all(self.dir.join("sessions"));
         if let Ok(text) = serde_json::to_string(&file) {
@@ -160,10 +173,32 @@ impl Files {
         }
     }
 
-    /// On the way out: the session file goes (its PRs are no longer watched), and a lease
+    /// The saved searches' finds, for whoever polls: a file of no session's (`kind`), so no
+    /// list of sessions shows it. None found: no file.
+    fn announce_searches(&self, urls: &[String]) {
+        if urls.is_empty() {
+            let _ = fs::remove_file(self.searches_path());
+            return;
+        }
+        let file = SessionFile {
+            urls: urls.to_vec(),
+            writer: Some(Writer::Prw),
+            agent: None,
+            name: Some("Saved searches".to_owned()),
+            cwd: None,
+            kind: Some(FileKind::Searches),
+        };
+        let _ = fs::create_dir_all(self.dir.join("sessions"));
+        if let Ok(text) = serde_json::to_string(&file) {
+            let _ = fs::write(self.searches_path(), text);
+        }
+    }
+
+    /// On the way out: the session files go (their PRs are no longer watched), and a lease
     /// still held is given back.
     pub fn leave(&self) {
         let _ = fs::remove_file(self.session_path());
+        let _ = fs::remove_file(self.searches_path());
         if self.read_lease().is_some_and(|l| l.owner == self.own) {
             self.write_lease(&release(&self.own));
         }
@@ -194,6 +229,62 @@ impl Files {
     }
 }
 
+/// `config.toml`, read again when it changes.
+#[derive(Debug, Default)]
+pub struct ConfigFile {
+    /// `None`: no file, and no saved searches (the tests'; and with no home to look in).
+    path: Option<PathBuf>,
+    /// The file's text when last read (`None`: there was none), and what it said. The text,
+    /// not the mtime, says whether it changed: a home-manager `config.toml` is a symlink into
+    /// the nix store, whose files all have one mtime, so a switch keeps the mtime it had.
+    read: Option<(Option<String>, Config)>,
+}
+
+impl ConfigFile {
+    pub const fn at(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            read: None,
+        }
+    }
+
+    /// The settings, where the file says something new since the last look. No file:
+    /// [`Config::default`]'s search; one that won't read says why.
+    fn load(&mut self) -> Option<Config> {
+        let path = self.path.as_ref()?;
+        let (text, config) = match fs::read_to_string(path) {
+            Ok(text) => {
+                if let Some((Some(was), _)) = &self.read
+                    && *was == text
+                {
+                    return None;
+                }
+                let config = parse_config(&text);
+                (Some(text), config)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, Config::default()),
+            Err(error) => (
+                None,
+                Config {
+                    searches: Vec::new(),
+                    problems: vec![format!("config.toml: {error}")],
+                },
+            ),
+        };
+        let changed = self.read.as_ref().is_none_or(|(_, was)| *was != config);
+        self.read = Some((text, config.clone()));
+        changed.then_some(config)
+    }
+}
+
+/// What a saved search found as each login, as of its last good search.
+#[derive(Debug, Clone, Default)]
+struct Saved {
+    by_login: BTreeMap<String, Hits>,
+    error: Option<String>,
+    is_searched: bool,
+}
+
 /// The poller's state between ticks.
 pub struct Poller<G: Gh, C: Clock> {
     files: Files,
@@ -203,6 +294,12 @@ pub struct Poller<G: Gh, C: Clock> {
     pace: Pace,
     /// Each login's own open PRs as its last good search found them.
     mine: BTreeMap<String, Vec<String>>,
+    config: ConfigFile,
+    /// The saved searches now in `config.toml`, and what was wrong with it.
+    searches: Vec<Search>,
+    problems: Vec<String>,
+    /// Each search's finds, by the search (a changed query is a new one).
+    saved: BTreeMap<(String, String, Option<String>), Saved>,
     searched_at: Option<i64>,
     search_error: Option<String>,
     pruned_at: i64,
@@ -224,12 +321,23 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             auth: Auth::default(),
             pace: Pace::default(),
             mine: BTreeMap::new(),
+            config: ConfigFile::default(),
+            searches: Vec::new(),
+            problems: Vec::new(),
+            saved: BTreeMap::new(),
             searched_at: None,
             search_error: None,
             pruned_at: 0,
             polled_at: None,
             kept: HashMap::new(),
         }
+    }
+
+    /// Its saved searches from `config` (none, else).
+    #[must_use]
+    pub fn with_config(mut self, config: ConfigFile) -> Self {
+        self.config = config;
+        self
     }
 
     fn ctx(&mut self) -> Ctx<'_, G, C> {
@@ -241,15 +349,28 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         }
     }
 
+    /// The saved searches as the lists show them: each login's finds together.
+    fn listed(&self) -> Vec<Listed> {
+        self.searches
+            .iter()
+            .map(|search| {
+                let saved = self.saved.get(&key(search)).cloned().unwrap_or_default();
+                let hits = gather(saved.by_login.values(), SEARCH_CAP);
+                Listed {
+                    name: search.name.clone(),
+                    query: search.query.clone(),
+                    urls: hits.urls,
+                    total: hits.total,
+                    error: saved.error,
+                    is_searched: saved.is_searched,
+                }
+            })
+            .collect()
+    }
+
     /// The PRs `prw` announces: every login's, each once, in login order.
     fn own_urls(&self) -> Vec<String> {
-        let mut seen = HashSet::new();
-        self.mine
-            .values()
-            .flatten()
-            .filter(|url| seen.insert(url.as_str()))
-            .cloned()
-            .collect()
+        unique_urls(self.mine.values().flatten())
     }
 
     /// One tick (`tick`): search when due, say what `prw` watches, then take the round where
@@ -258,6 +379,12 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let at = self.clock.now();
         let shared = self.files.read_raw().map(shared_of);
         let held = shared.as_ref().and_then(|s| s.held_until).unwrap_or(0);
+        // A changed config.toml is searched at once.
+        if let Some(config) = self.config.load() {
+            self.searches = config.searches;
+            self.problems = config.problems;
+            self.searched_at = None;
+        }
         let is_search_due = self
             .searched_at
             .is_none_or(|was| at.saturating_sub(was) >= SEARCH_MS);
@@ -271,6 +398,10 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         };
         let own = self.own_urls();
         self.files.announce(&own);
+        let listed = self.listed();
+        let found = unique_urls(listed.iter().flat_map(|l| &l.urls));
+        self.files.announce_searches(&found);
+        let own: Vec<String> = unique_urls(own.iter().chain(&found));
         let at = self.clock.now();
         // Every agent's watches, as their sessions; those of PRs long finished go.
         let raw = self.files.read_raw().unwrap_or_default();
@@ -287,57 +418,136 @@ impl<G: Gh, C: Clock> Poller<G, C> {
                 self.files.write_lease(&release(self.files.own()));
             }
         }
-        self.said()
-    }
-
-    fn said(&self) -> PollerSaid {
         PollerSaid {
             own: self.files.own().to_owned(),
             polled_at: self.polled_at,
             error: self.search_error.clone(),
+            searches: listed,
+            problems: self.problems.clone(),
         }
     }
 
-    /// Each login's open PRs, as that login. A login whose points are low keeps what it
-    /// found last; one gh no longer lists drops its PRs.
+    /// Each login's open PRs and the saved searches' finds, in one call per login, as that
+    /// login. A login whose points are low keeps what it found last; one gh no longer lists
+    /// drops its finds. A search that failed as every login it ran as says why.
     fn search(&mut self, shared: Option<&Shared>, at: i64) {
         self.searched_at = Some(at);
         let logins = every_login(&self.ctx().logins(false, GH_MS));
         self.mine.retain(|login, _| logins.contains(login));
+        let keys: Vec<_> = self.searches.iter().map(key).collect();
+        self.saved.retain(|k, _| keys.contains(k));
+        for saved in self.saved.values_mut() {
+            saved.by_login.retain(|login, _| logins.contains(login));
+        }
         let mut errors = Vec::new();
         if logins.is_empty() {
             errors.push(prw_core::accounts::token_error(""));
         }
+        // Each search's first failure this time, and whether any login's search came back.
+        let mut failed: Vec<Option<String>> = vec![None; self.searches.len()];
+        let mut is_found = vec![false; self.searches.len()];
         for login in &logins {
             if shared.is_some_and(|s| low_until(&s.rates, login, at).is_some()) {
                 continue;
             }
+            let asked: Vec<usize> = (0..self.searches.len())
+                .filter(|&i| {
+                    self.searches[i]
+                        .login
+                        .as_ref()
+                        .is_none_or(|only| only.eq_ignore_ascii_case(login))
+                })
+                .collect();
             let token = match self.ctx().token(login, GH_MS) {
                 Ok(token) => token,
                 Err(error) => {
+                    for &i in &asked {
+                        failed[i].get_or_insert_with(|| error.clone());
+                    }
                     errors.push(error);
                     continue;
                 }
             };
-            let args = vec![
-                "api".to_owned(),
-                "graphql".to_owned(),
-                "-f".to_owned(),
-                format!("query={}", mine_query(login)),
-            ];
-            let said = match self.gh.run(&args, Some(&token), ms(GH_MS)) {
-                Ok(ran) => parse_hits(&ran.stdout, &ran.stderr),
-                Err(RunError::Timeout) => Err("gh api graphql did not finish".to_owned()),
-                Err(RunError::Spawn(why)) => Err(format!("gh didn't start: {why}")),
+            let asks: Vec<Ask> = std::iter::once(mine(login))
+                .chain(asked.iter().map(|&i| Ask {
+                    alias: saved_alias(i),
+                    text: search_text(&self.searches[i].query),
+                    first: SEARCH_CAP,
+                }))
+                .collect();
+            let mut found = match self.ask(&asks, &token) {
+                Ok(found) => found,
+                Err(error) => {
+                    let error = format!("{login}: {error}");
+                    for &i in &asked {
+                        failed[i].get_or_insert_with(|| error.clone());
+                    }
+                    // A saved search may be what failed the call (one too slow, say): My
+                    // PRs alone, so it doesn't go down with it.
+                    if asked.is_empty() {
+                        errors.push(error);
+                        continue;
+                    }
+                    match self.ask(&[mine(login)], &token) {
+                        Ok(found) => found,
+                        Err(error) => {
+                            errors.push(format!("{login}: {error}"));
+                            continue;
+                        }
+                    }
+                }
             };
-            match said {
-                Ok(hits) => {
+            match found.hits.remove(MINE_ALIAS) {
+                Some(Ok(hits)) => {
                     self.mine.insert(login.clone(), hits.urls);
                 }
-                Err(error) => errors.push(format!("{login}: {error}")),
+                Some(Err(error)) => errors.push(format!("{login}: {error}")),
+                None => {}
+            }
+            for &i in &asked {
+                match found.hits.remove(&saved_alias(i)) {
+                    Some(Ok(hits)) => {
+                        is_found[i] = true;
+                        let saved = self.saved.entry(key(&self.searches[i])).or_default();
+                        saved.by_login.insert(login.clone(), hits);
+                        saved.is_searched = true;
+                    }
+                    Some(Err(error)) => {
+                        failed[i].get_or_insert_with(|| format!("{login}: {error}"));
+                    }
+                    None => {}
+                }
             }
         }
+        for (i, search) in self.searches.iter().enumerate() {
+            let saved = self.saved.entry(key(search)).or_default();
+            saved.error = match &search.login {
+                Some(only) if !logins.iter().any(|l| l.eq_ignore_ascii_case(only)) => {
+                    Some(format!("no gh login {only} is signed in"))
+                }
+                // No login to search as: what the status line says, said here too.
+                _ if logins.is_empty() => errors.first().cloned(),
+                _ if is_found[i] => None,
+                _ => failed[i].take().or_else(|| saved.error.take()),
+            };
+        }
         self.search_error = errors.into_iter().next();
+    }
+
+    /// One call of searches, as the login whose `token` this is.
+    fn ask(&self, asks: &[Ask], token: &str) -> Result<prw_core::search::Found, String> {
+        let aliases: Vec<&str> = asks.iter().map(|a| a.alias.as_str()).collect();
+        let args = vec![
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            format!("query={}", searches_query(asks)),
+        ];
+        match self.gh.run(&args, Some(token), ms(GH_MS)) {
+            Ok(ran) => parse_searches(&ran.stdout, &ran.stderr, &aliases),
+            Err(RunError::Timeout) => Err("gh api graphql did not finish".to_owned()),
+            Err(RunError::Spawn(why)) => Err(format!("gh didn't start: {why}")),
+        }
     }
 
     /// The lease, as the protocol takes it (`takeLease`): claim, wait 150 ms, read again.
@@ -405,6 +615,24 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             self.polled_at = Some(at);
         }
     }
+}
+
+/// A saved search's key: the search as written, so a changed query starts again.
+fn key(search: &Search) -> (String, String, Option<String>) {
+    (
+        search.name.clone(),
+        search.query.clone(),
+        search.login.clone(),
+    )
+}
+
+/// Each URL once, in order.
+fn unique_urls<'a>(urls: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    urls.into_iter()
+        .filter(|url| seen.insert(url.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// `refs` asked again now, outside a round (the mod's `fetchNow`, after a merge or a comment):
@@ -511,16 +739,24 @@ mod tests {
         move |call| call.argv.first().is_some_and(|a| a == "auth") && call.argv[1] == what
     }
 
-    /// gh with one login, whose search finds `MINE_URL`, and whose batches find every PR.
+    /// What the `i`th saved search finds: one PR of 40.
+    fn team_url(i: usize) -> String {
+        format!("https://github.com/acme/team/pull/{}", 100 + i)
+    }
+
+    /// gh with one login, whose search finds `MINE_URL` (and each saved search asked, its
+    /// [`team_url`]), and whose batches find every PR.
     fn gh() -> FakeGh {
         let gh = FakeGh::default();
         gh.on(auth("status"), |_| ok(STATUS));
         gh.on(auth("token"), |_| ok("octocat"));
-        gh.on(is("search(query:"), |_| {
-            ok(
-                json!({"data": {"search": {"issueCount": 1, "nodes": [{"url": MINE_URL}]}}})
-                    .to_string(),
-            )
+        gh.on(is("search(query:"), |call| {
+            let query = &call.argv[3];
+            let mut data = json!({"mine": {"issueCount": 1, "nodes": [{"url": MINE_URL}]}});
+            for i in (0..4).filter(|i| query.contains(&format!("s{i}: search("))) {
+                data[format!("s{i}")] = json!({"issueCount": 40, "nodes": [{"url": team_url(i)}]});
+            }
+            ok(json!({"data": data}).to_string())
         });
         gh.on(is("rate_limit"), |_| ok("{}"));
         gh.on(is("...pr"), |call| {
@@ -681,6 +917,180 @@ mod tests {
         files.leave();
         assert!(!dir.0.join("sessions/prw-test.json").exists());
         assert_eq!(files.read_lease().map(|l| l.until), Some(0));
+    }
+
+    /// `config.toml` in `dir`, saying `text`.
+    fn config_in(dir: &Path, text: &str) -> ConfigFile {
+        let path = dir.join("config.toml");
+        fs::write(&path, text).unwrap();
+        ConfigFile::at(path)
+    }
+
+    fn json_at(path: PathBuf) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn saved_searches_ride_the_logins_call_and_are_announced_apart() {
+        let dir = Dir::new("searches");
+        let config = config_in(
+            &dir.0,
+            r#"
+[[search]]
+name = "Review requests"
+query = "is:open review-requested:@me"
+
+[[search]]
+name = "Hubot's"
+query = "is:open"
+login = "hubot"
+"#,
+        );
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1)).with_config(config);
+        let said = poller.tick();
+        assert_eq!(said.error, None);
+        assert_eq!(
+            said.searches,
+            [
+                Listed {
+                    name: "Review requests".into(),
+                    query: "is:open review-requested:@me".into(),
+                    urls: vec![team_url(0)],
+                    total: 40,
+                    error: None,
+                    is_searched: true,
+                },
+                Listed {
+                    name: "Hubot's".into(),
+                    query: "is:open".into(),
+                    error: Some("no gh login hubot is signed in".into()),
+                    ..Listed::default()
+                },
+            ]
+        );
+        // One call for the login: its own PRs and the search it may run, made a PR search.
+        let calls = poller.gh.calls.borrow();
+        let searches: Vec<&Call> = calls.iter().filter(|c| is("search(query:")(c)).collect();
+        assert_eq!(searches.len(), 1);
+        assert!(searches[0].argv[3].contains(
+            r#"s0: search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 30)"#
+        ));
+        assert!(!searches[0].argv[3].contains("s1:"));
+        drop(calls);
+        // My PRs stays the login's own; the finds go in a file of their own, and are polled.
+        assert_eq!(
+            json_at(dir.0.join("sessions/prw-test.json"))["urls"],
+            json!([MINE_URL])
+        );
+        assert_eq!(
+            json_at(dir.0.join("sessions/prw-test-searches.json")),
+            json!({"urls": [team_url(0)], "writer": "prw", "name": "Saved searches", "kind": "searches"})
+        );
+        assert!(json_at(dir.0.join("results.json"))["prs"][team_url(0)]["pr"].is_object());
+        // Leaving takes both files.
+        poller.files.leave();
+        assert!(!dir.0.join("sessions/prw-test-searches.json").exists());
+    }
+
+    #[test]
+    fn a_changed_config_is_searched_at_once_and_no_file_is_the_default() {
+        let dir = Dir::new("config-change");
+        let config = config_in(&dir.0, "[[search]]\nname = \"A\"\nquery = \"is:open\"\n");
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1)).with_config(config);
+        let names = |said: &PollerSaid| -> Vec<String> {
+            said.searches.iter().map(|s| s.name.clone()).collect()
+        };
+        assert_eq!(names(&poller.tick()), ["A"]);
+        fs::write(
+            dir.0.join("config.toml"),
+            "[[search]]\nname = \"B\"\nquery = \"is:open\"\n[[search]]\nname = \"C\"\nquery = \"is:closed\"\n",
+        )
+        .unwrap();
+        let said = poller.tick();
+        assert_eq!(names(&said), ["B", "C"]);
+        assert_eq!(said.searches[1].urls, [team_url(1)]);
+        assert_eq!(search_calls(&poller), 2);
+        // Unchanged, the next tick inside the minute asks nothing more.
+        poller.tick();
+        assert_eq!(search_calls(&poller), 2);
+        fs::remove_file(dir.0.join("config.toml")).unwrap();
+        assert_eq!(names(&poller.tick()), ["Review requests"]);
+        // A file that won't read runs nothing, and says why.
+        fs::write(dir.0.join("config.toml"), "[[search]\n").unwrap();
+        let said = poller.tick();
+        assert_eq!(said.searches, []);
+        assert_eq!(said.problems.len(), 1);
+        assert!(!dir.0.join("sessions/prw-test-searches.json").exists());
+    }
+
+    #[test]
+    fn a_config_changed_under_one_mtime_is_read_again() {
+        // A nix store file keeps its mtime across a home-manager switch.
+        let dir = Dir::new("config-mtime");
+        let path = dir.0.join("config.toml");
+        let mut config = config_in(&dir.0, "[[search]]\nname = \"A\"\nquery = \"is:open\"\n");
+        let names = |c: Option<Config>| -> Vec<String> {
+            c.map(|c| c.searches.into_iter().map(|s| s.name).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(names(config.load()), ["A"]);
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "[[search]]\nname = \"B\"\nquery = \"is:open\"\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(names(config.load()), ["B"]);
+        assert_eq!(config.load(), None);
+    }
+
+    #[test]
+    fn a_searchs_login_is_matched_in_any_case() {
+        let dir = Dir::new("login-case");
+        let config = config_in(
+            &dir.0,
+            "[[search]]\nname = \"A\"\nquery = \"is:open\"\nlogin = \"OctoCat\"\n",
+        );
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1)).with_config(config);
+        let said = poller.tick();
+        assert_eq!(said.searches[0].error, None);
+        assert_eq!(said.searches[0].urls, [team_url(0)]);
+    }
+
+    #[test]
+    fn a_saved_search_that_fails_the_call_leaves_my_prs_standing() {
+        let dir = Dir::new("search-timeout");
+        let config = config_in(&dir.0, "[[search]]\nname = \"A\"\nquery = \"is:open\"\n");
+        let gh = gh();
+        gh.once(is("s0: search("), |_| Err(RunError::Timeout));
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh, FakeClock::new(now(), 1)).with_config(config);
+        let said = poller.tick();
+        assert_eq!(said.error, None);
+        assert_eq!(
+            said.searches[0].error.as_deref(),
+            Some("octocat: gh api graphql did not finish")
+        );
+        assert_eq!(
+            json_at(dir.0.join("sessions/prw-test.json"))["urls"],
+            json!([MINE_URL])
+        );
+        assert_eq!(search_calls(&poller), 2);
+    }
+
+    fn search_calls(poller: &Poller<FakeGh, FakeClock>) -> usize {
+        poller
+            .gh
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| is("search(query:")(c))
+            .count()
     }
 
     #[test]
