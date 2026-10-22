@@ -439,9 +439,12 @@ impl Model {
         }
     }
 
-    /// Selects list `index` (clamped) and its first PR.
+    /// Selects list `index` (clamped) and its first PR; the list already selected keeps its PR.
     fn switch_to(&mut self, index: usize) {
         let list = &self.lists[index.min(self.lists.len() - 1)];
+        if list.id == self.list {
+            return;
+        }
         self.list = list.id.clone();
         self.selected = list.rows.first().map(|r| r.pr.url.clone());
     }
@@ -506,6 +509,7 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
                 Ok(shared) => {
                     model.shared = Some(shared);
                     model.read_ok_at = Some(at);
+                    model.read_failed_at = None;
                 }
                 // Gone: nothing fetched (any more). The header waits for pr-watch again.
                 // A failed read before it went is no longer news.
@@ -600,13 +604,8 @@ pub fn tracked_of(url: &str, entry: Option<&Entry>) -> Tracked {
 #[must_use]
 pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<List> {
     let mut live: Vec<&Session> = sessions.iter().filter(|s| is_live(s.mtime, now)).collect();
-    live.sort_by(|a, b| {
-        (a.is_unnamed(), a.label().to_lowercase(), &a.id).cmp(&(
-            b.is_unnamed(),
-            b.label().to_lowercase(),
-            &b.id,
-        ))
-    });
+    live.sort_by_cached_key(|s| (s.is_unnamed(), s.label().to_lowercase(), s.id.clone()));
+    let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
     // Who watches each URL, in list order.
     let mut watchers: HashMap<&str, Vec<&Session>> = HashMap::new();
@@ -624,14 +623,30 @@ pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<
             agent: by.iter().find_map(|s| s.agent()).map(str::to_owned),
             watchers: by
                 .iter()
-                .map(|s| if s.is_unnamed() { UNNAMED } else { s.label() }.to_owned())
+                .map(|s| {
+                    names
+                        .get(s.id.as_str())
+                        .map_or(UNNAMED, String::as_str)
+                        .to_owned()
+                })
                 .collect(),
             checked_at: entry.filter(|e| e.pr.is_some()).map(|e| e.at),
         }
     };
+    let all_urls: Vec<&str> = if live.is_empty() {
+        prs.map(|prs| prs.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    } else {
+        unique(live.iter().flat_map(|s| &s.file.urls))
+    };
+    // Each card derived once: every list's URLs are among All's.
+    let by_url: HashMap<&str, Row> = all_urls.iter().map(|&url| (url, row(url))).collect();
     // `order` over the cards, each row following its card (URLs are unique in a list).
     let rows_of = |urls: Vec<&str>| -> Vec<Row> {
-        let mut rows: Vec<Option<Row>> = urls.into_iter().map(|url| Some(row(url))).collect();
+        let mut rows: Vec<Option<Row>> = urls
+            .into_iter()
+            .map(|url| Some(by_url.get(url).cloned().unwrap_or_else(|| row(url))))
+            .collect();
         let at: HashMap<String, usize> = rows
             .iter()
             .flatten()
@@ -645,12 +660,6 @@ pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<
             .collect()
     };
 
-    let all_urls: Vec<&str> = if live.is_empty() {
-        prs.map(|prs| prs.keys().map(String::as_str).collect())
-            .unwrap_or_default()
-    } else {
-        unique(live.iter().flat_map(|s| &s.file.urls))
-    };
     let mut lists = vec![List {
         id: ListId::All,
         label: "All".to_owned(),
@@ -661,7 +670,7 @@ pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<
     for session in live.iter().filter(|s| !s.is_unnamed()) {
         lists.push(List {
             id: ListId::Session(session.id.clone()),
-            label: session.label().to_owned(),
+            label: names[session.id.as_str()].clone(),
             agent: session.agent().map(str::to_owned),
             cwd: session.file.cwd.clone(),
             rows: rows_of(unique(&session.file.urls)),
@@ -679,6 +688,30 @@ pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<
     }
 
     lists
+}
+
+/// What each named session's list is called: its label, and where two live sessions share one
+/// (two sessions in one project), the last 4 characters of its id beside it, `web · k3x9`: the
+/// random end of the mod's `INSTANCE` and of `prw-<id>`, where the start is a time they share.
+fn names_of<'a>(live: &[&'a Session]) -> HashMap<&'a str, String> {
+    let named: Vec<&Session> = live.iter().copied().filter(|s| !s.is_unnamed()).collect();
+    let mut uses: HashMap<String, usize> = HashMap::new();
+    for session in &named {
+        *uses.entry(session.label().to_lowercase()).or_default() += 1;
+    }
+    named
+        .into_iter()
+        .map(|s| {
+            let name = if uses[&s.label().to_lowercase()] > 1 {
+                let skip = s.id.chars().count().saturating_sub(4);
+                let tail: String = s.id.chars().skip(skip).collect();
+                format!("{} · {tail}", s.label())
+            } else {
+                s.label().to_owned()
+            };
+            (s.id.as_str(), name)
+        })
+        .collect()
 }
 
 /// Each URL once, in the order first seen.
@@ -730,11 +763,8 @@ fn header_of(model: &Model) -> Header {
         poll,
         age,
         live: live.len(),
-        is_read_failing: match (model.read_failed_at, model.read_ok_at) {
-            (Some(failed), Some(ok)) => failed > ok,
-            (Some(_), None) => true,
-            (None, _) => false,
-        },
+        // A good read clears the failure, so any failure on record is since the last one.
+        is_read_failing: model.read_failed_at.is_some(),
         tally,
     }
 }
@@ -891,6 +921,30 @@ mod tests {
     }
 
     #[test]
+    fn sessions_sharing_a_name_carry_the_end_of_their_ids() {
+        let in_web = |id: &str, name: &str| {
+            let file = SessionFile {
+                name: Some(name.into()),
+                writer: Some(Writer::Mod),
+                ..watching(&[A])
+            };
+            session(id, file, 100_000)
+        };
+        let sessions = [
+            in_web("mgx1a2b-k3x9", "web"),
+            in_web("mgx1a2c-p7qd", "Web"),
+            in_web("mgx1a2d-zz01", "docs"),
+        ];
+        let lists = lists_of(None, &sessions, 120_000);
+        let labels: Vec<&str> = lists.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["All", "docs", "web · k3x9", "Web · p7qd"]);
+        assert_eq!(
+            lists[0].rows[0].watchers,
+            ["docs", "web · k3x9", "Web · p7qd"]
+        );
+    }
+
+    #[test]
     fn a_url_with_no_entry_is_loading_and_a_miss_says_why() {
         let pr = tracked_of(A, None);
         assert_eq!(pr.derived.pill, PillKind::Loading);
@@ -1041,6 +1095,30 @@ mod tests {
             [Cmd::Quit]
         );
         assert_eq!(update(model, Msg::Key(Key::CtrlC)).1, [Cmd::Quit]);
+    }
+
+    #[test]
+    fn a_move_that_stays_on_its_list_keeps_the_pr() {
+        let model = read(
+            Model::new(84, 30),
+            [Msg::SessionsRead(
+                vec![session("s1", by_mod(&[A, B]), 0)],
+                0,
+            )],
+        );
+        let model = read(model, [Msg::Key(Key::Tab), Msg::Key(Key::Char('j'))]);
+        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        let was = model.selected().map(str::to_owned);
+        // Three panes, the lists focused: k on the first list and G on the last stay put.
+        let model = read(
+            model,
+            [
+                Msg::Resize(120, 30),
+                Msg::Key(Key::Char('h')),
+                Msg::Key(Key::Char('G')),
+            ],
+        );
+        assert_eq!(model.selected().map(str::to_owned), was);
     }
 
     #[test]

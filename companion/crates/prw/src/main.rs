@@ -178,11 +178,7 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
 
 fn event_loop(terminal: &mut DefaultTerminal, mut reader: Reader, clock: &Clock) -> io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let dir = reader.dir().display().to_string();
-    let shown = match dir.strip_prefix(home.as_str()) {
-        Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("~{rest}"),
-        _ => dir,
-    };
+    let shown = view::tilde(&reader.dir().display().to_string(), &home);
     let ctx = view::Ctx {
         dir: &shown,
         home: &home,

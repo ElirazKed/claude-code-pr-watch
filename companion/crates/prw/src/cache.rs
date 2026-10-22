@@ -49,7 +49,8 @@ struct Seen {
     /// The stamp of the last read that parsed; `None` while none has.
     stamp: Option<Stamp>,
     mtime: i64,
-    file: SessionFile,
+    /// The last good parse; `None` while none has (the file isn't listed until one does).
+    file: Option<SessionFile>,
 }
 
 /// The cache directory, and what was last read of it.
@@ -95,10 +96,12 @@ impl Reader {
             let sessions = self
                 .sessions
                 .iter()
-                .map(|(id, seen)| Session {
-                    id: id.clone(),
-                    file: seen.file.clone(),
-                    mtime: if self.is_demo { at } else { seen.mtime },
+                .filter_map(|(id, seen)| {
+                    Some(Session {
+                        id: id.clone(),
+                        file: seen.file.clone()?,
+                        mtime: if self.is_demo { at } else { seen.mtime },
+                    })
                 })
                 .collect();
             out.push(Msg::SessionsRead(sessions, at));
@@ -144,7 +147,8 @@ impl Reader {
     }
 
     /// The session files; whether any came, went or changed. A torn file keeps its last good
-    /// parse (or lists nothing), and is read again next time; its mtime still counts.
+    /// parse (or, with none yet, isn't listed), and is read again next time; its mtime still
+    /// counts.
     fn poll_sessions(&mut self) -> bool {
         let Ok(entries) = fs::read_dir(self.dir.join("sessions")) else {
             let had = !self.sessions.is_empty();
@@ -170,7 +174,7 @@ impl Reader {
             let mut seen = self.sessions.remove(&id).unwrap_or(Seen {
                 stamp: None,
                 mtime,
-                file: SessionFile::default(),
+                file: None,
             });
             if seen.stamp != Some(stamp) {
                 changed = true;
@@ -181,7 +185,7 @@ impl Reader {
                     .and_then(parse_session)
                 {
                     Some(file) => {
-                        seen.file = file;
+                        seen.file = Some(file);
                         seen.stamp = Some(stamp);
                     }
                     None => seen.stamp = None,
@@ -259,6 +263,14 @@ mod tests {
             panic!("{msgs:?}");
         };
         assert_eq!(sessions[0].file.urls, ["u"]);
+        // One that has never parsed isn't listed.
+        fs::write(dir.0.join("sessions/b.json"), r#"{"urls": ["#).unwrap();
+        let msgs = reader.poll(7);
+        let Some(Msg::SessionsRead(sessions, _)) = msgs.last() else {
+            panic!("{msgs:?}");
+        };
+        assert_eq!(sessions.len(), 1);
+        fs::remove_file(dir.0.join("sessions/b.json")).unwrap();
         fs::remove_file(dir.0.join("sessions/a.json")).unwrap();
         assert_eq!(
             kinds(&reader.poll(8)).last().map(String::as_str),

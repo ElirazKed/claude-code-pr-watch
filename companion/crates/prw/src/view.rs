@@ -700,7 +700,7 @@ fn about(model: &Model, list: &List, home_dir: &str) -> String {
 }
 
 /// `path` with the home directory as `~`.
-fn tilde(path: &str, home: &str) -> String {
+pub fn tilde(path: &str, home: &str) -> String {
     match path.strip_prefix(home) {
         Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
             format!("~{rest}")
@@ -781,8 +781,9 @@ impl Columns {
             span("   ", label()),
             span(fit("PR", self.number), label()),
             span(fit("TITLE", self.agent + self.title), label()),
-            span(fit("REPO", self.repo), label()),
-            span("STATUS", label()),
+            // The repo and status cells each start after a space, as the row's do.
+            span(fit(" REPO", self.repo), label()),
+            span(" STATUS", label()),
         ])
     }
 
