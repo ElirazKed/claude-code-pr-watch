@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use prw_core::batch::PrRef;
 use prw_core::watch::{Group, Watch, finished, group_id, groups, is_group_id, parse_watch};
@@ -55,13 +56,17 @@ impl Watches {
         self.dir.join("sessions")
     }
 
-    /// `text` to `path`, through a temp file of this process's in `companion/` (never in
-    /// `sessions/`, where a reader would take it for a session).
+    /// `text` to `path`, through a temp file of this write's own in `companion/` (never in
+    /// `sessions/`, where a reader would take it for a session). The temp name has a counter
+    /// as well as the process id: `prw mcp`'s heartbeat thread and its main thread can write
+    /// the same group's file at once.
     fn write(&self, path: &Path, text: &str) -> io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let temp = self
             .companion()
-            .join(format!("{name}.{}.tmp", process::id()));
+            .join(format!("{name}.{}-{n}.tmp", process::id()));
         fs::create_dir_all(self.companion())?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -72,13 +77,23 @@ impl Watches {
 
     /// Every watch file that parses.
     pub fn all(&self) -> Vec<Watch> {
+        self.files().into_iter().map(|(_, w)| w).collect()
+    }
+
+    /// Every watch file that parses, with its path: a file is removed by the path it was
+    /// read from, not by the name its contents would give it.
+    fn files(&self) -> Vec<(PathBuf, Watch)> {
         let Ok(entries) = fs::read_dir(self.watch_dir()) else {
             return Vec::new();
         };
         entries
             .flatten()
-            .filter(|e| session_id(&e.path()).is_some())
-            .filter_map(|e| parse_watch(&fs::read_to_string(e.path()).ok()?))
+            .map(|e| e.path())
+            .filter(|path| session_id(path).is_some())
+            .filter_map(|path| {
+                let watch = parse_watch(&fs::read_to_string(&path).ok()?)?;
+                Some((path, watch))
+            })
             .collect()
     }
 
@@ -116,21 +131,29 @@ impl Watches {
     /// The watches in `scope` of `urls` (every URL where `urls` is `None`) removed; the
     /// ones that were.
     pub fn remove(&self, urls: Option<&[String]>, scope: Scope) -> Vec<Watch> {
-        self.all()
+        self.remove_if(urls, |w| scope.has(w))
+    }
+
+    /// The watches `has` picks of `urls` (every URL where `urls` is `None`) removed; the
+    /// ones that were.
+    pub fn remove_if(&self, urls: Option<&[String]>, has: impl Fn(&Watch) -> bool) -> Vec<Watch> {
+        self.files()
             .into_iter()
-            .filter(|w| scope.has(w) && urls.is_none_or(|urls| urls.contains(&w.url)))
-            .filter(|w| {
-                fs::remove_file(self.watch_dir().join(format!("{}.json", w.name()))).is_ok()
-            })
+            .filter(|(_, w)| has(w) && urls.is_none_or(|urls| urls.contains(&w.url)))
+            .filter(|(path, _)| fs::remove_file(path).is_ok())
+            .map(|(_, w)| w)
             .collect()
     }
 
     /// Watches whose PR was merged or closed over an hour ago, by `results.json`'s `prs`,
     /// removed.
     pub fn drop_finished(&self, prs: &Map<String, Value>, at: i64) {
-        let all = self.all();
-        for w in finished(&all, prs, at) {
-            let _ = fs::remove_file(self.watch_dir().join(format!("{}.json", w.name())));
+        let (paths, all): (Vec<PathBuf>, Vec<Watch>) = self.files().into_iter().unzip();
+        let done = finished(&all, prs, at);
+        for (path, w) in paths.iter().zip(&all) {
+            if done.iter().any(|d| std::ptr::eq(*d, w)) {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 

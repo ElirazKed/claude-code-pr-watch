@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use prw_core::batch::PrRef;
 use prw_core::mcp::{NO_URL, Request, error, initialized, numbers, parse, said, tools, urls_of};
 use prw_core::watch::agent_of_client;
 use serde_json::Value;
@@ -46,10 +47,13 @@ impl<C: Clock> Server<C> {
         }
     }
 
-    fn agent(&self) -> Option<String> {
+    /// The agent: as decided at `initialize`, or, for a client that called before it said
+    /// who it is, decided now (and kept, so the heartbeat announces its watches too).
+    fn agent(&self) -> String {
         self.agent
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| agent_of_client(""))
             .clone()
     }
 
@@ -93,11 +97,11 @@ impl<C: Clock> Server<C> {
     }
 
     fn call(&self, id: &Value, name: &str, args: &Value) -> Value {
-        let agent = self.agent().unwrap_or_else(|| agent_of_client(""));
-        let refs = urls_of(args);
         if !matches!(name, "watch" | "unwatch") {
             return error(id, -32_602, &format!("Unknown tool: {name}"));
         }
+        let agent = self.agent();
+        let refs = urls_of(args);
         if refs.is_empty() {
             return said(id, NO_URL, true);
         }
@@ -116,10 +120,21 @@ impl<C: Clock> Server<C> {
             format!("Watching {} in prw.", numbers(&refs))
         } else {
             let urls: Vec<String> = refs.iter().map(|r| r.url.clone()).collect();
-            if self.watches.remove(Some(&urls), scope).is_empty() {
-                format!("{} wasn't watched in prw by this session.", numbers(&refs))
-            } else {
-                format!("Stopped watching {} in prw.", numbers(&refs))
+            let gone = self.watches.remove(Some(&urls), scope);
+            let (stopped, unwatched): (Vec<PrRef>, Vec<PrRef>) = refs
+                .into_iter()
+                .partition(|r| gone.iter().any(|w| w.url == r.url));
+            match (stopped.is_empty(), unwatched.is_empty()) {
+                (true, _) => format!(
+                    "{} wasn't watched in prw by this session.",
+                    numbers(&unwatched)
+                ),
+                (false, true) => format!("Stopped watching {} in prw.", numbers(&stopped)),
+                (false, false) => format!(
+                    "Stopped watching {} in prw; {} wasn't watched by this session.",
+                    numbers(&stopped),
+                    numbers(&unwatched)
+                ),
             }
         };
         self.watches.announce(scope);
@@ -161,8 +176,10 @@ where
         })
     };
     let result = (|| {
-        for line in input.lines() {
-            let line = line?;
+        for line in input.split(b'\n') {
+            // A line that isn't UTF-8 is a parse error for the client, not the end of the
+            // server.
+            let line = String::from_utf8_lossy(&line?).into_owned();
             if line.trim().is_empty() {
                 continue;
             }

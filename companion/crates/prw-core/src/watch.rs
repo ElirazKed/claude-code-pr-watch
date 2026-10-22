@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::batch::{PrRef, ref_from_url};
 use crate::entries::{KEEP_MS, is_finished};
+use crate::lenient::ms_of;
 use crate::protocol::{SessionFile, Writer};
 
 /// A PR URL anywhere in a text (`PR_URL` in `hooks/pr.ts`).
@@ -159,7 +160,7 @@ pub fn finished<'a>(watches: &'a [Watch], prs: &Map<String, Value>, at: i64) -> 
         .iter()
         .filter(|w| {
             let entry = prs.get(&w.url);
-            let since = entry.and_then(|e| e.get("at")).and_then(Value::as_i64);
+            let since = entry.and_then(|e| e.get("at")).and_then(ms_of);
             is_finished(entry) && since.is_some_and(|since| at.saturating_sub(since) > KEEP_MS)
         })
         .collect()

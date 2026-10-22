@@ -57,7 +57,7 @@ Commands:
            of its own. With no URL, lists what is watched. Its agent is --agent, else
            $PRW_AGENT, else claude or codex where it runs in one, else cli; its session
            is --session, else the current folder's name
-  unwatch  Stop watching PRs: in that session with --agent or --session, else
+  unwatch  Stop watching PRs: only those of the --agent and --session named, else
            everywhere. --all: every PR (in that session, or every watch there is)
   mcp      A tool server on stdio for an agent (Codex, ...): the mod's `watch` tool and
            an `unwatch`, in this agent's session (its agent: --agent, else the
@@ -75,20 +75,11 @@ Options:
 Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q quit.
 ";
 
-/// Which of `prw`'s commands.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum Sub {
-    #[default]
-    Tui,
-    Watch,
-    Unwatch,
-    Mcp,
-}
-
 /// How to run.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Options {
-    sub: Sub,
+    /// The command; `None`: the TUI.
+    sub: Option<cli::Command>,
     cache: Option<PathBuf>,
     is_demo: bool,
     is_no_poll: bool,
@@ -127,16 +118,19 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
     let mut options = Options::default();
     let mut args = args.into_iter().peekable();
     options.sub = match args.peek().map(String::as_str) {
-        Some("watch") => Sub::Watch,
-        Some("unwatch") => Sub::Unwatch,
-        Some("mcp") => Sub::Mcp,
-        _ => Sub::Tui,
+        Some("watch") => Some(cli::Command::Watch),
+        Some("unwatch") => Some(cli::Command::Unwatch),
+        Some("mcp") => Some(cli::Command::Mcp),
+        _ => None,
     };
-    if options.sub != Sub::Tui {
+    if options.sub.is_some() {
         args.next();
     }
-    let is_tui = options.sub == Sub::Tui;
-    let takes_urls = matches!(options.sub, Sub::Watch | Sub::Unwatch);
+    let is_tui = options.sub.is_none();
+    let takes_urls = matches!(
+        options.sub,
+        Some(cli::Command::Watch | cli::Command::Unwatch)
+    );
     while let Some(arg) = args.next() {
         // `--flag value` and `--flag=value` alike.
         let (flag, inline) = match arg.split_once('=') {
@@ -164,12 +158,12 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
             "-V" | "--version" => return Command::Version,
             "--demo" if is_tui => options.is_demo = true,
             "--no-poll" if is_tui => options.is_no_poll = true,
-            "--all" if options.sub == Sub::Unwatch => options.is_all = true,
+            "--all" if options.sub == Some(cli::Command::Unwatch) => options.is_all = true,
             url if takes_urls && !url.starts_with('-') => options.urls.push(url.to_owned()),
             other => return Command::Unknown(other.to_owned()),
         }
     }
-    if options.sub == Sub::Unwatch && options.urls.is_empty() != options.is_all {
+    if options.sub == Some(cli::Command::Unwatch) && options.urls.is_empty() != options.is_all {
         return Command::Usage("unwatch takes PR URLs, or --all");
     }
     Command::Run(options)
@@ -178,19 +172,22 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
 fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
         Command::Run(options) => {
-            let ran = match options.sub {
-                Sub::Tui => run(&options),
-                Sub::Watch | Sub::Unwatch | Sub::Mcp => cli::run(&cli_of(options)),
+            let (ran, is_usage) = match options.sub {
+                None => (run(&options), false),
+                // A `watch` or `unwatch` argument that names no PR is a usage error.
+                Some(command) => {
+                    let ran = cli::run(&cli_of(options, command));
+                    let is_usage = ran
+                        .as_ref()
+                        .is_err_and(|e| e.kind() == io::ErrorKind::InvalidInput);
+                    (ran, is_usage)
+                }
             };
             match ran {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
-                    eprintln!("prw: {err}");
-                    ExitCode::from(2)
-                }
                 Err(err) => {
                     eprintln!("prw: {err}");
-                    ExitCode::FAILURE
+                    ExitCode::from(if is_usage { 2 } else { 1 })
                 }
             }
         }
@@ -218,16 +215,12 @@ fn main() -> ExitCode {
 }
 
 /// A command's options as `cli` takes them, the cache and the directory worked out.
-fn cli_of(options: Options) -> cli::Args {
+fn cli_of(options: Options, command: cli::Command) -> cli::Args {
     let cwd = std::env::current_dir()
         .ok()
         .map(|d| d.display().to_string());
     cli::Args {
-        command: match options.sub {
-            Sub::Unwatch => cli::Command::Unwatch,
-            Sub::Mcp => cli::Command::Mcp,
-            Sub::Watch | Sub::Tui => cli::Command::Watch,
-        },
+        command,
         dir: cache_dir(&options),
         urls: options.urls,
         agent: options.agent,
@@ -441,7 +434,7 @@ mod tests {
         else {
             panic!("watch runs")
         };
-        assert_eq!(watch.sub, Sub::Watch);
+        assert_eq!(watch.sub, Some(cli::Command::Watch));
         assert_eq!(watch.urls, [url]);
         assert_eq!(watch.agent.as_deref(), Some("codex"));
         assert_eq!(watch.session.as_deref(), Some("billing"));
@@ -461,7 +454,7 @@ mod tests {
         let Command::Run(mcp) = parse(&["mcp", "--agent", "codex"]) else {
             panic!("mcp runs")
         };
-        assert_eq!(mcp.sub, Sub::Mcp);
+        assert_eq!(mcp.sub, Some(cli::Command::Mcp));
         // Each command takes only its own flags.
         assert_eq!(parse(&["mcp", url]), Command::Unknown(url.into()));
         assert_eq!(
