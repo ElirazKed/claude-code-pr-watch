@@ -147,8 +147,8 @@ impl Reader {
     }
 
     /// The session files; whether any came, went or changed. A torn file keeps its last good
-    /// parse (or, with none yet, isn't listed), and is read again next time; its mtime still
-    /// counts.
+    /// parse, its mtime still counting, or with none yet isn't listed; either way it is read
+    /// again next time, and is news only when a listed file's mtime moved.
     fn poll_sessions(&mut self) -> bool {
         let Ok(entries) = fs::read_dir(self.dir.join("sessions")) else {
             let had = !self.sessions.is_empty();
@@ -177,18 +177,20 @@ impl Reader {
                 file: None,
             });
             if seen.stamp != Some(stamp) {
-                changed = true;
+                let was = seen.mtime;
                 seen.mtime = mtime;
-                match fs::read_to_string(&path)
+                let parsed = fs::read_to_string(&path)
                     .ok()
                     .as_deref()
-                    .and_then(parse_session)
-                {
-                    Some(file) => {
-                        seen.file = Some(file);
-                        seen.stamp = Some(stamp);
-                    }
-                    None => seen.stamp = None,
+                    .and_then(parse_session);
+                if let Some(file) = parsed {
+                    changed = true;
+                    seen.file = Some(file);
+                    seen.stamp = Some(stamp);
+                } else {
+                    // Still torn: news only when a listed file's mtime moved (not every look).
+                    changed |= seen.file.is_some() && was != mtime;
+                    seen.stamp = None;
                 }
             }
             found.insert(id, seen);
@@ -256,21 +258,22 @@ mod tests {
         fs::write(dir.0.join("results.json"), r#"{"fetchedAt": 5, "pr"#).unwrap();
         assert_eq!(kinds(&reader.poll(5)), ["unreadable"]);
         assert_eq!(kinds(&reader.poll(6)), ["unreadable"]);
-        // A torn session file keeps its last good parse.
+        // A torn session file keeps its last good parse; one that has never parsed isn't
+        // listed, and isn't news look after look.
         fs::write(dir.0.join("sessions/a.json"), r#"{"urls": ["#).unwrap();
-        let msgs = reader.poll(7);
-        let Some(Msg::SessionsRead(sessions, _)) = msgs.last() else {
-            panic!("{msgs:?}");
-        };
-        assert_eq!(sessions[0].file.urls, ["u"]);
-        // One that has never parsed isn't listed.
         fs::write(dir.0.join("sessions/b.json"), r#"{"urls": ["#).unwrap();
+        reader.poll(7);
+        assert_eq!(kinds(&reader.poll(7)), ["unreadable"]);
+        fs::write(dir.0.join("sessions/c.json"), r#"{"urls": ["v"]}"#).unwrap();
         let msgs = reader.poll(7);
         let Some(Msg::SessionsRead(sessions, _)) = msgs.last() else {
             panic!("{msgs:?}");
         };
-        assert_eq!(sessions.len(), 1);
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["a", "c"]);
+        assert_eq!(sessions[0].file.urls, ["u"]);
         fs::remove_file(dir.0.join("sessions/b.json")).unwrap();
+        fs::remove_file(dir.0.join("sessions/c.json")).unwrap();
         fs::remove_file(dir.0.join("sessions/a.json")).unwrap();
         assert_eq!(
             kinds(&reader.poll(8)).last().map(String::as_str),

@@ -112,6 +112,6 @@ Otherwise it reads `results.json` like any other session, and announces its own 
 
 | File | Torn or unparsable | Missing |
 |---|---|---|
-| `sessions/<id>.json` | No URLs this time (or the last good parse); liveness still by mtime | Not a session |
+| `sessions/<id>.json` | No URLs this time (or the last good parse); liveness still by mtime. One that has never parsed may be left out until it does (prw does: its writer and name aren't known yet) | Not a session |
 | `lease.json` | No lease held | No lease held |
 | `results.json` | Keep the last good copy | Nothing fetched yet (`empty()`: every field zero or empty) |

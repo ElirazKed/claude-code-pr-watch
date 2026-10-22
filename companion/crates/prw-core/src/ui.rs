@@ -59,7 +59,8 @@ pub fn ago(ms: i64) -> String {
 }
 
 /// One session file as the binary read it: its `<id>` (the file name without `.json`), what
-/// it says (the last good parse, or empty), and its mtime (ms), the heartbeat.
+/// it says (its last good parse; one that has never parsed isn't read as a session), and its
+/// mtime (ms), the heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
@@ -604,7 +605,7 @@ pub fn tracked_of(url: &str, entry: Option<&Entry>) -> Tracked {
 #[must_use]
 pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<List> {
     let mut live: Vec<&Session> = sessions.iter().filter(|s| is_live(s.mtime, now)).collect();
-    live.sort_by_cached_key(|s| (s.is_unnamed(), s.label().to_lowercase(), s.id.clone()));
+    live.sort_by_cached_key(|&s| (s.is_unnamed(), s.label().to_lowercase(), s.id.as_str()));
     let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
     // Who watches each URL, in list order.
@@ -645,7 +646,7 @@ pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<
     let rows_of = |urls: Vec<&str>| -> Vec<Row> {
         let mut rows: Vec<Option<Row>> = urls
             .into_iter()
-            .map(|url| Some(by_url.get(url).cloned().unwrap_or_else(|| row(url))))
+            .map(|url| Some(by_url[url].clone()))
             .collect();
         let at: HashMap<String, usize> = rows
             .iter()
@@ -1109,7 +1110,7 @@ mod tests {
         let model = read(model, [Msg::Key(Key::Tab), Msg::Key(Key::Char('j'))]);
         assert_eq!(model.list_id(), &ListId::Session("s1".into()));
         let was = model.selected().map(str::to_owned);
-        // Three panes, the lists focused: k on the first list and G on the last stay put.
+        // Three panes, the lists focused: G on the last list stays put.
         let model = read(
             model,
             [
