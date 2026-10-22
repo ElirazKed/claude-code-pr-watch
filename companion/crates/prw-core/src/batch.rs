@@ -13,6 +13,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::gh::CheckItem;
 use crate::lenient::read;
 use crate::protocol::RateLimit;
 use crate::time::format_iso;
@@ -115,6 +116,63 @@ pub fn build_query(refs: &[PrRef]) -> String {
         fields.join("\n  "),
         fragment()
     )
+}
+
+/// The conclusions a failed run can end in: the runs whose title and summary
+/// [`checks_query`] asks for (`FAILED`).
+const FAILED: &str = "ACTION_REQUIRED, CANCELLED, FAILURE, STALE, STARTUP_FAILURE, TIMED_OUT";
+
+/// One PR's checks with what handing a failure on needs (`checksQuery`): a GitHub Actions
+/// run's job id (its `databaseId`), the links and status descriptions, and the failed runs'
+/// titles and summaries (a summary may run to 65 KB, so a passing run's is never asked). One
+/// call, still one point, and only on that press; the alias shape keeps one parser.
+#[must_use]
+pub fn checks_query(pr: &PrRef) -> String {
+    let mut parts = pr.repo.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let failed_runs = format!(
+        "
+    checkSuites(last: 50) {{ nodes {{ checkRuns(first: 20, filterBy: {{ checkType: LATEST, conclusions: [{FAILED}] }}) {{
+      nodes {{ databaseId title summary }}
+    }} }} }}"
+    );
+    format!(
+        "query {{\n  p0: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{\n    {}\n  }} }}\n}}",
+        json_string(owner),
+        json_string(name),
+        pr.number,
+        checks_of(
+            "databaseId detailsUrl ",
+            " description targetUrl",
+            &failed_runs
+        )
+    )
+}
+
+/// The checks [`checks_query`]'s reply holds (`parseChecks`).
+///
+/// # Errors
+///
+/// Why there are none: the call failed, or this account can't see the PR.
+pub fn parse_checks(stdout: &str, stderr: &str, pr: &PrRef) -> Result<Vec<CheckItem>, String> {
+    let reply = parse_reply(stdout, stderr, std::slice::from_ref(pr));
+    if let Some(error) = reply.error {
+        return Err(error);
+    }
+    let found = reply
+        .found
+        .get(&pr.url)
+        .ok_or_else(|| "Not found, or this gh account can't see it".to_owned())?;
+    let rollup = found
+        .get("statusCheckRollup")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(serde_json::from_value::<Vec<Value>>(rollup)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| read(item).unwrap_or_default())
+        .collect())
 }
 
 /// A string as `JSON.stringify` writes it.
@@ -933,5 +991,54 @@ mod tests {
         let next: Vec<&str> = next.trim_end().split('\n').collect();
         assert_eq!(next.len(), LOG_LINES);
         assert_eq!((next[0], next[LOG_LINES - 1]), ("1", "new"));
+    }
+}
+
+#[cfg(test)]
+mod checks_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pr() -> PrRef {
+        PrRef {
+            url: "https://github.com/acme/app/pull/13".to_owned(),
+            repo: "acme/app".to_owned(),
+            number: 13,
+        }
+    }
+
+    #[test]
+    fn the_checks_query_is_the_batch_alias_shape_with_summaries_of_failed_runs_only() {
+        let query = checks_query(&pr());
+        assert!(
+            query.contains(
+                r#"p0: repository(owner: "acme", name: "app") { pullRequest(number: 13)"#
+            )
+        );
+        assert!(query.contains(
+            "... on CheckRun { name status conclusion startedAt databaseId detailsUrl checkSuite"
+        ));
+        assert_eq!(query.matches("summary").count(), 1);
+        assert!(query.contains("filterBy: { checkType: LATEST, conclusions: [ACTION_REQUIRED, CANCELLED, FAILURE, STALE, STARTUP_FAILURE, TIMED_OUT] }"));
+    }
+
+    #[test]
+    fn the_reply_joins_summaries_to_their_checks_or_says_why_there_are_none() {
+        let failing = json!({"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "databaseId": 901});
+        let passing = json!({"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "databaseId": 902});
+        let commit = json!({
+            "statusCheckRollup": {"contexts": {"nodes": [failing, passing]}},
+            "checkSuites": {"nodes": [{"checkRuns": {"nodes": []}}, {"checkRuns": {"nodes": [{"databaseId": 901, "title": "3 tests failed", "summary": "upload.test.ts"}]}}]},
+        });
+        let stdout = json!({"data": {"p0": {"pullRequest": {"number": 13, "commits": {"nodes": [{"commit": commit}]}}}}});
+        let checks = parse_checks(&stdout.to_string(), "", &pr()).expect("checks");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].title.as_deref(), Some("3 tests failed"));
+        assert_eq!(checks[0].summary.as_deref(), Some("upload.test.ts"));
+        assert_eq!(checks[1].title, None);
+        assert_eq!(
+            parse_checks(&json!({"data": {"p0": null}}).to_string(), "", &pr()),
+            Err("Not found, or this gh account can't see it".to_owned())
+        );
     }
 }

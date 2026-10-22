@@ -5,9 +5,15 @@
 //! draws the model (`view`) after each one. Beside it, unless `--no-poll`, a poller thread
 //! (`poller`) watches every gh login's own open PRs and takes the poll when no mod is
 //! polling, so `prw` is of use without Claude running at all.
+//!
+//! The action keys (merge, comment, hand-offs, the browser) give the model's commands, which
+//! the loop carries out: a job on a thread of its own (`actions`), a copy or a browser at once
+//! (`desktop`). What came of each goes back to the model as a message.
 
+mod actions;
 mod cache;
 mod cli;
+mod desktop;
 mod gh;
 mod mcp;
 mod poller;
@@ -19,19 +25,26 @@ mod watches;
 #[cfg(test)]
 mod render_tests;
 
+use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use prw_core::act::Done;
 use prw_core::parse_shared;
 use prw_core::ui::{Cmd, Key, Model, Msg, PollerSaid, update};
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
+use ratatui::crossterm::execute;
 
+use crate::actions::Runner;
 use crate::cache::{Reader, default_dir, ms_of};
 use crate::poller::{Files, Poller};
 
@@ -39,6 +52,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How often the files are looked at, and ages move on.
 const TICK: Duration = Duration::from_secs(1);
+/// How soon a finished job shows, at most.
+const SLICE: Duration = Duration::from_millis(100);
 
 const HELP: &str = "\
 prw: every PR your agents touch, in one terminal
@@ -65,7 +80,8 @@ Commands:
 
 Options:
       --cache <DIR>  The cache to use [env: PRW_CACHE] [default: ~/.cache/pr-watch]
-      --no-poll      Only read the cache: never write to it, never ask GitHub anything
+      --no-poll      Don't poll: only read the cache, and never write to it. GitHub is
+                     asked only when you act on a PR (m, c, f)
       --demo         Show a cache as if it were live: every session file counts as
                      just written, and the clock starts at results.json's last round
                      (for companion/demo, whose files never change). Implies --no-poll
@@ -73,6 +89,8 @@ Options:
   -V, --version      Print the version
 
 Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q quit.
+On the selected PR: m merge (asks first), c comment, f hand off to an agent (copies
+the prompt), o open in the browser, v show the prompt last copied.
 ";
 
 /// How to run.
@@ -276,13 +294,38 @@ fn run(options: &Options) -> io::Result<()> {
     let files = options
         .is_polling()
         .then(|| Files::new(dir.clone(), own_id()));
+    // A demo sends nothing to GitHub: its jobs are answered at once.
+    let runner = (!options.is_demo).then(|| {
+        Arc::new(Runner::new(
+            gh::System,
+            gh::Wall,
+            dir.clone(),
+            files.clone(),
+        ))
+    });
     let reader = Reader::new(dir, options.is_demo);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
+    // Pasted text comes whole, newlines too, rather than as keys that might act.
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let stop = Arc::new(AtomicBool::new(false));
     let said = files
         .clone()
         .map(|files| poller::spawn(Poller::new(files, gh::System, gh::Wall), Arc::clone(&stop)));
-    let result = event_loop(&mut terminal, reader, &clock, said.as_ref());
+    let (done, finished) = mpsc::channel();
+    let hands = Hands {
+        runner: runner.as_ref(),
+        done,
+        env: desktop::Env::read(),
+    };
+    let result = event_loop(
+        &mut terminal,
+        reader,
+        &clock,
+        said.as_ref(),
+        &hands,
+        &finished,
+    );
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     // Its PRs are no longer watched: the session file goes, and a held lease is given back.
     // A tick still running dies with the process.
     stop.store(true, Ordering::Relaxed);
@@ -301,13 +344,40 @@ fn own_id() -> String {
     format!("{}{:x}{nanos:08x}", poller::OWN_PREFIX, process::id())
 }
 
-fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
+/// What the loop carries the model's commands out with.
+struct Hands<'a> {
+    /// Runs the jobs; `None` in a demo.
+    runner: Option<&'a Arc<Runner<gh::System, gh::Wall>>>,
+    /// Where a finished job says so.
+    done: Sender<Done>,
+    env: desktop::Env,
+}
+
+/// Feeds the messages to the model in turn, carrying out the commands each gives: a copy or a
+/// browser answers at once, with a message fed after; a job runs on its own thread, and its
+/// answer comes later. True once a message says quit.
+fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>, hands: &Hands) -> (Model, bool) {
+    let mut queue: VecDeque<Msg> = msgs.into_iter().collect();
+    let mut model = model;
     let mut quit = false;
-    let model = msgs.into_iter().fold(model, |model, msg| {
-        let (model, cmds) = update(model, msg);
-        quit |= cmds.contains(&Cmd::Quit);
-        model
-    });
+    while let Some(msg) = queue.pop_front() {
+        let (next, cmds) = update(model, msg);
+        model = next;
+        for cmd in cmds {
+            match cmd {
+                Cmd::Quit => quit = true,
+                Cmd::Run(job) => match hands.runner {
+                    Some(runner) => actions::start(runner, job, hands.done.clone()),
+                    None => queue.push_back(Msg::Done(actions::demo(job))),
+                },
+                Cmd::Copy(text) => queue.push_back(Msg::Copied(desktop::copy(&text, hands.env))),
+                Cmd::Open(url) => {
+                    let by = desktop::open(&url, hands.env);
+                    queue.push_back(Msg::Opened(url, by));
+                }
+            }
+        }
+    }
     (model, quit)
 }
 
@@ -316,6 +386,8 @@ fn event_loop(
     mut reader: Reader,
     clock: &Clock,
     said: Option<&Receiver<PollerSaid>>,
+    hands: &Hands,
+    finished: &Receiver<Done>,
 ) -> io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
     let shown = view::tilde(&reader.dir().display().to_string(), &home);
@@ -327,38 +399,48 @@ fn event_loop(
     let (mut model, _) = feed(
         Model::new(size.width, size.height),
         reader.poll(clock.now()),
+        hands,
     );
     let mut last_tick = Instant::now();
     loop {
         terminal.draw(|frame| view::render(frame, &model, ctx))?;
-        // Wait for a key or a resize until the next tick; only a message redraws.
-        loop {
+        // Wait for a key, a paste, a resize or a finished job until the next tick; only a
+        // message redraws. A tick that is due comes first, so a stream of keys can't hold it
+        // off.
+        let msgs: Vec<Msg> = loop {
+            if let Ok(done) = finished.try_recv() {
+                break vec![Msg::Done(done)];
+            }
             let timeout = (last_tick + TICK).saturating_duration_since(Instant::now());
-            // A tick that is due comes first, so a stream of keys can't hold it off.
-            if !timeout.is_zero() && event::poll(timeout)? {
-                let msg = match event::read()? {
-                    Event::Key(key) => key_of(key).map(Msg::Key),
-                    Event::Resize(width, height) => Some(Msg::Resize(width, height)),
-                    _ => None,
-                };
-                let Some(msg) = msg else { continue };
-                let (next, quit) = feed(model, [msg]);
-                if quit {
-                    return Ok(());
-                }
-                model = next;
-            } else {
+            if timeout.is_zero() {
                 last_tick = Instant::now();
                 let now = clock.now();
                 let polled = said
                     .into_iter()
                     .flat_map(Receiver::try_iter)
                     .map(Msg::Poller);
-                let read = reader.poll(now);
-                (model, _) = feed(model, polled.chain(read).chain([Msg::Tick(now)]));
+                break polled
+                    .chain(reader.poll(now))
+                    .chain([Msg::Tick(now)])
+                    .collect();
             }
-            break;
+            if event::poll(timeout.min(SLICE))? {
+                let msg = match event::read()? {
+                    Event::Key(key) => key_of(key).map(Msg::Key),
+                    Event::Paste(text) => Some(Msg::Paste(text)),
+                    Event::Resize(width, height) => Some(Msg::Resize(width, height)),
+                    _ => None,
+                };
+                if let Some(msg) = msg {
+                    break vec![msg];
+                }
+            }
+        };
+        let (next, quit) = feed(model, msgs, hands);
+        if quit {
+            return Ok(());
         }
+        model = next;
     }
 }
 
@@ -380,7 +462,9 @@ fn key_of(key: KeyEvent) -> Option<Key> {
         KeyCode::BackTab => Key::BackTab,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => Key::Newline,
         KeyCode::Enter => Key::Enter,
+        KeyCode::Backspace => Key::Backspace,
         KeyCode::Esc => Key::Esc,
         _ => return None,
     })
@@ -499,6 +583,14 @@ mod tests {
         assert_eq!(
             key_of(press(KeyCode::BackTab, KeyModifiers::SHIFT)),
             Some(Key::BackTab)
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Enter, KeyModifiers::ALT)),
+            Some(Key::Newline)
+        );
+        assert_eq!(
+            key_of(press(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(Key::Backspace)
         );
         let mut release = press(KeyCode::Char('q'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;

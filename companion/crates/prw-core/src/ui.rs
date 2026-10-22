@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::act::{Acts, Ask, Done, Job, Offer, Target};
 use crate::layout::{Layout, layout};
 use crate::order::{Tracked, order};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
@@ -120,6 +121,9 @@ pub enum Key {
     Home,
     End,
     Enter,
+    /// Alt-Enter: a new line in the comment field.
+    Newline,
+    Backspace,
     Esc,
     CtrlC,
 }
@@ -138,6 +142,14 @@ pub enum Msg {
     Tick(i64),
     /// `prw`'s own poller, after a tick.
     Poller(PollerSaid),
+    /// Text pasted into the terminal.
+    Paste(String),
+    /// What came of a [`Job`].
+    Done(Done),
+    /// The copy a [`Cmd::Copy`] asked for: by which means ("pbcopy"), or why it failed.
+    Copied(Result<String, String>),
+    /// The browser a [`Cmd::Open`] asked for, for this URL: opened, or why not.
+    Opened(String, Result<(), String>),
 }
 
 /// What `prw`'s own poller said after a tick.
@@ -152,9 +164,15 @@ pub struct PollerSaid {
 }
 
 /// What the binary should do after a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
     Quit,
+    /// Ask GitHub, off the UI thread; a [`Msg::Done`] says what came of it.
+    Run(Job),
+    /// Put this text on the clipboard; a [`Msg::Copied`] says how.
+    Copy(String),
+    /// Open this URL in the browser; a [`Msg::Opened`] says whether it did.
+    Open(String),
 }
 
 /// Which pane the movement keys move in. Only the three-pane layout has a lists pane to
@@ -283,6 +301,7 @@ pub struct Model {
     focus: Focus,
     is_help: bool,
     poller: Option<PollerSaid>,
+    acts: Acts,
     // Worked out from the rest on each message that changes it. Never empty: All is first.
     lists: Vec<List>,
     header: Header,
@@ -305,6 +324,7 @@ impl Model {
             focus: Focus::Prs,
             is_help: false,
             poller: None,
+            acts: Acts::default(),
             lists: Vec::new(),
             header: Header::default(),
         };
@@ -439,6 +459,48 @@ impl Model {
         &self.header
     }
 
+    /// What the action keys left on the screen: the question, the toast, what runs.
+    #[must_use]
+    pub const fn acts(&self) -> &Acts {
+        &self.acts
+    }
+
+    /// The PR an action key acts on: the one an open question is about, else the selected
+    /// one.
+    fn target(&self, ask: Option<&Ask>) -> Option<Target<'_>> {
+        let row = match ask {
+            Some(ask) => self
+                .list()
+                .rows
+                .iter()
+                .chain(&self.lists[0].rows)
+                .find(|r| r.pr.url == ask.url())?,
+            None => self.selected_row()?,
+        };
+        Some(self.target_of(row))
+    }
+
+    fn target_of<'a>(&'a self, row: &'a Row) -> Target<'a> {
+        let owner = row.repo.split('/').next().unwrap_or_default();
+        Target {
+            row,
+            pr: self.entry(&row.pr.url).and_then(|e| e.pr.as_ref()),
+            login: self
+                .shared
+                .as_ref()
+                .and_then(|s| s.accounts.get(owner))
+                .map_or("", String::as_str),
+        }
+    }
+
+    /// What the selected PR offers, for its actions list.
+    #[must_use]
+    pub fn offers(&self) -> Vec<Offer> {
+        self.selected_row()
+            .map(|row| self.acts.offers(self.target_of(row)))
+            .unwrap_or_default()
+    }
+
     /// Works out the lists and the header again, and puts the selection back on a row: the
     /// same PR where it is still listed, else the row where it was (or the last).
     fn rebuild(&mut self) {
@@ -502,6 +564,17 @@ impl Model {
     }
 
     fn key(&mut self, key: Key) -> Vec<Cmd> {
+        if !self.is_help {
+            // Taken out while they act, so the target borrows the rest without a copy.
+            let mut acts = std::mem::take(&mut self.acts);
+            let target = self.target(acts.ask());
+            let cmds = acts.key(key, target, self.now);
+            acts.clamp_view(usize::from(self.width), usize::from(self.height));
+            self.acts = acts;
+            if let Some(cmds) = cmds {
+                return cmds;
+            }
+        }
         let is_three = self.layout() == Layout::Three;
         match key {
             // Esc closes the help first; with none open, it quits as q does.
@@ -519,7 +592,7 @@ impl Model {
             Key::Tab | Key::Char('l') | Key::Right => self.cycle(1),
             Key::BackTab | Key::Char('h') | Key::Left => self.cycle(-1),
             // Enter opens the full PR view, a later step; every other key does nothing.
-            Key::Enter | Key::Char(_) => {}
+            Key::Enter | Key::Newline | Key::Backspace | Key::Char(_) => {}
         }
         Vec::new()
     }
@@ -557,7 +630,21 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         }
         Msg::Tick(at) => {
             model.now = at;
+            model.acts.tick(at);
             model.rebuild();
+            Vec::new()
+        }
+        Msg::Paste(text) => {
+            model.acts.paste(&text);
+            Vec::new()
+        }
+        Msg::Done(done) => model.acts.done(done, model.now),
+        Msg::Copied(by) => {
+            model.acts.copied_by(by, model.now);
+            Vec::new()
+        }
+        Msg::Opened(url, by) => {
+            model.acts.opened(&url, by, model.now);
             Vec::new()
         }
         Msg::Poller(said) => {
@@ -568,6 +655,9 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         Msg::Resize(width, height) => {
             model.width = width;
             model.height = height;
+            model
+                .acts
+                .clamp_view(usize::from(width), usize::from(height));
             Vec::new()
         }
         Msg::Key(key) => model.key(key),
