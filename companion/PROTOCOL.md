@@ -15,6 +15,7 @@ In code: the mod's side lives in `hooks/register.tsx` (the "One poller for the w
 | `results.json` | What GitHub said about every watched PR | The lease holder; any session fetching a PR at once | Each round, each watch / Refresh / merge / comment |
 | `results.json.<owner>.tmp` | A `results.json` on its way in | Its owner | Just before each `results.json` write |
 | `notice.json`, `errors.log` | The mod's own: the update toast it showed, failed calls | The mod | Not part of the protocol: don't write them |
+| `prw-errors.log` | `prw`'s own failed calls, in the mod's `errors.log` format (`logLine`, last `LOG_LINES`) | `prw` | Not part of the protocol |
 
 All times are milliseconds since the epoch (`$.clock.now()`), unless a field says ISO.
 
@@ -41,10 +42,11 @@ type SessionFile = {
 {"urls":["https://github.com/acme/app/pull/12"],"writer":"mod","agent":"claude","name":"app","cwd":"/work/app/hooks"}
 ```
 
-- **`<id>`:** the writer's own id. The mod uses `INSTANCE`, `<base-36 time>-<up to 8 random base-36 characters>`, which lasts as long as the loaded module (a `/clear` keeps it). `prw` uses `prw-<id>`. Only names ending in `.json` are session files.
+- **`<id>`:** the writer's own id. The mod uses `INSTANCE`, `<base-36 time>-<up to 8 random base-36 characters>`, which lasts as long as the loaded module (a `/clear` keeps it). `prw` uses `prw-<id>`, new each run. Only names ending in `.json` are session files.
+- **`prw`'s own file:** `{"urls": [...], "writer": "prw", "name": "My PRs"}`, with no `agent`: every open PR each gh login authored (one search per login, as that login, a minute apart), so whoever polls fetches them like any session's. It is written every 10 s while `prw` runs, and, unlike the mod's, removed when `prw` quits (giving back a lease it still holds).
 - **When it is written:** the mod writes its file on each 10 s tick (`$.clock.every(10_000)` → `tick` → `announce`), and only while it watches an open PR or one not read yet (`isActive`). A session that watches nothing writes nothing and soon stops counting as live.
 - **`name` and `cwd`:** these come from the session start (`session.start`'s `cwd`, and `$.session.root()` for `name`). They follow `classic.CwdChanged`, so a `cd`, `/cd` or worktree move shows on the next tick. `name` is the project root's last path segment (`placeOf`, `folderName`), so a `cd` into a subfolder moves `cwd` but doesn't rename the session. Until the start has said where the session runs, the file has neither field.
-- **Liveness:** a file is live while its mtime is less than `ALIVE_MS` (60 000 ms) old. A dead session's PRs are no longer polled. Files are never deleted on exit. Ones older than `PRUNE_MS` (24 h) are removed by whichever session runs a round, at most every `PRUNE_EVERY_MS` (1 h).
+- **Liveness:** a file is live while its mtime is less than `ALIVE_MS` (60 000 ms) old. A dead session's PRs are no longer polled. The mod's files are never deleted on exit. Ones older than `PRUNE_MS` (24 h) are removed by whichever session runs a round, at most every `PRUNE_EVERY_MS` (1 h).
 - **Atomicity: none.** The file is written in place (`writeJson`) every tick, since a rename would cost an exec every tick. **A reader may catch it torn or empty.** Treat a file that doesn't parse as listing no URLs this time (`urlsIn`) and read it again next tick, or keep the last good parse of that file. Take only strings from an array `urls`, whatever else is there.
 
 ## `lease.json`
