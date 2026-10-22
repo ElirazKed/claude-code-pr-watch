@@ -7,11 +7,14 @@
 //! polling, so `prw` is of use without Claude running at all.
 
 mod cache;
+mod cli;
 mod gh;
+mod mcp;
 mod poller;
 mod round;
 mod theme;
 mod view;
+mod watches;
 
 #[cfg(test)]
 mod render_tests;
@@ -41,10 +44,24 @@ const HELP: &str = "\
 prw: every PR your agents touch, in one terminal
 
 Usage: prw [OPTIONS]
+       prw watch [<PR URL>...] [--agent <NAME>] [--session <NAME>]
+       prw unwatch (<PR URL>... | --all) [--agent <NAME>] [--session <NAME>]
+       prw mcp [--agent <NAME>] [--session <NAME>]
 
 Shows the PRs the pr-watch mod polls, from its shared cache, and every open PR of each
 gh login (\"My PRs\"). When no Claude session's mod is polling, prw polls GitHub itself,
 sharing the cache's lease and rate limits with the mod as one more session.
+
+Commands:
+  watch    Watch PRs for an agent that isn't Claude: each agent's session gets a list
+           of its own. With no URL, lists what is watched. Its agent is --agent, else
+           $PRW_AGENT, else claude or codex where it runs in one, else cli; its session
+           is --session, else the current folder's name
+  unwatch  Stop watching PRs: only those of the --agent and --session named, else
+           everywhere. --all: every PR (in that session, or every watch there is)
+  mcp      A tool server on stdio for an agent (Codex, ...): the mod's `watch` tool and
+           an `unwatch`, in this agent's session (its agent: --agent, else the
+           client's name)
 
 Options:
       --cache <DIR>  The cache to use [env: PRW_CACHE] [default: ~/.cache/pr-watch]
@@ -61,9 +78,17 @@ Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q qui
 /// How to run.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Options {
+    /// The command; `None`: the TUI.
+    sub: Option<cli::Command>,
     cache: Option<PathBuf>,
     is_demo: bool,
     is_no_poll: bool,
+    /// `watch` and `unwatch`: the PR URLs, as given.
+    urls: Vec<String>,
+    agent: Option<String>,
+    session: Option<String>,
+    /// `unwatch --all`.
+    is_all: bool,
 }
 
 impl Options {
@@ -82,40 +107,90 @@ enum Command {
     Unknown(String),
     /// A flag that takes a value, without one.
     Missing(&'static str),
+    /// Arguments that don't go together.
+    Usage(&'static str),
 }
+
+/// The flags that take a value.
+const VALUED: [&str; 3] = ["--cache", "--agent", "--session"];
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
     let mut options = Options::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    options.sub = match args.peek().map(String::as_str) {
+        Some("watch") => Some(cli::Command::Watch),
+        Some("unwatch") => Some(cli::Command::Unwatch),
+        Some("mcp") => Some(cli::Command::Mcp),
+        _ => None,
+    };
+    if options.sub.is_some() {
+        args.next();
+    }
+    let is_tui = options.sub.is_none();
+    let takes_urls = matches!(
+        options.sub,
+        Some(cli::Command::Watch | cli::Command::Unwatch)
+    );
     while let Some(arg) = args.next() {
-        match arg.as_str() {
+        // `--flag value` and `--flag=value` alike.
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if VALUED.contains(&flag) => (flag, Some(value.to_owned())),
+            _ => (arg.as_str(), None),
+        };
+        if let Some(&flag) = VALUED.iter().find(|&&f| f == flag) {
+            let value = match inline {
+                Some(value) => value,
+                None => args.next().unwrap_or_default(),
+            };
+            if value.is_empty() {
+                return Command::Missing(flag);
+            }
+            match flag {
+                "--cache" => options.cache = Some(value.into()),
+                _ if is_tui => return Command::Unknown(flag.to_owned()),
+                "--agent" => options.agent = Some(value),
+                _ => options.session = Some(value),
+            }
+            continue;
+        }
+        match flag {
             "-h" | "--help" => return Command::Help,
             "-V" | "--version" => return Command::Version,
-            "--demo" => options.is_demo = true,
-            "--no-poll" => options.is_no_poll = true,
-            "--cache" => match args.next() {
-                Some(dir) if !dir.is_empty() => options.cache = Some(dir.into()),
-                _ => return Command::Missing("--cache"),
-            },
-            other => match other.strip_prefix("--cache=") {
-                Some("") => return Command::Missing("--cache"),
-                Some(dir) => options.cache = Some(dir.into()),
-                None => return Command::Unknown(other.to_owned()),
-            },
+            "--demo" if is_tui => options.is_demo = true,
+            "--no-poll" if is_tui => options.is_no_poll = true,
+            "--all" if options.sub == Some(cli::Command::Unwatch) => options.is_all = true,
+            url if takes_urls && !url.starts_with('-') => options.urls.push(url.to_owned()),
+            other => return Command::Unknown(other.to_owned()),
         }
+    }
+    if options.sub == Some(cli::Command::Unwatch) && options.urls.is_empty() != options.is_all {
+        return Command::Usage("unwatch takes PR URLs, or --all");
     }
     Command::Run(options)
 }
 
 fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
-        Command::Run(options) => match run(&options) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("prw: {err}");
-                ExitCode::FAILURE
+        Command::Run(options) => {
+            let (ran, is_usage) = match options.sub {
+                None => (run(&options), false),
+                // A `watch` or `unwatch` argument that names no PR is a usage error.
+                Some(command) => {
+                    let ran = cli::run(&cli_of(options, command));
+                    let is_usage = ran
+                        .as_ref()
+                        .is_err_and(|e| e.kind() == io::ErrorKind::InvalidInput);
+                    (ran, is_usage)
+                }
+            };
+            match ran {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("prw: {err}");
+                    ExitCode::from(if is_usage { 2 } else { 1 })
+                }
             }
-        },
+        }
         Command::Help => {
             print!("{HELP}");
             ExitCode::SUCCESS
@@ -132,6 +207,26 @@ fn main() -> ExitCode {
             eprintln!("prw: {flag} needs a value\n\n{HELP}");
             ExitCode::from(2)
         }
+        Command::Usage(why) => {
+            eprintln!("prw: {why}\n\n{HELP}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A command's options as `cli` takes them, the cache and the directory worked out.
+fn cli_of(options: Options, command: cli::Command) -> cli::Args {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|d| d.display().to_string());
+    cli::Args {
+        command,
+        dir: cache_dir(&options),
+        urls: options.urls,
+        agent: options.agent,
+        session: options.session,
+        is_all: options.is_all,
+        cwd,
     }
 }
 
@@ -203,7 +298,7 @@ fn own_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    format!("prw-{:x}{nanos:08x}", process::id())
+    format!("{}{:x}{nanos:08x}", poller::OWN_PREFIX, process::id())
 }
 
 fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
@@ -303,7 +398,7 @@ mod tests {
         assert_eq!(parse(&["-V"]), Command::Version);
         assert_eq!(parse(&["--help"]), Command::Help);
         assert_eq!(parse(&["-h"]), Command::Help);
-        assert_eq!(parse(&["watch"]), Command::Unknown("watch".into()));
+        assert_eq!(parse(&["nope"]), Command::Unknown("nope".into()));
         assert_eq!(parse(&["--version", "extra"]), Command::Version);
         let demo = Options {
             cache: Some("companion/demo".into()),
@@ -329,6 +424,53 @@ mod tests {
         assert!(Options::default().is_polling());
         assert_eq!(parse(&["--cache"]), Command::Missing("--cache"));
         assert_eq!(parse(&["--cache="]), Command::Missing("--cache"));
+    }
+
+    #[test]
+    fn parses_the_commands() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|&s| s.to_owned()));
+        let url = "https://github.com/acme/app/pull/1";
+        let Command::Run(watch) = parse(&["watch", url, "--agent=codex", "--session", "billing"])
+        else {
+            panic!("watch runs")
+        };
+        assert_eq!(watch.sub, Some(cli::Command::Watch));
+        assert_eq!(watch.urls, [url]);
+        assert_eq!(watch.agent.as_deref(), Some("codex"));
+        assert_eq!(watch.session.as_deref(), Some("billing"));
+        let Command::Run(list) = parse(&["watch", "--cache", "/tmp/c"]) else {
+            panic!("watch lists")
+        };
+        assert!(list.urls.is_empty() && list.cache.is_some());
+        let Command::Run(all) = parse(&["unwatch", "--all"]) else {
+            panic!("unwatch --all runs")
+        };
+        assert!(all.is_all);
+        assert!(matches!(parse(&["unwatch"]), Command::Usage(_)));
+        assert!(matches!(
+            parse(&["unwatch", url, "--all"]),
+            Command::Usage(_)
+        ));
+        let Command::Run(mcp) = parse(&["mcp", "--agent", "codex"]) else {
+            panic!("mcp runs")
+        };
+        assert_eq!(mcp.sub, Some(cli::Command::Mcp));
+        // Each command takes only its own flags.
+        assert_eq!(parse(&["mcp", url]), Command::Unknown(url.into()));
+        assert_eq!(
+            parse(&["watch", "--demo"]),
+            Command::Unknown("--demo".into())
+        );
+        assert_eq!(
+            parse(&["--agent", "codex"]),
+            Command::Unknown("--agent".into())
+        );
+        assert_eq!(parse(&["watch", "--all"]), Command::Unknown("--all".into()));
+        assert_eq!(parse(&["watch", "--agent"]), Command::Missing("--agent"));
+        assert_eq!(
+            parse(&["watch", "--session="]),
+            Command::Missing("--session")
+        );
     }
 
     #[test]

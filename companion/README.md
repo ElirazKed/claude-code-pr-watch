@@ -6,7 +6,7 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 5 of the plan: polling.** `prw` shows the PRs your sessions watch, from the mod's shared
+**Status: step 6 of the plan: other agents.** `prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
@@ -16,6 +16,9 @@ It takes part in the poll as one more session. It announces "My PRs" in its own 
 running mod fetches them in its rounds. When no mod is polling, it polls GitHub itself, for every live
 session, under the same lease, rate limits and hold as the mod. The header says who polled last.
 `--no-poll` keeps it read-only: it never writes to the cache and never asks GitHub anything.
+
+Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
+`prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
 
 ## Build and run
 
@@ -54,6 +57,44 @@ counts as just written, the clock starts 12 s after the results' round, and noth
 `--demo`, touch the session files first (`touch companion/demo/sessions/*.json`) and the header says
 how old the results really are (and pass `--no-poll`, or `prw` polls GitHub for the demo's PRs).
 
+### Watching for other agents
+
+```sh
+prw watch https://github.com/acme/app/pull/12          # in this folder's session, as this agent
+prw watch <url> --agent codex --session billing         # named
+prw watch                                               # what is watched, by session
+prw unwatch <url>                                       # everywhere (--session/--agent: just there)
+prw unwatch --all --session billing
+```
+
+The agent is `--agent`, else `$PRW_AGENT`, else `claude` or `codex` where `prw watch` runs inside
+one, else `cli`. The session is `--session`, else the current folder's name; a session named by its
+folder is that folder's (two projects in folders of one name are two sessions), and one named with
+`--session` is one session wherever it is watched from. A watch lasts until it is unwatched, or its PR
+has been merged or closed for an hour. While a `prw` TUI runs, every agent's session with a watch is
+listed and polled; with none running, a `prw watch` session is polled for a minute (a running
+`prw mcp` keeps its own going), and `prw watch` says so.
+
+`prw mcp` serves the same over MCP on stdio, for any agent that takes MCP servers: a `watch` tool
+(the mod's name and `urls` argument) and an `unwatch`, in the agent's session (its agent from
+`--agent`, else the MCP client's name; its session from the folder the agent starts it in). For
+Codex:
+
+```sh
+codex mcp add prw -- prw mcp
+```
+
+or in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.prw]
+command = "prw"
+args = ["mcp"]
+```
+
+Then a line in the project's `AGENTS.md` makes it a habit: "When you open or push to a pull request,
+ask whether to watch it in prw, and call prw's `watch` tool with its URL if the user agrees."
+
 ### Keys
 
 | key                  | does                                                         |
@@ -86,8 +127,10 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 - `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout, the
   TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`) and the poll's decisions, ported from
-  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), tested with properties and
-  against the mod's fixtures (`tests/fixtures.rs`).
+  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), other agents' watches (`watch`)
+  and the MCP messages (`mcp`), tested with properties and against the mod's fixtures
+  (`tests/fixtures.rs`).
 - `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), drawing the model
   (`view.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
-  running `gh` and the clock, behind traits the tests fake).
+  running `gh` and the clock, behind traits the tests fake), and the other commands (`cli.rs`: `watch`
+  and `unwatch`; `mcp.rs`: the tool server; `watches.rs`: the watch files and their sessions).
