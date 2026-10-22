@@ -17,6 +17,7 @@ use prw_core::watch::{Group, Watch, group_id, groups, is_done, is_group_id, pars
 use serde_json::{Map, Value};
 
 use crate::cache::{ms_of, session_id};
+use crate::poller::OWN_PREFIX;
 
 /// The watches under a cache directory.
 #[derive(Debug, Clone)]
@@ -204,7 +205,8 @@ impl Watches {
             .flatten()
             .flatten()
             .filter(|e| {
-                session_id(&e.path()).is_some_and(|id| id.starts_with("prw-") && !is_group_id(&id))
+                session_id(&e.path())
+                    .is_some_and(|id| id.starts_with(OWN_PREFIX) && !is_group_id(&id))
             })
             .filter_map(|e| e.metadata().ok()?.modified().ok())
             .any(|mtime| is_live(ms_of(mtime), at))

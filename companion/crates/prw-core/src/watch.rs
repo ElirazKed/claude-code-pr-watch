@@ -79,8 +79,11 @@ impl Watch {
     /// Its file's name, without `.json`: one file per PR per agent's session.
     #[must_use]
     pub fn name(&self) -> String {
-        let cwd = self.cwd.as_deref().unwrap_or_default();
-        hash(&[&self.url, &self.agent, &self.session, cwd])
+        match self.cwd.as_deref() {
+            Some(cwd) => hash(&[&self.url, &self.agent, &self.session, cwd]),
+            // A named session hashes as before folders counted, so its files keep their names.
+            None => hash(&[&self.url, &self.agent, &self.session]),
+        }
     }
 
     /// Whether it is of `agent`'s `session`, named from `cwd` (see [`Watch::cwd`]).
@@ -93,10 +96,12 @@ impl Watch {
 /// The session id the watches of `agent`'s `session`, named from `cwd`, are announced as.
 #[must_use]
 pub fn group_id(agent: &str, session: &str, cwd: Option<&str>) -> String {
-    format!(
-        "{GROUP_PREFIX}{}",
-        hash(&[agent, session, cwd.unwrap_or_default()])
-    )
+    let hashed = match cwd {
+        Some(cwd) => hash(&[agent, session, cwd]),
+        // As before folders counted, so a named session keeps its file.
+        None => hash(&[agent, session]),
+    };
+    format!("{GROUP_PREFIX}{hashed}")
 }
 
 const GROUP_PREFIX: &str = "prw-w-";

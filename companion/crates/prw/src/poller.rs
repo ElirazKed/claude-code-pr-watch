@@ -44,6 +44,8 @@ const PRUNE_MS: i64 = 86_400_000;
 const PRUNE_EVERY_MS: i64 = 3_600_000;
 /// What `prw`'s own list is called.
 pub const MINE: &str = "My PRs";
+/// How a running TUI's own id (its session file, the lease's owner) begins: `prw-<id>`.
+pub const OWN_PREFIX: &str = "prw-";
 
 /// The cache directory as `prw`'s poller writes it, as `own` (`prw-<id>`).
 #[derive(Debug, Clone)]

@@ -46,7 +46,7 @@ impl Args {
     /// The folder that names the session, part of which one it is: none where `--session`
     /// named it.
     fn place(&self) -> Option<String> {
-        self.session.is_none().then(|| self.cwd.clone()).flatten()
+        self.cwd.clone().filter(|_| self.session.is_none())
     }
 }
 
@@ -228,11 +228,11 @@ mod tests {
     }
 
     const A: &str = "https://github.com/acme/app/pull/12";
+    const B: &str = "https://github.com/acme/web/pull/3";
 
     fn now() -> i64 {
         crate::cache::ms_of(SystemTime::now())
     }
-    const B: &str = "https://github.com/acme/web/pull/3";
 
     #[test]
     fn watch_adds_in_the_agents_session_and_lists() {

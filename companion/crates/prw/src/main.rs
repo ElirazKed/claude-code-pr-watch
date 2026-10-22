@@ -298,7 +298,7 @@ fn own_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    format!("prw-{:x}{nanos:08x}", process::id())
+    format!("{}{:x}{nanos:08x}", poller::OWN_PREFIX, process::id())
 }
 
 fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
