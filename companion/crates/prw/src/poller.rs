@@ -4,6 +4,9 @@
 //! (`tick` and `publish` in `hooks/register.tsx`). The TUI learns what happened from the
 //! files, as it always has, and from a [`Said`] after each tick.
 //!
+//! Each tick also announces every agent's watches (`prw watch`, `prw mcp`) as their sessions,
+//! and drops the watches of PRs finished for an hour (`watches`).
+//!
 //! Writes: `sessions/prw-<id>.json` and `lease.json` in place (as the mod writes them), and
 //! `results.json` whole, through a temp file renamed over it. The failure log is
 //! `prw-errors.log`: the mod's `errors.log` is its own.
@@ -31,6 +34,7 @@ use serde_json::{Map, Value};
 use crate::cache::{ms_of, session_id};
 use crate::gh::{Clock, Gh, RunError, ms};
 use crate::round::{Auth, Ctx, GH_MS};
+use crate::watches::{Scope, Watches};
 
 /// How often the poller looks (ms), as the mod's tick.
 pub const TICK_MS: i64 = 10_000;
@@ -203,11 +207,14 @@ pub struct Poller<G: Gh, C: Clock> {
     polled_at: Option<i64>,
     /// Each session file's last good parse, for one caught torn.
     kept: HashMap<String, SessionFile>,
+    /// Other agents' watches (`prw watch`, `prw mcp`), announced each tick.
+    watches: Watches,
 }
 
 impl<G: Gh, C: Clock> Poller<G, C> {
     pub fn new(files: Files, gh: G, clock: C) -> Self {
         Self {
+            watches: Watches::new(files.dir.clone()),
             files,
             gh,
             clock,
@@ -262,6 +269,10 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let own = self.own_urls();
         self.files.announce(&own);
         let at = self.clock.now();
+        // Every agent's watches, as their sessions; those of PRs long finished go.
+        let raw = self.files.read_raw().unwrap_or_default();
+        self.watches.drop_finished(&object(raw.get("prs")), at);
+        self.watches.announce(Scope::All);
         let next_at = shared.as_ref().map_or(0, |s| s.next_at);
         if at >= next_at {
             let sessions = self.files.sessions(&mut self.kept);

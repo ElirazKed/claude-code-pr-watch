@@ -15,6 +15,7 @@ In code: the mod's side lives in `hooks/register.tsx` (the "One poller for the w
 | `results.json` | What GitHub said about every watched PR | The lease holder; any session fetching a PR at once | Each round, each watch / Refresh / merge / comment |
 | `results.json.<owner>.tmp` | A `results.json` on its way in | Its owner | Just before each `results.json` write |
 | `notice.json`, `errors.log` | The mod's own: the update toast it showed, failed calls | The mod | Not part of the protocol: don't write them |
+| `companion/watches/<hash>.json` | One PR one agent's session watches through `prw watch` or `prw mcp` | `prw` | When watched; deleted when unwatched |
 | `prw-errors.log` | `prw`'s own failed calls, in the mod's `errors.log` format (`logLine`, last `LOG_LINES`) | `prw` | Not part of the protocol |
 
 All times are milliseconds since the epoch (`$.clock.now()`), unless a field says ISO.
@@ -44,6 +45,7 @@ type SessionFile = {
 
 - **`<id>`:** the writer's own id. The mod uses `INSTANCE`, `<base-36 time>-<up to 8 random base-36 characters>`, which lasts as long as the loaded module (a `/clear` keeps it). `prw` uses `prw-<id>`, new each run. Only names ending in `.json` are session files.
 - **`prw`'s own file:** `{"urls": [...], "writer": "prw", "name": "My PRs"}`, with no `agent`: every open PR each gh login authored (one search per login, as that login, a minute apart), so whoever polls fetches them like any session's. It is written every 10 s while `prw` runs, and, unlike the mod's, removed when `prw` quits (giving back a lease it still holds).
+- **Other agents' sessions:** `sessions/prw-w-<hash>.json`, one per agent's session (`hash`: FNV-1a 64 of the agent and the session name), `{"urls": [...], "writer": "prw", "agent": "codex", "name": "billing", "cwd": "..."}`: the watches in `companion/watches/` of that agent and session. Any `prw` TUI writes every one each tick, and a `prw mcp` writes its own; they write the same text, through a temp file in `companion/` renamed into `sessions/`. One whose last watch goes is removed.
 - **When it is written:** the mod writes its file on each 10 s tick (`$.clock.every(10_000)` → `tick` → `announce`), and only while it watches an open PR or one not read yet (`isActive`). A session that watches nothing writes nothing and soon stops counting as live.
 - **`name` and `cwd`:** these come from the session start (`session.start`'s `cwd`, and `$.session.root()` for `name`). They follow `classic.CwdChanged`, so a `cd`, `/cd` or worktree move shows on the next tick. `name` is the project root's last path segment (`placeOf`, `folderName`), so a `cd` into a subfolder moves `cwd` but doesn't rename the session. Until the start has said where the session runs, the file has neither field.
 - **Liveness:** a file is live while its mtime is less than `ALIVE_MS` (60 000 ms) old. A dead session's PRs are no longer polled. The mod's files are never deleted on exit. Ones older than `PRUNE_MS` (24 h) are removed by whichever session runs a round, at most every `PRUNE_EVERY_MS` (1 h).
