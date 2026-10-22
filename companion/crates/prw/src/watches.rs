@@ -12,10 +12,11 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use prw_core::batch::PrRef;
+use prw_core::ui::is_live;
 use prw_core::watch::{Group, Watch, group_id, groups, is_done, is_group_id, parse_watch};
 use serde_json::{Map, Value};
 
-use crate::cache::session_id;
+use crate::cache::{ms_of, session_id};
 
 /// The watches under a cache directory.
 #[derive(Debug, Clone)]
@@ -26,14 +27,23 @@ pub struct Watches {
 /// Which watches a change is to: one agent's session's, or every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope<'a> {
-    Group { agent: &'a str, session: &'a str },
+    /// One agent's session, named from `cwd` (`prw_core::watch::Watch::cwd`).
+    Group {
+        agent: &'a str,
+        session: &'a str,
+        cwd: Option<&'a str>,
+    },
     All,
 }
 
 impl Scope<'_> {
     fn has(self, w: &Watch) -> bool {
         match self {
-            Scope::Group { agent, session } => w.agent == agent && w.session == session,
+            Scope::Group {
+                agent,
+                session,
+                cwd,
+            } => w.is_of(agent, session, cwd),
             Scope::All => true,
         }
     }
@@ -167,7 +177,11 @@ impl Watches {
             }
         }
         let gone: Vec<String> = match scope {
-            Scope::Group { agent, session } => vec![group_id(agent, session)],
+            Scope::Group {
+                agent,
+                session,
+                cwd,
+            } => vec![group_id(agent, session, cwd)],
             Scope::All => fs::read_dir(self.sessions())
                 .into_iter()
                 .flatten()
@@ -180,6 +194,20 @@ impl Watches {
             let _ = fs::remove_file(self.sessions().join(format!("{id}.json")));
         }
         live
+    }
+
+    /// Whether a `prw` TUI is running on this cache (its own session file is live), to keep
+    /// every agent's watches announced.
+    pub fn is_tui_live(&self, at: i64) -> bool {
+        fs::read_dir(self.sessions())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                session_id(&e.path()).is_some_and(|id| id.starts_with("prw-") && !is_group_id(&id))
+            })
+            .filter_map(|e| e.metadata().ok()?.modified().ok())
+            .any(|mtime| is_live(ms_of(mtime), at))
     }
 }
 
@@ -220,6 +248,7 @@ mod tests {
     const BILLING: Scope = Scope::Group {
         agent: "codex",
         session: "billing",
+        cwd: Some("/work/billing"),
     };
 
     #[test]
@@ -232,14 +261,15 @@ mod tests {
         watches.add(&refs(&[A]), "cli", "app", None, 6).unwrap();
         // Watched again: kept as first added.
         watches
-            .add(&refs(&[A]), "codex", "billing", None, 9)
+            .add(&refs(&[A]), "codex", "billing", Some("/work/billing"), 9)
             .unwrap();
         assert_eq!(watches.all().len(), 3);
         let announced = watches.announce(BILLING);
         assert_eq!(announced.len(), 1);
-        let path = dir
-            .0
-            .join(format!("sessions/{}.json", group_id("codex", "billing")));
+        let path = dir.0.join(format!(
+            "sessions/{}.json",
+            group_id("codex", "billing", Some("/work/billing"))
+        ));
         let file = parse_session(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(file.urls, [A, B]);
         assert_eq!(file.writer, Some(Writer::Prw));

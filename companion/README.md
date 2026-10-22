@@ -68,9 +68,12 @@ prw unwatch --all --session billing
 ```
 
 The agent is `--agent`, else `$PRW_AGENT`, else `claude` or `codex` where `prw watch` runs inside
-one, else `cli`. The session is `--session`, else the current folder's name. A watch lasts until it is
-unwatched, or its PR has been merged or closed for an hour. While a `prw` TUI runs, every agent's
-session with a watch is listed and polled.
+one, else `cli`. The session is `--session`, else the current folder's name; a session named by its
+folder is that folder's (two projects in folders of one name are two sessions), and one named with
+`--session` is one session wherever it is watched from. A watch lasts until it is unwatched, or its PR
+has been merged or closed for an hour. While a `prw` TUI runs, every agent's session with a watch is
+listed and polled; with none running, a `prw watch` session is polled for a minute (a running
+`prw mcp` keeps its own going), and `prw watch` says so.
 
 `prw mcp` serves the same over MCP on stdio, for any agent that takes MCP servers: a `watch` tool
 (the mod's name and `urls` argument) and an `unwatch`, in the agent's session (its agent from

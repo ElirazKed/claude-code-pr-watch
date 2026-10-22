@@ -45,6 +45,9 @@ pub struct Watch {
     pub agent: String,
     /// Its session's name: the folder it runs in, unless told.
     pub session: String,
+    /// The folder that named the session, part of which session it is, so two projects in
+    /// folders of one name stay apart. `None` where the name was given (`--session`): one
+    /// session by that name, wherever it is watched from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(rename = "addedAt", default)]
@@ -76,14 +79,24 @@ impl Watch {
     /// Its file's name, without `.json`: one file per PR per agent's session.
     #[must_use]
     pub fn name(&self) -> String {
-        hash(&[&self.url, &self.agent, &self.session])
+        let cwd = self.cwd.as_deref().unwrap_or_default();
+        hash(&[&self.url, &self.agent, &self.session, cwd])
+    }
+
+    /// Whether it is of `agent`'s `session`, named from `cwd` (see [`Watch::cwd`]).
+    #[must_use]
+    pub fn is_of(&self, agent: &str, session: &str, cwd: Option<&str>) -> bool {
+        self.agent == agent && self.session == session && self.cwd.as_deref() == cwd
     }
 }
 
-/// The session id the watches of `agent`'s `session` are announced as.
+/// The session id the watches of `agent`'s `session`, named from `cwd`, are announced as.
 #[must_use]
-pub fn group_id(agent: &str, session: &str) -> String {
-    format!("{GROUP_PREFIX}{}", hash(&[agent, session]))
+pub fn group_id(agent: &str, session: &str, cwd: Option<&str>) -> String {
+    format!(
+        "{GROUP_PREFIX}{}",
+        hash(&[agent, session, cwd.unwrap_or_default()])
+    )
 }
 
 const GROUP_PREFIX: &str = "prw-w-";
@@ -100,7 +113,7 @@ pub struct Group {
     pub id: String,
     pub agent: String,
     pub session: String,
-    /// The latest watch's directory.
+    /// The folder that named it (see [`Watch::cwd`]).
     pub cwd: Option<String>,
     /// In the order they were added.
     pub urls: Vec<String>,
@@ -120,8 +133,8 @@ impl Group {
     }
 }
 
-/// The watches by agent and session, in the order each group was first added to; each URL
-/// once.
+/// The watches by agent and session (and the folder that named it), in the order each group
+/// was first added to; each URL once.
 #[must_use]
 pub fn groups(watches: &[Watch]) -> Vec<Group> {
     let mut sorted: Vec<&Watch> = watches.iter().collect();
@@ -130,13 +143,13 @@ pub fn groups(watches: &[Watch]) -> Vec<Group> {
     for w in sorted {
         let found = out
             .iter()
-            .position(|g| g.agent == w.agent && g.session == w.session);
+            .position(|g| w.is_of(&g.agent, &g.session, g.cwd.as_deref()));
         let at = found.unwrap_or_else(|| {
             out.push(Group {
-                id: group_id(&w.agent, &w.session),
+                id: group_id(&w.agent, &w.session, w.cwd.as_deref()),
                 agent: w.agent.clone(),
                 session: w.session.clone(),
-                cwd: None,
+                cwd: w.cwd.clone(),
                 urls: Vec::new(),
             });
             out.len() - 1
@@ -144,9 +157,6 @@ pub fn groups(watches: &[Watch]) -> Vec<Group> {
         let group = &mut out[at];
         if !group.urls.contains(&w.url) {
             group.urls.push(w.url.clone());
-        }
-        if w.cwd.is_some() {
-            group.cwd.clone_from(&w.cwd);
         }
     }
     out
@@ -279,10 +289,22 @@ mod tests {
         assert_ne!(w.name(), watch(A, "codex", "web", 5).name());
         assert_ne!(w.name(), watch(B, "codex", "billing", 5).name());
         // The parts are kept apart: "ab" + "c" is not "a" + "bc".
-        assert_ne!(group_id("ab", "c"), group_id("a", "bc"));
-        assert!(is_group_id(&group_id("codex", "billing")));
+        assert_ne!(group_id("ab", "c", None), group_id("a", "bc", None));
+        // Two folders of one name are two sessions; a named session is one.
+        assert_ne!(
+            group_id("codex", "app", Some("/work/a/app")),
+            group_id("codex", "app", Some("/work/b/app"))
+        );
+        assert_ne!(
+            group_id("codex", "app", None),
+            group_id("codex", "app", Some("/work/a/app"))
+        );
+        assert!(is_group_id(&group_id("codex", "billing", None)));
         assert!(!is_group_id("prw-1a2b"));
-        assert_eq!(group_id("codex", "billing").len(), "prw-w-".len() + 16);
+        assert_eq!(
+            group_id("codex", "billing", None).len(),
+            "prw-w-".len() + 16
+        );
     }
 
     #[test]
@@ -296,8 +318,15 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].agent, "codex");
         assert_eq!(groups[0].urls, [A, B]);
-        assert_eq!(groups[0].id, group_id("codex", "billing"));
+        assert_eq!(
+            groups[0].id,
+            group_id("codex", "billing", Some("/work/billing"))
+        );
         assert_eq!(groups[1].urls, [A]);
+        // Folders of one name are sessions of their own.
+        let mut other = watch(A, "codex", "billing", 4);
+        other.cwd = Some("/elsewhere/billing".into());
+        assert_eq!(super::groups(&[watches[0].clone(), other]).len(), 2);
         let file = groups[0].file();
         assert_eq!(file.writer, Some(Writer::Prw));
         assert_eq!(file.agent.as_deref(), Some("codex"));

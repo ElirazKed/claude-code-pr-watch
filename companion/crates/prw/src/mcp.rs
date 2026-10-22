@@ -23,6 +23,7 @@ pub struct Asker {
     /// `--agent`: else the client's name, once it has said it.
     pub agent: Option<String>,
     pub session: String,
+    /// The folder that named the session; `None` where `--session` did.
     pub cwd: Option<String>,
 }
 
@@ -61,6 +62,7 @@ impl<C: Clock> Server<C> {
         Scope::Group {
             agent,
             session: &self.session.session,
+            cwd: self.session.cwd.as_deref(),
         }
     }
 
@@ -155,7 +157,7 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let beat = {
         let (stop, agent) = (Arc::clone(&stop), Arc::clone(&server.agent));
-        let (watches, session) = (server.watches.clone(), server.session.session.clone());
+        let (watches, asker) = (server.watches.clone(), server.session.clone());
         thread::spawn(move || {
             let nap = Duration::from_millis(200);
             let mut slept = 0;
@@ -166,7 +168,8 @@ where
                     if let Some(agent) = agent {
                         watches.announce(Scope::Group {
                             agent: &agent,
-                            session: &session,
+                            session: &asker.session,
+                            cwd: asker.cwd.as_deref(),
                         });
                     }
                 }
@@ -292,7 +295,7 @@ mod tests {
             ("codex", "billing")
         );
         assert_eq!(all[0].added_at, 7);
-        let id = prw_core::watch::group_id("codex", "billing");
+        let id = prw_core::watch::group_id("codex", "billing", Some("/work/billing"));
         assert!(d.0.join(format!("sessions/{id}.json")).exists());
         // A new run in the same session takes its watches up again.
         fs::remove_file(d.0.join(format!("sessions/{id}.json"))).unwrap();

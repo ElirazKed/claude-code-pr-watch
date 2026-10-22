@@ -42,6 +42,12 @@ impl Args {
             .clone()
             .unwrap_or_else(|| session_of(self.cwd.as_deref().unwrap_or("/")))
     }
+
+    /// The folder that names the session, part of which one it is: none where `--session`
+    /// named it.
+    fn place(&self) -> Option<String> {
+        self.session.is_none().then(|| self.cwd.clone()).flatten()
+    }
 }
 
 /// Runs a command, printing what it did.
@@ -56,7 +62,7 @@ pub fn run(args: &Args) -> io::Result<()> {
             let session = Asker {
                 agent: args.agent.clone(),
                 session: args.session(),
-                cwd: args.cwd.clone(),
+                cwd: args.place(),
             };
             let server = Server::new(
                 Watches::new(args.dir.clone()),
@@ -83,13 +89,23 @@ fn watched(args: &Args, at: i64, var: &impl Fn(&str) -> Option<String>) -> io::R
     if refs.is_empty() {
         return Ok(listed(&watches));
     }
-    let (agent, session) = (args.agent(var), args.session());
-    watches.add(&refs, &agent, &session, args.cwd.as_deref(), at)?;
+    let (agent, session, place) = (args.agent(var), args.session(), args.place());
+    watches.add(&refs, &agent, &session, place.as_deref(), at)?;
     watches.announce(Scope::Group {
         agent: &agent,
         session: &session,
+        cwd: place.as_deref(),
     });
-    Ok(format!("Watching {} as {agent} · {session}.", prs(&refs)))
+    let said = format!("Watching {} as {agent} · {session}.", prs(&refs));
+    // With no TUI to announce it, the session file goes stale in a minute, and with it the
+    // polling.
+    Ok(if watches.is_tui_live(at) {
+        said
+    } else {
+        format!(
+            "{said}\nNo prw TUI is running: start `prw` to keep it polled past the next minute."
+        )
+    })
 }
 
 /// What `unwatch` did, as it says it. Only what was named narrows it: `--session billing` is
@@ -107,12 +123,16 @@ fn unwatched(args: &Args) -> io::Result<String> {
         by_agent.is_none_or(|a| w.agent == a) && by_session.is_none_or(|s| w.session == s)
     });
     // Each session that lost a watch is said again (or its file goes).
-    let touched: BTreeSet<(&str, &str)> = gone
+    let touched: BTreeSet<(&str, &str, Option<&str>)> = gone
         .iter()
-        .map(|w| (w.agent.as_str(), w.session.as_str()))
+        .map(|w| (w.agent.as_str(), w.session.as_str(), w.cwd.as_deref()))
         .collect();
-    for (agent, session) in &touched {
-        watches.announce(Scope::Group { agent, session });
+    for &(agent, session, cwd) in &touched {
+        watches.announce(Scope::Group {
+            agent,
+            session,
+            cwd,
+        });
     }
     let place = match (by_agent, by_session) {
         (Some(a), Some(s)) => format!(" in {a} · {s}"),
@@ -159,7 +179,10 @@ fn listed(watches: &Watches) -> String {
     groups
         .iter()
         .flat_map(|g| {
-            let head = format!("{} · {}", g.agent, g.session);
+            let head = match &g.cwd {
+                Some(cwd) => format!("{} · {} ({cwd})", g.agent, g.session),
+                None => format!("{} · {}", g.agent, g.session),
+            };
             std::iter::once(head).chain(g.urls.iter().map(|u| format!("  {u}")))
         })
         .collect::<Vec<_>>()
@@ -205,6 +228,10 @@ mod tests {
     }
 
     const A: &str = "https://github.com/acme/app/pull/12";
+
+    fn now() -> i64 {
+        crate::cache::ms_of(SystemTime::now())
+    }
     const B: &str = "https://github.com/acme/web/pull/3";
 
     #[test]
@@ -221,16 +248,24 @@ mod tests {
             &codex,
         )
         .unwrap();
-        assert_eq!(text, "Watching acme/app#12, acme/web#3 as codex · billing.");
+        assert_eq!(
+            text,
+            "Watching acme/app#12, acme/web#3 as codex · billing.\n\
+             No prw TUI is running: start `prw` to keep it polled past the next minute."
+        );
+        // With a TUI running, no note.
+        fs::write(d.0.join("sessions/prw-1a2b.json"), "{}").unwrap();
+        let text = watched(&args(&d, Command::Watch, &[A]), now(), &codex).unwrap();
+        assert_eq!(text, "Watching acme/app#12 as codex · billing.");
         let mut flagged = args(&d, Command::Watch, &[A]);
         flagged.agent = Some("aider".into());
         flagged.session = Some("web".into());
         watched(&flagged, 2, &codex).unwrap();
         assert_eq!(
             watched(&args(&d, Command::Watch, &[]), 3, &none).unwrap(),
-            format!("codex · billing\n  {A}\n  {B}\naider · web\n  {A}")
+            format!("codex · billing (/work/billing)\n  {A}\n  {B}\naider · web\n  {A}")
         );
-        let id = prw_core::watch::group_id("codex", "billing");
+        let id = prw_core::watch::group_id("codex", "billing", Some("/work/billing"));
         assert!(d.0.join(format!("sessions/{id}.json")).exists());
     }
 
@@ -259,13 +294,13 @@ mod tests {
             "acme/app#12 wasn't watched in web."
         );
         // The web session's file goes with its last watch; billing's stays.
-        let web = prw_core::watch::group_id("codex", "web");
+        let web = prw_core::watch::group_id("codex", "web", None);
         assert!(!d.0.join(format!("sessions/{web}.json")).exists());
         let mut all = args(&d, Command::Unwatch, &[]);
         all.is_all = true;
         assert_eq!(unwatched(&all).unwrap(), "Stopped 2 watches.");
         assert_eq!(unwatched(&all).unwrap(), "Nothing was watched.");
-        let billing = prw_core::watch::group_id("codex", "billing");
+        let billing = prw_core::watch::group_id("codex", "billing", Some("/work/billing"));
         assert!(!d.0.join(format!("sessions/{billing}.json")).exists());
     }
 }
