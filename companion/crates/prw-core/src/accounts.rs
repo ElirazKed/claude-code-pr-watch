@@ -63,15 +63,87 @@ pub fn every_login(logins: &Logins) -> Vec<String> {
     all
 }
 
-/// The login an owner's PRs are polled as (`loginFor`): the one found to see them, while it
-/// is still logged in (or nothing says it isn't), else the active one.
+/// The login an owner's PRs are polled as (`loginFor`): the one remembered for it, while it
+/// is still logged in (or nothing says it isn't), else the login of the owner's own name, else
+/// the active one.
 #[must_use]
 pub fn login_for(accounts: &BTreeMap<String, String>, owner: &str, logins: &Logins) -> String {
     let all = every_login(logins);
     match accounts.get(owner) {
         Some(mapped) if all.is_empty() || all.contains(mapped) => mapped.clone(),
-        _ => logins.active.clone(),
+        _ => all
+            .into_iter()
+            .find(|login| login.eq_ignore_ascii_case(owner))
+            .unwrap_or_else(|| logins.active.clone()),
     }
+}
+
+/// GitHub's `viewerPermission` as a rank, more rights higher (`rankOf`): 0 for none or one
+/// unknown.
+#[must_use]
+pub fn rank_of(permission: Option<&str>) -> usize {
+    ["READ", "TRIAGE", "WRITE", "MAINTAIN", "ADMIN"]
+        .iter()
+        .position(|&p| Some(p) == permission)
+        .map_or(0, |i| i + 1)
+}
+
+/// The owners worth asking as each other login (`ownersBelowWrite`): no login remembered for
+/// them, and their PRs seen with less than write (anyone sees a public repo, the other
+/// account's too, but only to read). With one login there is nobody else to ask.
+#[must_use]
+pub fn owners_below_write<'a>(
+    seen: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    accounts: &BTreeMap<String, String>,
+    logins: &Logins,
+) -> Vec<String> {
+    if every_login(logins).len() < 2 {
+        return Vec::new();
+    }
+    let mut best: Vec<(&str, usize)> = Vec::new();
+    for (owner, permission) in seen {
+        let rank = rank_of(permission);
+        match best.iter_mut().find(|(o, _)| *o == owner) {
+            Some((_, was)) => *was = (*was).max(rank),
+            None => best.push((owner, rank)),
+        }
+    }
+    best.into_iter()
+        .filter(|&(owner, rank)| {
+            !owner.is_empty() && !accounts.contains_key(owner) && rank < rank_of(Some("WRITE"))
+        })
+        .map(|(owner, _)| owner.to_owned())
+        .collect()
+}
+
+/// One login's answer about an owner's PRs, for [`best_login`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub login: String,
+    /// How many of the PRs it saw.
+    pub seen: usize,
+    /// The most rights it had on them ([`rank_of`]).
+    pub rank: usize,
+}
+
+/// The login an owner is kept as, of those asked about its `total` PRs, the one that asked
+/// first, first (`bestLogin`): one that saw every one of them, with more rights than any
+/// before it; else the first.
+#[must_use]
+pub fn best_login(answers: &[Answer], total: usize) -> String {
+    let Some((first, rest)) = answers.split_first() else {
+        return String::new();
+    };
+    rest.iter()
+        .fold(first, |best, a| {
+            if a.seen == total && a.rank > best.rank {
+                a
+            } else {
+                best
+            }
+        })
+        .login
+        .clone()
 }
 
 /// What the card says where gh won't give a login's token (`tokenError`), or, with no login
@@ -230,6 +302,77 @@ mod tests {
         // gh's logins unknown: the remembered one stands.
         assert_eq!(login_for(&accounts, "acme", &Logins::default()), "hubot");
         assert_eq!(login_for(&BTreeMap::new(), "acme", &Logins::default()), "");
+    }
+
+    #[test]
+    fn an_owner_of_a_logins_name_goes_as_that_login_before_the_active_one() {
+        let known = logins("octocat", &["hubot"]);
+        assert_eq!(login_for(&BTreeMap::new(), "Hubot", &known), "hubot");
+        // A login remembered for it still stands.
+        let accounts: BTreeMap<String, String> = [("hubot".into(), "octocat".into())].into();
+        assert_eq!(login_for(&accounts, "hubot", &known), "octocat");
+    }
+
+    #[test]
+    fn an_owner_seen_only_to_read_with_nobody_remembered_is_asked_as_the_others() {
+        let seen = [
+            ("acme", Some("READ")),
+            ("globex", Some("READ")),
+            ("globex", Some("WRITE")),
+            ("initech", None),
+            ("umbrella", Some("READ")),
+        ];
+        let accounts: BTreeMap<String, String> = [("umbrella".into(), "hubot".into())].into();
+        let known = logins("octocat", &["hubot"]);
+        assert_eq!(
+            owners_below_write(seen, &accounts, &known),
+            ["acme", "initech"]
+        );
+        assert_eq!(
+            owners_below_write(seen, &BTreeMap::new(), &logins("octocat", &[])),
+            Vec::<String>::new()
+        );
+        assert!(rank_of(Some("ADMIN")) > rank_of(Some("WRITE")));
+        assert_eq!(rank_of(None), 0);
+        assert_eq!(rank_of(Some("OWNER")), 0);
+    }
+
+    #[test]
+    fn an_owner_is_kept_as_a_login_that_sees_all_with_more_rights_else_the_first() {
+        let answer = |login: &str, seen, permission| Answer {
+            login: login.into(),
+            seen,
+            rank: rank_of(Some(permission)),
+        };
+        let asked = answer("octocat", 2, "READ");
+        let best = |other| best_login(&[asked.clone(), other], 2);
+        assert_eq!(best(answer("hubot", 2, "ADMIN")), "hubot");
+        // Seeing fewer of them, more rights are no reason to move.
+        assert_eq!(best(answer("hubot", 1, "ADMIN")), "octocat");
+        assert_eq!(best(answer("hubot", 2, "READ")), "octocat");
+        assert_eq!(best_login(&[], 0), "");
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_kept_login_is_the_first_or_one_that_sees_all_with_more(
+            answers in proptest::collection::vec(("[a-c]", 0_usize..4, 0_usize..6), 1..5),
+            total in 0_usize..4,
+        ) {
+            let answers: Vec<Answer> = answers
+                .into_iter()
+                .map(|(login, seen, rank)| Answer { login, seen, rank })
+                .collect();
+            let best = best_login(&answers, total);
+            let first = &answers[0];
+            proptest::prop_assert!(answers.iter().any(|a| a.login == best));
+            if best != first.login {
+                let moved = answers
+                    .iter()
+                    .any(|a| a.login == best && a.seen == total && a.rank > first.rank);
+                proptest::prop_assert!(moved);
+            }
+        }
     }
 
     #[test]

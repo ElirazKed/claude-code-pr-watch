@@ -24,14 +24,39 @@ export function everyLogin(logins: Logins): string[] {
   return [...new Set([logins.active, ...logins.others])].filter(login => login !== '')
 }
 
-// The login an owner's PRs are polled as: the one found to see them, while it is still logged
-// in (or nothing says it isn't), else the active one.
+// The login an owner's PRs are polled as: the one remembered for it, while it is still logged
+// in (or nothing says it isn't), else the login of the owner's own name, else the active one.
 export function loginFor(accounts: Readonly<Record<string, string>>, owner: string, logins: Logins): string {
   const mapped = accounts[owner]
   const all = everyLogin(logins)
   if (mapped !== undefined && (all.length === 0 || all.includes(mapped))) return mapped
 
-  return logins.active
+  return all.find(login => login.toLowerCase() === owner.toLowerCase()) ?? logins.active
+}
+
+// GitHub's viewerPermission as a rank, more rights higher: 0 for none or one unknown.
+const PERMISSIONS = ['READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']
+export const rankOf = (permission: string | null | undefined): number => PERMISSIONS.indexOf(permission ?? '') + 1
+const WRITE = rankOf('WRITE')
+
+// The owners worth asking as each other login: no login remembered for them, and their PRs
+// seen with less than write (anyone sees a public repo, the other account's too, but only to
+// read). With one login there is nobody else to ask.
+export function ownersBelowWrite(seen: readonly { owner: string; permission: string | null | undefined }[], accounts: Readonly<Record<string, string>>, logins: Logins): string[] {
+  if (everyLogin(logins).length < 2) return []
+  const best = new Map<string, number>()
+  for (const { owner, permission } of seen) best.set(owner, Math.max(best.get(owner) ?? 0, rankOf(permission)))
+
+  return [...best].filter(([owner, rank]) => owner !== '' && accounts[owner] === undefined && rank < WRITE).map(([owner]) => owner)
+}
+
+// The login an owner is kept as, of those asked about its PRs (the one that asked first, first):
+// one that saw every one of them, with more rights than any before it; else the first.
+export function bestLogin(answers: readonly { login: string; seen: number; rank: number }[], total: number): string {
+  const first = answers[0]
+  if (first === undefined) return ''
+
+  return answers.slice(1).reduce((best, a) => (a.seen === total && a.rank > best.rank ? a : best), first).login
 }
 
 // A login's token as gh gave it, or what the card says where it wouldn't.

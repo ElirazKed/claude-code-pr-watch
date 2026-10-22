@@ -8,7 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use prw_core::accounts::{
-    Asked, Logins, every_login, is_due, login_for, logins_of, not_found_as, token_error, untried_by,
+    Answer, Asked, Logins, best_login, every_login, is_due, login_for, logins_of, not_found_as,
+    owners_below_write, rank_of, token_error, untried_by,
 };
 use prw_core::batch::{
     BATCH_SIZE, CallFailure, CallLog, Http, LOG_LINES, PrRef, append_log, build_query, call_budget,
@@ -329,10 +330,80 @@ impl<G: Gh, C: Clock> Ctx<'_, G, C> {
             misses.asked(login, &r.missing);
             misses.refs.extend(r.missing);
         }
+        // The PRs with no data first: an owner one of them is found for is remembered, and
+        // isn't asked again for rights.
         if !misses.refs.is_empty() && out.wait_ms.is_none() {
             self.ask_others(misses, &known, accounts, &mut out, low_at, until);
         }
+        if out.wait_ms.is_none() {
+            self.ask_for_rights(refs, &known, accounts, &mut out, low_at, until);
+        }
         out
+    }
+
+    /// An owner nobody is remembered for, whose PRs came back with less than write (a public
+    /// repo of the other account reads as anyone's): its PRs asked once as each other login,
+    /// and the owner kept as one that sees them all with more rights, so a merge goes as the
+    /// right one. Asked as every other login and none does more, the first stands, and isn't
+    /// asked again.
+    fn ask_for_rights(
+        &mut self,
+        refs: &[PrRef],
+        known: &Logins,
+        accounts: &mut BTreeMap<String, String>,
+        out: &mut Fetched,
+        low_at: Option<i64>,
+        until: i64,
+    ) {
+        let found = &out.found;
+        let seen = refs.iter().filter_map(|r| {
+            let pr = found.get(&r.url)?;
+            Some((r.owner(), permission_of(pr)))
+        });
+        for owner in owners_below_write(seen, accounts, known) {
+            let asked = login_for(accounts, &owner, known);
+            let theirs: Vec<PrRef> = refs
+                .iter()
+                .filter(|r| r.owner() == owner && out.found.contains_key(&r.url))
+                .cloned()
+                .collect();
+            let mut answers = vec![Answer {
+                login: asked.clone(),
+                seen: theirs.len(),
+                rank: max_rank(theirs.iter().filter_map(|r| out.found.get(&r.url))),
+            }];
+            let mut got: HashMap<String, BTreeMap<String, Map<String, Value>>> = HashMap::new();
+            let mut is_sure = true;
+            for login in every_login(known).into_iter().filter(|l| *l != asked) {
+                if low_at.is_some_and(|at| low_until(&out.rates, &login, at).is_some()) {
+                    is_sure = false;
+                    continue;
+                }
+                let r = self.query(&theirs, &login, until);
+                out.wait_ms = r.wait_ms;
+                out.saw(&login, &r);
+                if !r.failed.is_empty() || !r.left.is_empty() {
+                    is_sure = false;
+                }
+                answers.push(Answer {
+                    login: login.clone(),
+                    seen: r.found.len(),
+                    rank: max_rank(r.found.values()),
+                });
+                got.insert(login, r.found);
+                if out.wait_ms.is_some() {
+                    break;
+                }
+            }
+            let best = best_login(&answers, theirs.len());
+            if best != asked || (is_sure && out.wait_ms.is_none()) {
+                accounts.insert(owner.clone(), best.clone());
+            }
+            out.found.extend(got.remove(&best).unwrap_or_default());
+            if out.wait_ms.is_some() {
+                break;
+            }
+        }
     }
 
     /// The PRs their expected login couldn't see, asked as each other login. "Not found"
@@ -457,6 +528,16 @@ fn by_login(
     groups
 }
 
+/// A fetched PR's `repository.viewerPermission`.
+fn permission_of(pr: &Map<String, Value>) -> Option<&str> {
+    pr.get("repository")?.get("viewerPermission")?.as_str()
+}
+
+/// The most rights any of `prs` was seen with ([`rank_of`]), 0 for none.
+fn max_rank<'a>(prs: impl Iterator<Item = &'a Map<String, Value>>) -> usize {
+    prs.map(|pr| rank_of(permission_of(pr))).max().unwrap_or(0)
+}
+
 /// PRs no login has found yet, and the logins each was asked as.
 #[derive(Default)]
 struct Misses {
@@ -559,8 +640,17 @@ mod tests {
         gh
     }
 
-    /// `gh api graphql -i`'s reply: each asked PR in `seen` found, the rest null.
+    /// `gh api graphql -i`'s reply: each asked PR in `seen` found, the rest null, with
+    /// write on its repo.
     fn reply(seen: &'static [&'static str]) -> impl Fn(&Call) -> Result<crate::gh::Ran, RunError> {
+        reply_with(seen, "WRITE")
+    }
+
+    /// [`reply`], with `permission` on each found PR's repo.
+    fn reply_with(
+        seen: &'static [&'static str],
+        permission: &'static str,
+    ) -> impl Fn(&Call) -> Result<crate::gh::Ran, RunError> {
         move |call| {
             let query = &call.argv[3];
             let mut data = Map::new();
@@ -578,7 +668,10 @@ mod tests {
                     .unwrap_or(0);
                 let url = format!("https://github.com/{owner}/app/pull/{number}");
                 let value = if seen.contains(&url.as_str()) {
-                    json!({"pullRequest": {"number": number, "state": "OPEN", "commits": {"nodes": []}}})
+                    json!({
+                        "pullRequest": {"number": number, "state": "OPEN", "commits": {"nodes": []}},
+                        "viewerPermission": permission,
+                    })
                 } else {
                     Value::Null
                 };
@@ -667,6 +760,95 @@ mod tests {
         );
         assert!(out.found.contains_key(&a.url));
         assert_eq!(accounts.get("acme").map(String::as_str), Some("hubot"));
+    }
+
+    /// Every `gh api` call's login, in order.
+    fn api_logins(gh: &FakeGh) -> Vec<String> {
+        gh.calls
+            .borrow()
+            .iter()
+            .filter(|c| c.argv[0] == "api")
+            .filter_map(|c| c.token.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_owner_seen_only_to_read_is_asked_as_the_other_and_kept_as_the_one_that_writes() {
+        const SEEN: &[&str] = &["https://github.com/acme/app/pull/1"];
+        let gh = gh();
+        gh.on(as_login("octocat"), reply_with(SEEN, "READ"));
+        gh.on(as_login("hubot"), reply_with(SEEN, "ADMIN"));
+        let clock = FakeClock::new(T, 10);
+        let mut auth = Auth::default();
+        let mut accounts = BTreeMap::new();
+        let a = pr("acme", 1);
+        let mut fetch = |accounts: &mut BTreeMap<String, String>| {
+            ctx(&gh, &clock, &mut auth).fetch_refs(
+                std::slice::from_ref(&a),
+                accounts,
+                Rates::new(),
+                T,
+                T + 29_000,
+                true,
+            )
+        };
+        let out = fetch(&mut accounts);
+        // The PR as the login that can merge it, and that login from now on.
+        assert_eq!(
+            permission_of(&out.found[&a.url]),
+            Some("ADMIN"),
+            "{:?}",
+            out.found
+        );
+        assert_eq!(accounts.get("acme").map(String::as_str), Some("hubot"));
+        let out = fetch(&mut accounts);
+        assert!(out.found.contains_key(&a.url));
+        assert_eq!(api_logins(&gh), ["octocat", "hubot", "hubot"]);
+    }
+
+    #[test]
+    fn read_as_every_login_the_first_stands_and_is_not_asked_again() {
+        const SEEN: &[&str] = &["https://github.com/acme/app/pull/1"];
+        let gh = gh();
+        gh.on(as_login("octocat"), reply_with(SEEN, "READ"));
+        gh.on(as_login("hubot"), reply_with(SEEN, "READ"));
+        let clock = FakeClock::new(T, 10);
+        let mut auth = Auth::default();
+        let mut accounts = BTreeMap::new();
+        let a = pr("acme", 1);
+        for _ in 0..2 {
+            ctx(&gh, &clock, &mut auth).fetch_refs(
+                std::slice::from_ref(&a),
+                &mut accounts,
+                Rates::new(),
+                T,
+                T + 29_000,
+                true,
+            );
+        }
+        assert_eq!(accounts.get("acme").map(String::as_str), Some("octocat"));
+        assert_eq!(api_logins(&gh), ["octocat", "hubot", "octocat"]);
+    }
+
+    #[test]
+    fn an_owner_of_a_logins_name_goes_as_that_login() {
+        let gh = gh();
+        gh.on(
+            as_login("hubot"),
+            reply_with(&["https://github.com/hubot/app/pull/1"], "ADMIN"),
+        );
+        let clock = FakeClock::new(T, 10);
+        let mut auth = Auth::default();
+        let out = ctx(&gh, &clock, &mut auth).fetch_refs(
+            &[pr("hubot", 1)],
+            &mut BTreeMap::new(),
+            Rates::new(),
+            T,
+            T + 29_000,
+            true,
+        );
+        assert_eq!(out.needed, ["hubot"]);
+        assert_eq!(api_logins(&gh), ["hubot"]);
     }
 
     #[test]

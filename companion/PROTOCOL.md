@@ -76,7 +76,7 @@ type Shared = {                       // register.tsx
   fetchedAt: number                   // when the last round ran
   nextAt: number                      // when the next round is due
   prs: Record<string, Entry>          // by PR URL
-  accounts: Record<string, string>    // repo owner → the gh login that sees its repos (a login, never a token)
+  accounts: Record<string, string>    // repo owner → the gh login its repos are asked as: one that sees them, with the most rights found (a login, never a token)
   rate: RateLimit | null              // legacy: what versions before per-login rates read (legacyRate)
   rates: Record<string, LoginRates>   // by gh login (rate.ts)
   latest: { version: string | null; checkedAt: number }  // pr-watch's newest version, when last asked

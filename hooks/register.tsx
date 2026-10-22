@@ -44,7 +44,7 @@ import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versi
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
 import { failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
-import { NO_LOGINS, everyLogin, isDue, loginFor, loginsOf, notFoundAs, tokenError, untriedBy } from './accounts'
+import { NO_LOGINS, bestLogin, everyLogin, isDue, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
 import type { Logins, Token } from './accounts'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
@@ -617,6 +617,43 @@ async function fetchRefs(
     // Held by a secondary limit, the rest were not all asked: they wait, as they were.
     // With gh's logins unread, the others were never asked: no PR is called not found.
     if (waitMs === null && isSure && order.length > 0) for (const ref of missing) errors.set(ref.url, { error: notFoundAs(missedBy.get(ref.url) ?? []), isMiss: true })
+  }
+
+  // An owner nobody is remembered for, whose PRs came back with less than write (a public repo
+  // of the other account reads as anyone's): its PRs asked once as each other login, and the
+  // owner kept as one that sees them all with more rights, so a merge goes as the right one.
+  // After the PRs with no data: an owner one of them was found for is remembered, so not asked.
+  const sightings = refs.flatMap(ref => {
+    const pr = found.get(ref.url)
+
+    return pr === undefined ? [] : [{ owner: ownerOf(ref), permission: pr.repository?.viewerPermission }]
+  })
+  for (const owner of waitMs === null ? ownersBelowWrite(sightings, accounts, known) : []) {
+    const asked = loginFor(accounts, owner, known)
+    const theirs = refs.filter(ref => ownerOf(ref) === owner && found.has(ref.url))
+    const rank = (prs: Iterable<GhPr>) => Math.max(0, ...[...prs].map(pr => rankOf(pr.repository?.viewerPermission)))
+    const answers = [{ login: asked, seen: theirs.length, rank: rank(theirs.flatMap(ref => found.get(ref.url) ?? [])) }]
+    const got = new Map<string, Map<string, GhPr>>()
+    let isSure = true
+    for (const login of everyLogin(known).filter(login => login !== asked)) {
+      if (isLow(login)) {
+        isSure = false
+
+        continue
+      }
+      const r = await query($, theirs, login, until)
+      waitMs = r.waitMs
+      saw(login, r)
+      if (r.failed.size > 0 || r.left.length > 0) isSure = false
+      got.set(login, r.found)
+      answers.push({ login, seen: r.found.size, rank: rank(r.found.values()) })
+      if (waitMs !== null) break
+    }
+    const best = bestLogin(answers, theirs.length)
+    // Asked as every other login and none does more: the first stands, and isn't asked again.
+    if (best !== asked || (isSure && waitMs === null)) accounts[owner] = best
+    got.get(best)?.forEach((pr, url) => found.set(url, pr))
+    if (waitMs !== null) break
   }
 
   return { found, errors, rates: seen, needed, latest, waitMs, asked: withLatest && !isAsking }
