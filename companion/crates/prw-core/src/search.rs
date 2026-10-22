@@ -91,15 +91,23 @@ pub struct Found {
 pub fn parse_searches(stdout: &str, stderr: &str, aliases: &[&str]) -> Result<Found, String> {
     let reply: Value = serde_json::from_str(stdout)
         .map_err(|_| or(first_line(stderr), "gh api graphql failed"))?;
-    let said = |alias: Option<&str>| {
-        reply
-            .get("errors")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|e| alias.is_none_or(|a| e.pointer("/path/0").and_then(Value::as_str) == Some(a)))
-            .and_then(|e| e.get("message")?.as_str())
-            .map(str::to_owned)
+    let errors: &[Value] = reply
+        .get("errors")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    let message = |e: &Value| e.get("message")?.as_str().map(str::to_owned);
+    // A search's own error, else one of the whole call's (no `path`); `None`: any.
+    let said = |alias: Option<&str>| match alias {
+        None => errors.iter().find_map(message),
+        Some(a) => errors
+            .iter()
+            .filter(|e| e.pointer("/path/0").and_then(Value::as_str) == Some(a))
+            .chain(
+                errors
+                    .iter()
+                    .filter(|e| e.get("path").is_none_or(Value::is_null)),
+            )
+            .find_map(message),
     };
     let Some(data) = reply.get("data").filter(|d| d.is_object()) else {
         return Err(said(None).unwrap_or_else(|| or(first_line(stderr), "GitHub returned no data")));
@@ -229,6 +237,13 @@ mod tests {
         assert_eq!(found.hits[MINE], Ok(Hits::default()));
         assert_eq!(found.hits["s0"], Err("Invalid search query".into()));
         assert_eq!(found.hits["s1"], Err("GitHub returned no data".into()));
+        // An error of the whole call is a missing search's too.
+        let timed_out = json!({
+            "data": {"mine": {"issueCount": 0, "nodes": []}},
+            "errors": [{"path": ["mine"], "message": "other"}, {"message": "Timeout"}]
+        });
+        let found = parse_searches(&timed_out.to_string(), "", &[MINE, "s0"]).unwrap();
+        assert_eq!(found.hits["s0"], Err("Timeout".into()));
     }
 
     #[test]

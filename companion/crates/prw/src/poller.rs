@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::SystemTime;
 
 use prw_core::accounts::every_login;
 use prw_core::batch::PrRef;
@@ -235,8 +234,10 @@ impl Files {
 pub struct ConfigFile {
     /// `None`: no file, and no saved searches (the tests'; and with no home to look in).
     path: Option<PathBuf>,
-    /// The file's mtime when last read (`None`: there was none), and what it said.
-    read: Option<(Option<SystemTime>, Config)>,
+    /// The file's text when last read (`None`: there was none), and what it said. The text,
+    /// not the mtime, says whether it changed: a home-manager `config.toml` is a symlink into
+    /// the nix store, whose files all have one mtime, so a switch keeps the mtime it had.
+    read: Option<(Option<String>, Config)>,
 }
 
 impl ConfigFile {
@@ -247,33 +248,32 @@ impl ConfigFile {
         }
     }
 
-    /// The settings as the file is now, and whether they changed since the last look. No
-    /// file: [`Config::default`]'s search; one that won't read says why.
-    fn load(&mut self) -> (Config, bool) {
-        let Some(path) = &self.path else {
-            let none = Config {
-                searches: Vec::new(),
-                problems: Vec::new(),
-            };
-            return (none, false);
-        };
-        let mtime = fs::metadata(path).ok().and_then(|m| m.modified().ok());
-        if let Some((was, config)) = &self.read
-            && *was == mtime
-        {
-            return (config.clone(), false);
-        }
-        let config = match fs::read_to_string(path) {
-            Ok(text) => parse_config(&text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::default(),
-            Err(error) => Config {
-                searches: Vec::new(),
-                problems: vec![format!("config.toml: {error}")],
-            },
+    /// The settings, where the file says something new since the last look. No file:
+    /// [`Config::default`]'s search; one that won't read says why.
+    fn load(&mut self) -> Option<Config> {
+        let path = self.path.as_ref()?;
+        let (text, config) = match fs::read_to_string(path) {
+            Ok(text) => {
+                if let Some((Some(was), _)) = &self.read
+                    && *was == text
+                {
+                    return None;
+                }
+                let config = parse_config(&text);
+                (Some(text), config)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, Config::default()),
+            Err(error) => (
+                None,
+                Config {
+                    searches: Vec::new(),
+                    problems: vec![format!("config.toml: {error}")],
+                },
+            ),
         };
         let changed = self.read.as_ref().is_none_or(|(_, was)| *was != config);
-        self.read = Some((mtime, config.clone()));
-        (config, changed)
+        self.read = Some((text, config.clone()));
+        changed.then_some(config)
     }
 }
 
@@ -370,13 +370,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
 
     /// The PRs `prw` announces: every login's, each once, in login order.
     fn own_urls(&self) -> Vec<String> {
-        let mut seen = HashSet::new();
-        self.mine
-            .values()
-            .flatten()
-            .filter(|url| seen.insert(url.as_str()))
-            .cloned()
-            .collect()
+        unique_urls(self.mine.values().flatten())
     }
 
     /// One tick (`tick`): search when due, say what `prw` watches, then take the round where
@@ -386,8 +380,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let shared = self.files.read_raw().map(shared_of);
         let held = shared.as_ref().and_then(|s| s.held_until).unwrap_or(0);
         // A changed config.toml is searched at once.
-        let (config, changed) = self.config.load();
-        if changed {
+        if let Some(config) = self.config.load() {
             self.searches = config.searches;
             self.problems = config.problems;
             self.searched_at = None;
@@ -425,15 +418,11 @@ impl<G: Gh, C: Clock> Poller<G, C> {
                 self.files.write_lease(&release(self.files.own()));
             }
         }
-        self.said()
-    }
-
-    fn said(&self) -> PollerSaid {
         PollerSaid {
             own: self.files.own().to_owned(),
             polled_at: self.polled_at,
             error: self.search_error.clone(),
-            searches: self.listed(),
+            searches: listed,
             problems: self.problems.clone(),
         }
     }
@@ -466,7 +455,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
                     self.searches[i]
                         .login
                         .as_ref()
-                        .is_none_or(|only| only == login)
+                        .is_none_or(|only| only.eq_ignore_ascii_case(login))
                 })
                 .collect();
             let token = match self.ctx().token(login, GH_MS) {
@@ -486,27 +475,26 @@ impl<G: Gh, C: Clock> Poller<G, C> {
                     first: SEARCH_CAP,
                 }))
                 .collect();
-            let aliases: Vec<&str> = asks.iter().map(|a| a.alias.as_str()).collect();
-            let args = vec![
-                "api".to_owned(),
-                "graphql".to_owned(),
-                "-f".to_owned(),
-                format!("query={}", searches_query(&asks)),
-            ];
-            let said = match self.gh.run(&args, Some(&token), ms(GH_MS)) {
-                Ok(ran) => parse_searches(&ran.stdout, &ran.stderr, &aliases),
-                Err(RunError::Timeout) => Err("gh api graphql did not finish".to_owned()),
-                Err(RunError::Spawn(why)) => Err(format!("gh didn't start: {why}")),
-            };
-            let mut found = match said {
+            let mut found = match self.ask(&asks, &token) {
                 Ok(found) => found,
                 Err(error) => {
                     let error = format!("{login}: {error}");
                     for &i in &asked {
                         failed[i].get_or_insert_with(|| error.clone());
                     }
-                    errors.push(error);
-                    continue;
+                    // A saved search may be what failed the call (one too slow, say): My
+                    // PRs alone, so it doesn't go down with it.
+                    if asked.is_empty() {
+                        errors.push(error);
+                        continue;
+                    }
+                    match self.ask(&[mine(login)], &token) {
+                        Ok(found) => found,
+                        Err(error) => {
+                            errors.push(format!("{login}: {error}"));
+                            continue;
+                        }
+                    }
                 }
             };
             match found.hits.remove(MINE_ALIAS) {
@@ -534,14 +522,32 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         for (i, search) in self.searches.iter().enumerate() {
             let saved = self.saved.entry(key(search)).or_default();
             saved.error = match &search.login {
-                Some(only) if !logins.contains(only) => {
+                Some(only) if !logins.iter().any(|l| l.eq_ignore_ascii_case(only)) => {
                     Some(format!("no gh login {only} is signed in"))
                 }
+                // No login to search as: what the status line says, said here too.
+                _ if logins.is_empty() => errors.first().cloned(),
                 _ if is_found[i] => None,
                 _ => failed[i].take().or_else(|| saved.error.take()),
             };
         }
         self.search_error = errors.into_iter().next();
+    }
+
+    /// One call of searches, as the login whose `token` this is.
+    fn ask(&self, asks: &[Ask], token: &str) -> Result<prw_core::search::Found, String> {
+        let aliases: Vec<&str> = asks.iter().map(|a| a.alias.as_str()).collect();
+        let args = vec![
+            "api".to_owned(),
+            "graphql".to_owned(),
+            "-f".to_owned(),
+            format!("query={}", searches_query(asks)),
+        ];
+        match self.gh.run(&args, Some(token), ms(GH_MS)) {
+            Ok(ran) => parse_searches(&ran.stdout, &ran.stderr, &aliases),
+            Err(RunError::Timeout) => Err("gh api graphql did not finish".to_owned()),
+            Err(RunError::Spawn(why)) => Err(format!("gh didn't start: {why}")),
+        }
     }
 
     /// The lease, as the protocol takes it (`takeLease`): claim, wait 150 ms, read again.
@@ -1017,6 +1023,64 @@ login = "hubot"
         assert_eq!(said.searches, []);
         assert_eq!(said.problems.len(), 1);
         assert!(!dir.0.join("sessions/prw-test-searches.json").exists());
+    }
+
+    #[test]
+    fn a_config_changed_under_one_mtime_is_read_again() {
+        // A nix store file keeps its mtime across a home-manager switch.
+        let dir = Dir::new("config-mtime");
+        let path = dir.0.join("config.toml");
+        let mut config = config_in(&dir.0, "[[search]]\nname = \"A\"\nquery = \"is:open\"\n");
+        let names = |c: Option<Config>| -> Vec<String> {
+            c.map(|c| c.searches.into_iter().map(|s| s.name).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(names(config.load()), ["A"]);
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "[[search]]\nname = \"B\"\nquery = \"is:open\"\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(names(config.load()), ["B"]);
+        assert_eq!(config.load(), None);
+    }
+
+    #[test]
+    fn a_searchs_login_is_matched_in_any_case() {
+        let dir = Dir::new("login-case");
+        let config = config_in(
+            &dir.0,
+            "[[search]]\nname = \"A\"\nquery = \"is:open\"\nlogin = \"OctoCat\"\n",
+        );
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1)).with_config(config);
+        let said = poller.tick();
+        assert_eq!(said.searches[0].error, None);
+        assert_eq!(said.searches[0].urls, [team_url(0)]);
+    }
+
+    #[test]
+    fn a_saved_search_that_fails_the_call_leaves_my_prs_standing() {
+        let dir = Dir::new("search-timeout");
+        let config = config_in(&dir.0, "[[search]]\nname = \"A\"\nquery = \"is:open\"\n");
+        let gh = gh();
+        gh.once(is("s0: search("), |_| Err(RunError::Timeout));
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh, FakeClock::new(now(), 1)).with_config(config);
+        let said = poller.tick();
+        assert_eq!(said.error, None);
+        assert_eq!(
+            said.searches[0].error.as_deref(),
+            Some("octocat: gh api graphql did not finish")
+        );
+        assert_eq!(
+            json_at(dir.0.join("sessions/prw-test.json"))["urls"],
+            json!([MINE_URL])
+        );
+        assert_eq!(search_calls(&poller), 2);
     }
 
     fn search_calls(poller: &Poller<FakeGh, FakeClock>) -> usize {
