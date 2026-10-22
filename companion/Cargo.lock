@@ -1055,6 +1055,7 @@ name = "prw-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "regex",
  "serde",
  "serde_json",
 ]

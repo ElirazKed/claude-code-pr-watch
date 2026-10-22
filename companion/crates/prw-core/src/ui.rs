@@ -21,12 +21,12 @@ use crate::status::{PillKind, derive};
 pub const ALIVE_MS: i64 = 60_000;
 
 /// A mod is live but no round has run for this long past `nextAt`: the results are stale.
-/// Two idle intervals, the companion's own constant (the give-way rule's 120 000 ms).
-pub const STALE_MS: i64 = 120_000;
+/// The give-way rule's threshold: past it, `prw` takes the turn ([`FREE_MS`](crate::poll::FREE_MS)).
+pub const STALE_MS: i64 = crate::poll::FREE_MS;
 
 /// What a card says of an entry no gh account could see, where it has no error of its own
 /// (the mod's `NOT_FOUND`, `hooks/cache.ts`).
-pub const NOT_FOUND: &str = "Not found, or no gh account can see it";
+pub use crate::entries::NOT_FOUND;
 
 /// What the "Claude session" list is called: the live session files an older mod wrote,
 /// with no name (and no writer) to tell them apart.
