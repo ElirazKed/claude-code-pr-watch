@@ -44,7 +44,7 @@ import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versi
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
 import { failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
-import { NO_LOGINS, bestLogin, everyLogin, isDue, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
+import { NO_LOGINS, bestLogin, everyLogin, isDue, learned, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
 import type { Logins, Token } from './accounts'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
@@ -692,6 +692,7 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, l
   // Held by a secondary limit: no round, no Refresh, no new watch asks until the wait is over.
   if ((before.heldUntil ?? 0) > at) return before
   const until = at + LEASE_MS - 1_000
+  const accountsWere = { ...before.accounts }
   // A round asks for the newest version too, once the last check is CHECK_MS old.
   const withLatest = isRound && isNoticeOn && at - (before.latest?.checkedAt ?? 0) >= CHECK_MS
   const { found, errors, rates, needed, latest, waitMs, asked } = await fetchRefs($, refs, before.accounts, before.rates, at, until, isRound, withLatest)
@@ -699,7 +700,7 @@ async function publish($: EngineInterface, refs: readonly PrRef[], at: number, l
   const seen = isRound && waitMs === null ? await askRest($, rates, at, until) : rates
   // Re-read: another session may have written while this one was asking GitHub.
   const shared = await readShared($)
-  shared.accounts = { ...shared.accounts, ...before.accounts }
+  shared.accounts = { ...shared.accounts, ...learned(accountsWere, before.accounts) }
   found.forEach((pr, url) => (shared.prs[url] = { at, pr }))
   // A PR with data keeps it through a failure, and its card says so only once it lasts.
   errors.forEach(({ error, isMiss }, url) => (shared.prs[url] = failedEntry(shared.prs[url], error, at, isMiss)))

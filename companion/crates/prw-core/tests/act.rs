@@ -473,3 +473,66 @@ proptest! {
         }
     }
 }
+
+/// The model, told by its poller that gh has these logins.
+fn with_logins(model: Model, active: &str, others: &[&str]) -> Model {
+    let said = prw_core::ui::PollerSaid {
+        logins: prw_core::accounts::Logins {
+            active: active.to_owned(),
+            others: others.iter().map(|&o| o.to_owned()).collect(),
+        },
+        ..prw_core::ui::PollerSaid::default()
+    };
+    update(model, Msg::Poller(said)).0
+}
+
+#[test]
+fn a_moves_the_owner_to_the_next_login_and_says_so() {
+    let model = with_logins(model_of(pr(json!({}))), "bob", &["ada"]);
+    let row = model.selected_row().expect("a row").clone();
+    assert_eq!(model.login_of(&row).as_deref(), Some("ada"));
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.key == "a" && o.words == "As ada → switch to bob")
+    );
+    let (model, cmds) = feed(model, keys("a"));
+    assert_eq!(
+        cmds,
+        [Cmd::Run(Job::Switch {
+            url: URL.to_owned(),
+            number: 88,
+            owner: "acme".to_owned(),
+            login: "bob".to_owned(),
+        })]
+    );
+    assert_eq!(
+        model.offers().iter().find(|o| o.key == "a").map(|o| o.look),
+        Some(Look::Busy)
+    );
+    let done = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::Switched {
+            owner: "acme".to_owned(),
+            login: "bob".to_owned(),
+        },
+    };
+    let (model, _) = feed(model, [Msg::Done(done)]);
+    assert_eq!(toast(&model), ("✓ acme's PRs go as bob", Tone::Good));
+}
+
+#[test]
+fn with_one_login_there_is_nothing_to_switch_to_and_nothing_said_of_it() {
+    let model = with_logins(model_of(pr(json!({}))), "ada", &[]);
+    let row = model.selected_row().expect("a row").clone();
+    assert_eq!(model.login_of(&row), None);
+    assert!(!model.offers().iter().any(|o| o.key == "a"));
+    let (model, cmds) = feed(model, keys("a"));
+    assert_eq!(cmds, []);
+    assert_eq!(
+        toast(&model),
+        ("One gh login: nothing to switch to", Tone::Info)
+    );
+}

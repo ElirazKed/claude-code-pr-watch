@@ -78,6 +78,32 @@ pub fn login_for(accounts: &BTreeMap<String, String>, owner: &str, logins: &Logi
     }
 }
 
+/// The login after `current` in [`every_login`]'s order, round to the first: what a switch
+/// moves an owner to. `None` with fewer than two logins.
+#[must_use]
+pub fn next_login(logins: &Logins, current: &str) -> Option<String> {
+    let all = every_login(logins);
+    if all.len() < 2 {
+        return None;
+    }
+    let at = all.iter().position(|l| l == current);
+    Some(all[at.map_or(0, |i| (i + 1) % all.len())].clone())
+}
+
+/// What a fetch learned about `accounts`: the owners whose login it set or changed, so a
+/// writer merges those alone and a login set meanwhile (a switch) isn't put back.
+#[must_use]
+pub fn learned(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    after
+        .iter()
+        .filter(|&(owner, login)| before.get(owner) != Some(login))
+        .map(|(o, l)| (o.clone(), l.clone()))
+        .collect()
+}
+
 /// GitHub's `viewerPermission` as a rank, more rights higher (`rankOf`): 0 for none or one
 /// unknown.
 #[must_use]
@@ -353,7 +379,57 @@ mod tests {
         assert_eq!(best_login(&[], 0), "");
     }
 
+    #[test]
+    fn a_switch_moves_to_the_next_login_round_to_the_first() {
+        let known = logins("octocat", &["hubot", "monalisa"]);
+        assert_eq!(next_login(&known, "octocat").as_deref(), Some("hubot"));
+        assert_eq!(next_login(&known, "monalisa").as_deref(), Some("octocat"));
+        // A login no longer there: the first.
+        assert_eq!(next_login(&known, "gone").as_deref(), Some("octocat"));
+        assert_eq!(next_login(&logins("octocat", &[]), "octocat"), None);
+    }
+
+    #[test]
+    fn a_fetch_hands_on_only_what_it_learned() {
+        let before: BTreeMap<String, String> = [
+            ("acme".into(), "hubot".into()),
+            ("globex".into(), "octocat".into()),
+        ]
+        .into();
+        let mut after = before.clone();
+        after.insert("globex".into(), "hubot".into());
+        after.insert("initech".into(), "octocat".into());
+        assert_eq!(
+            learned(&before, &after),
+            [
+                ("globex".into(), "hubot".into()),
+                ("initech".into(), "octocat".into())
+            ]
+            .into()
+        );
+        assert_eq!(learned(&before, &before), BTreeMap::new());
+    }
+
     proptest::proptest! {
+        #[test]
+        fn switching_as_often_as_there_are_logins_comes_back(
+            others in proptest::collection::vec("[a-e]", 1..4),
+        ) {
+            let known = logins("z", &others.iter().map(String::as_str).collect::<Vec<_>>());
+            let all = every_login(&known);
+            let mut at = all[0].clone();
+            let mut seen = vec![at.clone()];
+            for _ in 1..all.len() {
+                at = next_login(&known, &at).unwrap();
+                seen.push(at.clone());
+            }
+            proptest::prop_assert_eq!(next_login(&known, &at), Some(all[0].clone()));
+            seen.sort();
+            let mut every = all.clone();
+            every.sort();
+            proptest::prop_assert_eq!(seen, every);
+        }
+
         #[test]
         fn the_kept_login_is_the_first_or_one_that_sees_all_with_more(
             answers in proptest::collection::vec(("[a-c]", 0_usize..4, 0_usize..6), 1..5),

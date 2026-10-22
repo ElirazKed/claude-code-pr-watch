@@ -24,6 +24,11 @@ On the selected PR, `m` merges, `c` comments, `f` hands it off and `o` opens it 
 own token, whichever login `gh` has active. After a merge or a comment the PR is fetched again at
 once, so its card is current before the next round.
 
+- **Which login:** with more than one gh login, the PR's details say which it goes as ("as hubot"),
+  and `a` moves its owner to the next one: written to `results.json`'s `accounts`, so the mod goes as
+  it too, and the PR is fetched again at once as that login. A fetch then keeps it, unless that login
+  can't see one of the owner's PRs (the poll asks the others, as ever).
+
 - **Merge** asks first on the bottom line: "Squash-merge #409 into main?", `y` to merge, `m` for the
   repo's next allowed method. Where GitHub won't merge yet, it offers auto-merge instead, and cancels
   one already on. A method the repo refuses is skipped next time; a server error is retried once, after
@@ -156,6 +161,7 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
 | `o`                  | open it in the browser                                       |
+| `a`                  | switch the gh login its owner's PRs go as (with two or more)  |
 | `v`                  | show the prompt last copied (`j` `k` scroll, Esc closes)     |
 | `?`                  | the key help                                                 |
 | `q`, Esc, Ctrl-C     | quit (Esc closes the help, a question or the field first)    |

@@ -427,6 +427,7 @@ fn hints(frame: &mut Frame, r: Rect, chosen: Layout) {
         ("o", "browser"),
         ("?", "help"),
         ("q", "quit"),
+        ("a", "account"),
         ("h/l", h_l),
         ("g/G", "top/end"),
     ];
@@ -478,12 +479,13 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         ("c", "comment: ⏎ posts, alt-⏎ a new line"),
         ("f", "fix, resolve or address: copy the prompt"),
         ("o", "open in the browser"),
+        ("a", "switch the gh login its owner goes as"),
         ("v", "show the prompt last copied"),
         ("?", "this help"),
         ("q  esc", "quit"),
     ];
     let width = 56.min(area.width.saturating_sub(2));
-    let height = 17.min(area.height.saturating_sub(2));
+    let height = 18.min(area.height.saturating_sub(2));
     let at = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -1084,11 +1086,18 @@ fn checked(model: &Model, row: &Row) -> Option<String> {
         .map(|at| format!("checked {}", ago(model.now().saturating_sub(at))))
 }
 
-/// The watchers line: "by @octocat  ◆ app-retry, web".
-fn by_line(row: &Row, author: &str, width: usize) -> Line<'static> {
+/// The watchers line: "by @octocat · as hubot  ◆ app-retry, web" (the login only where gh
+/// has more than one).
+fn by_line(row: &Row, author: &str, login: Option<&str>, width: usize) -> Line<'static> {
     let mut spans = Vec::new();
     if !author.is_empty() {
         spans.push(span(format!("by @{author}"), fg(DIM)));
+    }
+    if let Some(login) = login.filter(|l| !l.is_empty()) {
+        if !spans.is_empty() {
+            spans.push(span(" · ", fg(DIM)));
+        }
+        spans.push(span(format!("as {login}"), fg(BODY)));
     }
     if !row.watchers.is_empty() {
         let (glyph, colour) = agent_look(row.agent.as_deref());
@@ -1150,9 +1159,14 @@ fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Li
             span(format!("+{}", meta.additions), fg(GREEN)),
             span(format!(" −{}", meta.deletions), fg(RED)),
         ]));
-        head.push(by_line(row, &meta.author, iw));
+        head.push(by_line(
+            row,
+            &meta.author,
+            model.login_of(row).as_deref(),
+            iw,
+        ));
     } else {
-        head.push(by_line(row, "", iw));
+        head.push(by_line(row, "", model.login_of(row).as_deref(), iw));
     }
     head.push(Line::raw(""));
     head.push(Line::from(pill(d.pill)));
@@ -1346,6 +1360,7 @@ fn card(frame: &mut Frame, r: Rect, model: &Model) {
     lines.push(by_line(
         row,
         gh.map(|pr| meta_of(pr).author).unwrap_or_default().as_str(),
+        model.login_of(row).as_deref(),
         iw,
     ));
     if let Some(error) = &row.pr.error {

@@ -115,7 +115,8 @@ pub struct Outcome {
     /// By URL, each PR as `parseReply` stores it.
     pub found: BTreeMap<String, Map<String, Value>>,
     pub failed: BTreeMap<String, Failure>,
-    /// Repo owner → login, as the fetch left it (the file's, with what it learned).
+    /// Repo owner → login, what the fetch learned ([`learned`](crate::accounts::learned)):
+    /// only those are written, so a login set meanwhile stands.
     pub accounts: BTreeMap<String, String>,
     /// Each login's buckets as the fetch saw them.
     pub rates: Rates,

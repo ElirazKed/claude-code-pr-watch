@@ -34,6 +34,12 @@ export function loginFor(accounts: Readonly<Record<string, string>>, owner: stri
   return all.find(login => login.toLowerCase() === owner.toLowerCase()) ?? logins.active
 }
 
+// What a fetch learned about `accounts`: the owners whose login it set or changed, so a writer
+// merges those alone, and a login set meanwhile (prw's switch) isn't put back.
+export function learned(before: Readonly<Record<string, string>>, after: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(after).filter(([owner, login]) => before[owner] !== login))
+}
+
 // GitHub's viewerPermission as a rank, more rights higher: 0 for none or one unknown.
 const PERMISSIONS = ['READ', 'TRIAGE', 'WRITE', 'MAINTAIN', 'ADMIN']
 export const rankOf = (permission: string | null | undefined): number => PERMISSIONS.indexOf(permission ?? '') + 1
