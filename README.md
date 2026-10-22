@@ -204,7 +204,7 @@ Both intervals are settings in `/config`:
 | `poll_idle_seconds`: while nothing is moving | 60 | 10–3600 |
 
 A change applies from the next round, with no reload needed. Sessions check on a 10s tick, so an interval is rounded up to the next tick. The session that runs a round uses its own settings, so keep them the same across Claude Code configs that share the machine.
-- **Several `gh` accounts:** a PR the active account can't see is retried with the others, and the cache remembers which **login** sees which owner, never a token.
+- **Several `gh` accounts:** an owner of one login's name goes as that login. A PR the active account can't see is retried with the others, and so is one it sees only to read (anyone can read a public repo, the other account's too), kept as a login that sees all the owner's PRs with more rights. The cache remembers which **login** goes for which owner, never a token.
   - **Every call runs as its own login:** each one carries that login's token from `gh auth token --user`, the active login's too, so a `gh auth switch` in another terminal changes nothing for pr-watch. A login is never stood in for by another.
   - **A token gh won't give** (a keyring locked after sleep, say) is asked for again a few seconds later. Its PRs fail as a timeout does, and are never called not found for it. A card that has data keeps it, and says *Couldn't get octocat's gh token* only if it lasts 2 minutes. Where gh gave the token before, that one is used meanwhile.
   - **New logins show up:** `gh auth status` is read again every 5 minutes, and once more before a PR is called not found, so an account you log in to while sessions run is asked too, and the gh meter follows a switch.
