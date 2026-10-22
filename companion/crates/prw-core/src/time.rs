@@ -125,7 +125,8 @@ const MAX_DATE_MS: i64 = 8_640_000_000_000_000;
 /// the years 0 to 9999 that need no sign; `None` outside them.
 #[must_use]
 pub fn format_iso(ms: i64) -> Option<String> {
-    if ms.abs() > MAX_DATE_MS {
+    // `unsigned_abs`: `i64::MIN.abs()` overflows, and a saturated `as i64` cast makes one.
+    if ms.unsigned_abs() > MAX_DATE_MS.unsigned_abs() {
         return None;
     }
     let (days, ms_of_day) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
@@ -183,6 +184,7 @@ mod tests {
         );
         assert_eq!(format_iso(-1).as_deref(), Some("1969-12-31T23:59:59.999Z"));
         assert_eq!(format_iso(i64::MAX), None);
+        assert_eq!(format_iso(i64::MIN), None);
         for ms in [0, 1_791_373_800_123, 951_782_400_000, 253_402_300_799_999] {
             assert_eq!(format_iso(ms).as_deref().and_then(parse_iso), Some(ms));
         }

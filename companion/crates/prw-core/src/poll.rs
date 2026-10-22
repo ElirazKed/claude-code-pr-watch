@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::batch::{PrRef, ref_from_url};
@@ -76,10 +77,12 @@ pub fn release(own: &str) -> Lease {
     }
 }
 
-/// The PRs a round asks (`tick`'s `due`): every URL that names a PR, minus finished ones and
-/// ones no account could see lately, the least recently asked first.
+/// The PRs a round asks (`tick`'s `due`): every URL that names a PR, once (the mod's `Set`,
+/// as several sessions watch the same PR), minus finished ones and ones no account could see
+/// lately, the least recently asked first.
 #[must_use]
 pub fn due(urls: &[String], prs: &Map<String, Value>, at: i64) -> Vec<PrRef> {
+    let mut seen = HashSet::new();
     let asked_at = |url: &str| {
         let entry = prs.get(url);
         let field = |key: &str| entry.and_then(|e| e.get(key)).and_then(ms_of);
@@ -87,6 +90,7 @@ pub fn due(urls: &[String], prs: &Map<String, Value>, at: i64) -> Vec<PrRef> {
     };
     let mut refs: Vec<PrRef> = urls
         .iter()
+        .filter(|url| seen.insert(url.as_str()))
         .filter_map(|url| ref_from_url(url))
         .filter(|r| {
             let entry = prs.get(&r.url);
@@ -187,9 +191,11 @@ pub fn merge(
     let mut next_at = raw.get("nextAt").and_then(ms_of).unwrap_or(0);
     if let Some(round) = round {
         prs = kept_entries(prs, round.live, at);
-        let is_moving = outcome.found.values().any(|pr| {
-            serde_json::from_value::<GhPr>(Value::Object(pr.clone()))
-                .is_ok_and(|pr| derive(&pr, None).is_moving)
+        // Read from the entries just written, by reference: no PR is copied again.
+        let is_moving = outcome.found.keys().any(|url| {
+            prs.get(url)
+                .and_then(|entry| entry.get("pr"))
+                .is_some_and(|pr| GhPr::deserialize(pr).is_ok_and(|pr| derive(&pr, None).is_moving))
         });
         let pace = if is_moving {
             round.pace.fast_ms
@@ -317,6 +323,8 @@ mod tests {
             "https://github.com/acme/app/pull/4",
             "https://github.com/acme/app/pull/5",
             "nonsense",
+            // Watched by two sessions: asked once.
+            A,
         ]
         .iter()
         .map(|&u| u.to_owned())
