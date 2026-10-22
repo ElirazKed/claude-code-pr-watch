@@ -260,7 +260,7 @@ fn allot(counts: &[usize], width: usize) -> Vec<usize> {
 
 fn poll_color(poll: Poll) -> Color {
     match poll {
-        Poll::Mod => GREEN,
+        Poll::Mod | Poll::Prw => GREEN,
         Poll::Nobody => YELLOW,
         Poll::Stale => PEACH,
         Poll::Waiting => DIM,
@@ -354,6 +354,10 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
             format!("⚠ results.json didn't read ({when}): showing the last good copy"),
             YELLOW,
         )
+    } else if let Some(error) = model.poller().and_then(|p| p.error.as_deref()) {
+        // prw's own poller can't find a login's PRs: after a cache that won't read, the
+        // thing to fix.
+        (format!("⚠ {error}"), YELLOW)
     } else if said.live == 0 {
         (
             "No live sessions: showing every PR in results.json".to_owned(),
@@ -362,10 +366,10 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
     } else {
         (
             format!(
-                "Watching {} open PRs · {} sessions live · {} lists",
-                open_count(model),
-                said.live,
-                model.lists().len()
+                "Watching {} · {} live · {}",
+                counted(open_count(model), "open PR"),
+                counted(said.live, "session"),
+                counted(model.lists().len(), "list")
             ),
             DIM,
         )
@@ -377,6 +381,15 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
         ])),
         r,
     );
+}
+
+/// `n` and the noun, plural but for one.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 fn hints(frame: &mut Frame, r: Rect, chosen: Layout) {
@@ -559,15 +572,25 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
         lines.push(Line::raw(""));
         let next = shared.next_at.saturating_sub(model.now());
         let said = match model.header().poll {
-            Poll::Mod if next > 0 => format!("next round in {}s", next.saturating_add(999) / 1000),
-            Poll::Mod => "a round is due".to_owned(),
+            Poll::Mod | Poll::Prw if next > 0 => {
+                format!("next round in {}s", next.saturating_add(999) / 1000)
+            }
+            Poll::Mod | Poll::Prw => "a round is due".to_owned(),
             poll => poll.words().to_owned(),
         };
         lines.push(Line::from(vec![pad(), span(clip(&said, w - ix), fg(DIM))]));
-        if model.header().poll == Poll::Mod {
-            lines.push(Line::from(vec![
+        match model.header().poll {
+            Poll::Mod => lines.push(Line::from(vec![
                 pad(),
                 span("shared with the mod", fg(DIM)),
+            ])),
+            Poll::Prw => lines.push(Line::from(vec![pad(), span("polled by prw", fg(DIM))])),
+            _ => {}
+        }
+        if let Some(error) = model.poller().and_then(|p| p.error.as_deref()) {
+            lines.push(Line::from(vec![
+                pad(),
+                span(clip(&format!("⚠ {error}"), w - ix), fg(YELLOW)),
             ]));
         }
     }

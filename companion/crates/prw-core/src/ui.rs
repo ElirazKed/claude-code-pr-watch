@@ -136,6 +136,19 @@ pub enum Msg {
     Resize(u16, u16),
     /// The clock, about once a second: ages and liveness move on.
     Tick(i64),
+    /// `prw`'s own poller, after a tick.
+    Poller(PollerSaid),
+}
+
+/// What `prw`'s own poller said after a tick.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PollerSaid {
+    /// Its session file's `<id>`: its list ("My PRs") comes first, after All.
+    pub own: String,
+    /// When the last round it ran started (that round's `fetchedAt`).
+    pub polled_at: Option<i64>,
+    /// Why it couldn't find a login's PRs, where it couldn't (no token, nobody logged in).
+    pub error: Option<String>,
 }
 
 /// What the binary should do after a message.
@@ -206,9 +219,11 @@ impl List {
 pub enum Poll {
     /// A mod session is live and the results are fresh.
     Mod,
-    /// No mod session is live (and `prw` doesn't poll yet): nothing will update them.
+    /// `prw` ran the last round, and the results are fresh.
+    Prw,
+    /// No mod session is live, and `prw` doesn't poll (or hasn't yet): nothing updates them.
     Nobody,
-    /// A mod session is live, but no round has run in a while.
+    /// A round is long overdue: whoever polls has stopped.
     Stale,
     /// No `results.json` yet.
     #[default]
@@ -221,6 +236,7 @@ impl Poll {
     pub const fn words(self) -> &'static str {
         match self {
             Self::Mod => "polled by mod",
+            Self::Prw => "polled by prw",
             Self::Nobody => "no poller",
             Self::Stale => "stale",
             Self::Waiting => "waiting for pr-watch",
@@ -266,6 +282,7 @@ pub struct Model {
     selected: Option<String>,
     focus: Focus,
     is_help: bool,
+    poller: Option<PollerSaid>,
     // Worked out from the rest on each message that changes it. Never empty: All is first.
     lists: Vec<List>,
     header: Header,
@@ -287,6 +304,7 @@ impl Model {
             selected: None,
             focus: Focus::Prs,
             is_help: false,
+            poller: None,
             lists: Vec::new(),
             header: Header::default(),
         };
@@ -316,6 +334,12 @@ impl Model {
     #[must_use]
     pub const fn reads(&self) -> (Option<i64>, Option<i64>) {
         (self.read_ok_at, self.read_failed_at)
+    }
+
+    /// What `prw`'s own poller last said; `None` where none runs.
+    #[must_use]
+    pub const fn poller(&self) -> Option<&PollerSaid> {
+        self.poller.as_ref()
     }
 
     /// Every session file read, live or not.
@@ -419,7 +443,8 @@ impl Model {
     /// same PR where it is still listed, else the row where it was (or the last).
     fn rebuild(&mut self) {
         let mut was = self.selected_index();
-        self.lists = lists_of(self.shared.as_ref(), &self.sessions, self.now);
+        let own = self.poller.as_ref().map(|p| p.own.as_str());
+        self.lists = lists_of(self.shared.as_ref(), &self.sessions, self.now, own);
         if !self.lists.iter().any(|l| l.id == self.list) {
             // A different list: its first row, not the old list's place.
             self.list = ListId::All;
@@ -535,6 +560,11 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             model.rebuild();
             Vec::new()
         }
+        Msg::Poller(said) => {
+            model.poller = Some(said);
+            model.rebuild();
+            Vec::new()
+        }
         Msg::Resize(width, height) => {
             model.width = width;
             model.height = height;
@@ -600,12 +630,26 @@ pub fn tracked_of(url: &str, entry: Option<&Entry>) -> Tracked {
     }
 }
 
-/// The lists for these files at `now`: All, then each live session (by label, then id),
-/// then the unnamed older-mod sessions together. Each list's rows in urgency order.
+/// The lists for these files at `now`: All, then `own`'s (this `prw`'s session file, its
+/// "My PRs"), then each live session (by label, then id), then the unnamed older-mod
+/// sessions together. Each list's rows in urgency order.
 #[must_use]
-pub fn lists_of(shared: Option<&Shared>, sessions: &[Session], now: i64) -> Vec<List> {
+pub fn lists_of(
+    shared: Option<&Shared>,
+    sessions: &[Session],
+    now: i64,
+    own: Option<&str>,
+) -> Vec<List> {
     let mut live: Vec<&Session> = sessions.iter().filter(|s| is_live(s.mtime, now)).collect();
-    live.sort_by_cached_key(|&s| (s.is_unnamed(), s.label().to_lowercase(), s.id.as_str()));
+    live.sort_by_cached_key(|&s| {
+        let is_own = own == Some(s.id.as_str());
+        (
+            !is_own,
+            s.is_unnamed(),
+            s.label().to_lowercase(),
+            s.id.as_str(),
+        )
+    });
     let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
     // Who watches each URL, in list order.
@@ -729,8 +773,17 @@ fn header_of(model: &Model) -> Header {
     let now = model.now;
     let live: Vec<&Session> = model.live_sessions().collect();
     let is_mod_live = live.iter().any(|s| s.is_mod());
+    // This prw ran the round the file holds.
+    let is_ours = model
+        .poller
+        .as_ref()
+        .and_then(|p| p.polled_at)
+        .zip(model.shared.as_ref())
+        .is_some_and(|(at, shared)| shared.fetched_at == at);
     let poll = match &model.shared {
         None => Poll::Waiting,
+        Some(shared) if is_ours && now.saturating_sub(shared.next_at) <= STALE_MS => Poll::Prw,
+        Some(_) if is_ours => Poll::Stale,
         Some(_) if !is_mod_live => Poll::Nobody,
         Some(shared) if shared.fetched_at > 0 && now.saturating_sub(shared.next_at) <= STALE_MS => {
             Poll::Mod
@@ -770,13 +823,13 @@ fn header_of(model: &Model) -> Header {
     }
 }
 
-/// Live sessions per agent, for the lists pane: `(agent, count)`, by agent name.
+/// Live sessions per agent, for the lists pane: `(agent, count)`, by agent name. A session
+/// with no agent (`prw`'s own) is left out.
 #[must_use]
 pub fn agents_live(model: &Model) -> Vec<(String, usize)> {
     let mut by: BTreeMap<String, usize> = BTreeMap::new();
-    for session in model.live_sessions() {
-        *by.entry(session.agent().unwrap_or("other").to_owned())
-            .or_default() += 1;
+    for agent in model.live_sessions().filter_map(Session::agent) {
+        *by.entry(agent.to_owned()).or_default() += 1;
     }
     by.into_iter().collect()
 }
@@ -897,7 +950,7 @@ mod tests {
                 0,
             ),
         ];
-        let lists = lists_of(Some(&shared), &sessions, 120_000);
+        let lists = lists_of(Some(&shared), &sessions, 120_000, None);
         let said: Vec<(&ListId, &str, Option<&str>, usize)> = lists
             .iter()
             .map(|l| (&l.id, l.label.as_str(), l.agent.as_deref(), l.rows.len()))
@@ -916,7 +969,7 @@ mod tests {
         assert_eq!(a.watchers, ["prw-x", UNNAMED, UNNAMED]);
 
         // Nobody live: every PR in results.json, and no session lists.
-        let lists = lists_of(Some(&shared), &sessions, 10_000_000);
+        let lists = lists_of(Some(&shared), &sessions, 10_000_000, None);
         assert_eq!(lists.len(), 1);
         assert_eq!(lists[0].rows.len(), 3);
     }
@@ -936,7 +989,7 @@ mod tests {
             in_web("mgx1a2c-p7qd", "Web"),
             in_web("mgx1a2d-zz01", "docs"),
         ];
-        let lists = lists_of(None, &sessions, 120_000);
+        let lists = lists_of(None, &sessions, 120_000, None);
         let labels: Vec<&str> = lists.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["All", "docs", "web · k3x9", "Web · p7qd"]);
         assert_eq!(
@@ -1058,6 +1111,32 @@ mod tests {
         assert_eq!(poll(vec![prw_at(5_000)], 10_000), Poll::Nobody);
         assert_eq!(poll(vec![], 10_000), Poll::Nobody);
         assert_eq!(poll(vec![mod_at(200_000)], 200_000), Poll::Stale);
+        // This prw ran the round in the file: polled by prw, until it is long overdue.
+        let ours = |now| {
+            let shared = Shared {
+                fetched_at: 1_000,
+                next_at: 61_000,
+                ..Shared::default()
+            };
+            let said = PollerSaid {
+                own: "prw-1".into(),
+                polled_at: Some(1_000),
+                error: None,
+            };
+            read(
+                Model::new(120, 30),
+                [
+                    Msg::SharedRead(Ok(shared), now),
+                    Msg::SessionsRead(vec![prw_at(now)], now),
+                    Msg::Poller(said),
+                ],
+            )
+        };
+        assert_eq!(ours(10_000).header().poll, Poll::Prw);
+        assert_eq!(ours(61_000 + STALE_MS + 1).header().poll, Poll::Stale);
+        // Its own list comes first after All.
+        assert_eq!(ours(10_000).lists()[1].id, ListId::Session("prw-1".into()));
+        assert_eq!(agents_live(&ours(10_000)), []);
         assert_eq!(
             read(Model::new(120, 30), [Msg::Tick(5)]).header().poll,
             Poll::Waiting

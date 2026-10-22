@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 prw-core.workspace = true
+serde_json.workspace = true
 ratatui.workspace = true
 unicode-width.workspace = true
 

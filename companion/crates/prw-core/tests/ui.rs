@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 use prw_core::gh::{GhPr, PrState};
 use prw_core::protocol::{SessionFile, Writer};
-use prw_core::ui::{Key, ListId, Model, Msg, ReadFailure, Session, lists_of, update};
+use prw_core::ui::{Key, ListId, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update};
 use prw_core::{Entry, Shared};
 
 /// A handful of PRs, so reads overlap: the same URLs come and go.
@@ -123,6 +123,9 @@ fn msg() -> impl Strategy<Value = Msg> {
         6 => key().prop_map(Msg::Key),
         1 => (0_u16..=300, 0_u16..=80).prop_map(|(w, h)| Msg::Resize(w, h)),
         1 => at().prop_map(Msg::Tick),
+        1 => (prop::sample::select(vec!["prw-1", "prw-9"]), proptest::option::of(at())).prop_map(|(own, polled_at)| {
+            Msg::Poller(PollerSaid { own: own.into(), polled_at, error: None })
+        }),
     ]
 }
 
@@ -153,7 +156,12 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
     // What the model shows is what its inputs give now.
     prop_assert_eq!(
         lists,
-        &lists_of(model.shared(), model.sessions(), model.now())[..]
+        &lists_of(
+            model.shared(),
+            model.sessions(),
+            model.now(),
+            model.poller().map(|p| p.own.as_str())
+        )[..]
     );
     Ok(())
 }

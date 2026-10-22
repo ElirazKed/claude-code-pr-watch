@@ -6,12 +6,16 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 4 of the plan: the kernel, read-only.** `prw` shows the PRs your sessions watch, from
-the mod's shared cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude
-through the mod; others by the `agent` their session file names), each PR's card worked out as the mod
-does (`prw-core`, held to the mod's own fixtures in `fixtures/`). It reads `~/.cache/pr-watch/` about
-once a second and never writes to it, and it doesn't poll GitHub itself yet: with no Claude session
-running the mod, the header says "no poller" and the results stop moving.
+**Status: step 5 of the plan: polling.** `prw` shows the PRs your sessions watch, from the mod's shared
+cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
+others by the `agent` their session file names), each PR's card worked out as the mod does
+(`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
+gh logins authored and shows them as "My PRs", so it is of use without Claude running at all.
+
+It takes part in the poll as one more session. It announces "My PRs" in its own session file, so a
+running mod fetches them in its rounds. When no mod is polling, it polls GitHub itself, for every live
+session, under the same lease, rate limits and hold as the mod. The header says who polled last.
+`--no-poll` keeps it read-only: it never writes to the cache and never asks GitHub anything.
 
 ## Build and run
 
@@ -33,7 +37,8 @@ cargo run -p prw -- --cache demo --demo
 cargo test --workspace
 ```
 
-`--cache <dir>` (or `PRW_CACHE`) reads another cache directory than `~/.cache/pr-watch`.
+`--cache <dir>` (or `PRW_CACHE`) uses another cache directory than `~/.cache/pr-watch`. `prw` runs
+`gh` from `PATH`, as each login (`gh auth token --user`), and never switches gh's active account.
 
 ### The demo cache
 
@@ -45,9 +50,9 @@ older mod's file with only `urls` (listed as "Claude session"), which also watch
 
 Its files never change, so a session would read as dead (a session file is live while its mtime is
 under 60 s old) and the results as hours old. `--demo` shows it as if it were live: every session file
-counts as just written, and the clock starts 12 s after the results' round. Without `--demo`, touch the
-session files first (`touch companion/demo/sessions/*.json`) and the header says how old the results
-really are.
+counts as just written, the clock starts 12 s after the results' round, and nothing polls. Without
+`--demo`, touch the session files first (`touch companion/demo/sessions/*.json`) and the header says
+how old the results really are (and pass `--no-poll`, or `prw` polls GitHub for the demo's PRs).
 
 ### Keys
 
@@ -79,8 +84,10 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 ## Crates
 
-- `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout and
-  the TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`), tested with properties and against
-  the mod's fixtures (`tests/fixtures.rs`).
+- `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout, the
+  TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`) and the poll's decisions, ported from
+  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), tested with properties and
+  against the mod's fixtures (`tests/fixtures.rs`).
 - `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), drawing the model
-  (`view.rs`).
+  (`view.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
+  running `gh` and the clock, behind traits the tests fake).

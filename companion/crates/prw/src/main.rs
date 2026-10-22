@@ -1,11 +1,15 @@
 //! `prw`: the terminal companion for the pr-watch mod.
 //!
-//! The kernel (step 4 of the plan): a read-only TUI over the mod's shared cache. It reads
-//! `results.json` and the session files (`cache`), feeds what it read to the model
-//! (`prw_core::ui::update`) as messages, and draws the model (`view`) after each one.
-//! It never writes to the cache.
+//! A TUI over the mod's shared cache. It reads `results.json` and the session files
+//! (`cache`), feeds what it read to the model (`prw_core::ui::update`) as messages, and
+//! draws the model (`view`) after each one. Beside it, unless `--no-poll`, a poller thread
+//! (`poller`) watches every gh login's own open PRs and takes the poll when no mod is
+//! polling, so `prw` is of use without Claude running at all.
 
 mod cache;
+mod gh;
+mod poller;
+mod round;
 mod theme;
 mod view;
 
@@ -14,15 +18,19 @@ mod render_tests;
 
 use std::io;
 use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::{Duration, Instant, SystemTime};
+use std::process::{self, ExitCode};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prw_core::parse_shared;
-use prw_core::ui::{Cmd, Key, Model, Msg, update};
+use prw_core::ui::{Cmd, Key, Model, Msg, PollerSaid, update};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::cache::{Reader, default_dir, ms_of};
+use crate::poller::{Files, Poller};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -34,14 +42,16 @@ prw: every PR your agents touch, in one terminal
 
 Usage: prw [OPTIONS]
 
-Shows the PRs the pr-watch mod polls, from its shared cache. Read-only: prw never
-writes to the cache, and never asks GitHub anything (yet).
+Shows the PRs the pr-watch mod polls, from its shared cache, and every open PR of each
+gh login (\"My PRs\"). When no Claude session's mod is polling, prw polls GitHub itself,
+sharing the cache's lease and rate limits with the mod as one more session.
 
 Options:
-      --cache <DIR>  The cache to read [env: PRW_CACHE] [default: ~/.cache/pr-watch]
+      --cache <DIR>  The cache to use [env: PRW_CACHE] [default: ~/.cache/pr-watch]
+      --no-poll      Only read the cache: never write to it, never ask GitHub anything
       --demo         Show a cache as if it were live: every session file counts as
                      just written, and the clock starts at results.json's last round
-                     (for companion/demo, whose files never change)
+                     (for companion/demo, whose files never change). Implies --no-poll
   -h, --help         Print this help
   -V, --version      Print the version
 
@@ -53,6 +63,14 @@ Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q qui
 struct Options {
     cache: Option<PathBuf>,
     is_demo: bool,
+    is_no_poll: bool,
+}
+
+impl Options {
+    /// Whether the poller runs: a demo's cache is a fixture, never written.
+    const fn is_polling(&self) -> bool {
+        !self.is_demo && !self.is_no_poll
+    }
 }
 
 /// What the command line asked for.
@@ -74,6 +92,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
             "-h" | "--help" => return Command::Help,
             "-V" | "--version" => return Command::Version,
             "--demo" => options.is_demo = true,
+            "--no-poll" => options.is_no_poll = true,
             "--cache" => match args.next() {
                 Some(dir) if !dir.is_empty() => options.cache = Some(dir.into()),
                 _ => return Command::Missing("--cache"),
@@ -159,11 +178,32 @@ impl Clock {
 fn run(options: &Options) -> io::Result<()> {
     let dir = cache_dir(options);
     let clock = Clock::new(&dir, options.is_demo);
+    let files = options
+        .is_polling()
+        .then(|| Files::new(dir.clone(), own_id()));
     let reader = Reader::new(dir, options.is_demo);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
-    let result = event_loop(&mut terminal, reader, &clock);
+    let stop = Arc::new(AtomicBool::new(false));
+    let said = files
+        .clone()
+        .map(|files| poller::spawn(Poller::new(files, gh::System, gh::Wall), Arc::clone(&stop)));
+    let result = event_loop(&mut terminal, reader, &clock, said.as_ref());
+    // Its PRs are no longer watched: the session file goes, and a held lease is given back.
+    // A tick still running dies with the process.
+    stop.store(true, Ordering::Relaxed);
+    if let Some(files) = &files {
+        files.leave();
+    }
     ratatui::restore();
     result
+}
+
+/// This run's name in the cache (`prw-<id>`): its session file, and the lease's owner.
+fn own_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    format!("prw-{:x}{nanos:08x}", process::id())
 }
 
 fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
@@ -176,7 +216,12 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> (Model, bool) {
     (model, quit)
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, mut reader: Reader, clock: &Clock) -> io::Result<()> {
+fn event_loop(
+    terminal: &mut DefaultTerminal,
+    mut reader: Reader,
+    clock: &Clock,
+    said: Option<&Receiver<PollerSaid>>,
+) -> io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
     let shown = view::tilde(&reader.dir().display().to_string(), &home);
     let ctx = view::Ctx {
@@ -210,7 +255,12 @@ fn event_loop(terminal: &mut DefaultTerminal, mut reader: Reader, clock: &Clock)
             } else {
                 last_tick = Instant::now();
                 let now = clock.now();
-                (model, _) = feed(model, reader.poll(now).into_iter().chain([Msg::Tick(now)]));
+                let polled = said
+                    .into_iter()
+                    .flat_map(Receiver::try_iter)
+                    .map(Msg::Poller);
+                let read = reader.poll(now);
+                (model, _) = feed(model, polled.chain(read).chain([Msg::Tick(now)]));
             }
             break;
         }
@@ -258,7 +308,9 @@ mod tests {
         let demo = Options {
             cache: Some("companion/demo".into()),
             is_demo: true,
+            ..Options::default()
         };
+        assert!(!demo.is_polling());
         assert_eq!(
             parse(&["--cache", "companion/demo", "--demo"]),
             Command::Run(demo)
@@ -267,9 +319,14 @@ mod tests {
             parse(&["--cache=/tmp/c"]),
             Command::Run(Options {
                 cache: Some("/tmp/c".into()),
-                is_demo: false
+                ..Options::default()
             })
         );
+        let Command::Run(read_only) = parse(&["--no-poll"]) else {
+            panic!("--no-poll runs")
+        };
+        assert!(read_only.is_no_poll && !read_only.is_polling());
+        assert!(Options::default().is_polling());
         assert_eq!(parse(&["--cache"]), Command::Missing("--cache"));
         assert_eq!(parse(&["--cache="]), Command::Missing("--cache"));
     }

@@ -1047,6 +1047,7 @@ dependencies = [
  "proptest",
  "prw-core",
  "ratatui",
+ "serde_json",
  "unicode-width",
 ]
 
