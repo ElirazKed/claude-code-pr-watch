@@ -1,7 +1,7 @@
 //! Running `gh`, and the time: the poll's only ways out of the process, behind traits so a
 //! round runs against a fake `gh` and a fake clock in tests.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -33,30 +33,54 @@ pub enum RunError {
 
 /// A way to run `gh`.
 pub trait Gh {
-    /// `gh <argv>`, as `token`'s login where one is given (`GH_TOKEN`), killed past
-    /// `timeout`.
+    /// `gh <argv>`, as `token`'s login where one is given (`GH_TOKEN`), `input` on its stdin
+    /// (none: nothing to read), killed past `timeout`.
     ///
     /// # Errors
     ///
     /// Where `gh` didn't start, or didn't finish in time.
-    fn run(&self, argv: &[String], token: Option<&str>, timeout: Duration)
-    -> Result<Ran, RunError>;
-}
+    fn run_input(
+        &self,
+        argv: &[String],
+        token: Option<&str>,
+        input: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Ran, RunError>;
 
-/// The real `gh`, from `PATH`.
-pub struct System;
-
-impl Gh for System {
+    /// [`Gh::run_input`] with nothing on stdin.
+    ///
+    /// # Errors
+    ///
+    /// Where `gh` didn't start, or didn't finish in time.
     fn run(
         &self,
         argv: &[String],
         token: Option<&str>,
         timeout: Duration,
     ) -> Result<Ran, RunError> {
+        self.run_input(argv, token, None, timeout)
+    }
+}
+
+/// The real `gh`, from `PATH`.
+pub struct System;
+
+impl Gh for System {
+    fn run_input(
+        &self,
+        argv: &[String],
+        token: Option<&str>,
+        input: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Ran, RunError> {
         let mut command = Command::new("gh");
         command
             .args(argv)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Never a prompt: nobody is there to answer it.
@@ -68,6 +92,14 @@ impl Gh for System {
         let mut child = command
             .spawn()
             .map_err(|err| RunError::Spawn(err.to_string()))?;
+        // Written on a thread of its own, then closed, so gh reads to the end while its
+        // output is drained.
+        if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+            let input = input.to_owned();
+            thread::spawn(move || {
+                let _ = stdin.write_all(input.as_bytes());
+            });
+        }
         // Each pipe drained on its own thread, so a full one never stalls gh.
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             thread::spawn(move || {
@@ -157,6 +189,8 @@ pub mod fake {
     pub struct Call {
         pub argv: Vec<String>,
         pub token: Option<String>,
+        /// What it was given on stdin.
+        pub input: Option<String>,
     }
 
     /// Answers each call with the first rule whose test it passes; a rule may answer once.
@@ -204,10 +238,17 @@ pub mod fake {
     }
 
     impl Gh for FakeGh {
-        fn run(&self, argv: &[String], token: Option<&str>, _: Duration) -> Result<Ran, RunError> {
+        fn run_input(
+            &self,
+            argv: &[String],
+            token: Option<&str>,
+            input: Option<&str>,
+            _: Duration,
+        ) -> Result<Ran, RunError> {
             let call = Call {
                 argv: argv.to_vec(),
                 token: token.map(str::to_owned),
+                input: input.map(str::to_owned),
             };
             self.calls.borrow_mut().push(call.clone());
             let mut rules = self.rules.borrow_mut();

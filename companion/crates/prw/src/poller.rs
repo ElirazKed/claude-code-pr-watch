@@ -21,6 +21,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use prw_core::accounts::every_login;
+use prw_core::batch::PrRef;
 use prw_core::poll::{
     LEASE_MS, Outcome, Pace, Round, claim, due, may_take, merge, release, should_poll,
 };
@@ -404,6 +405,31 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             self.polled_at = Some(at);
         }
     }
+}
+
+/// `refs` asked again now, outside a round (the mod's `fetchNow`, after a merge or a comment):
+/// merged into `results.json` as it stands just before the write, with none of a round's
+/// bookkeeping. Held by a secondary limit, it asks nothing: the next round does.
+pub fn refresh<G: Gh, C: Clock>(files: &Files, ctx: &mut Ctx<'_, G, C>, refs: &[PrRef]) {
+    let at = ctx.clock.now();
+    let before_raw = files.read_raw().unwrap_or_default();
+    let before = shared_of(before_raw.clone());
+    if refs.is_empty() || before.held_until.is_some_and(|held| held > at) {
+        return;
+    }
+    let mut accounts = before.accounts.clone();
+    let fetched = ctx.fetch_refs(refs, &mut accounts, before.rates, at, at + GH_MS * 2, false);
+    let outcome = Outcome {
+        found: fetched.found,
+        failed: fetched.errors,
+        accounts,
+        rates: fetched.rates,
+        needed: fetched.needed,
+        wait_ms: fetched.wait_ms,
+    };
+    // Read again: a round may have written while this asked GitHub.
+    let after = files.read_raw().unwrap_or(before_raw);
+    let _ = files.write_results(&merge(after, &outcome, None, at, ctx.clock.now()));
 }
 
 /// The typed view of `results.json`'s raw JSON, for the decisions.

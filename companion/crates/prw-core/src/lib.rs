@@ -20,6 +20,10 @@
 //!   [`accounts`] (which gh login asks), [`rate`] (each login's budget), [`entries`] (what a
 //!   failed fetch and a round do to an entry, `hooks/cache.ts`) and [`search`] (a login's
 //!   own open PRs).
+//! - Acting on a PR: [`act`] (what the action keys do to the screen), [`merge`] (what `m` runs and what GitHub's answer means), [`comment`]
+//!   (`c`), and the hand-offs [`handoff`] picks between, whose prompts are ports of the mod's:
+//!   [`fix`] (failing checks and their logs), [`resolve`] (conflicts) and [`address`] (open
+//!   review threads).
 //! - Watches from other agents: [`watch`] (`prw watch` and the MCP `watch` tool: one file per
 //!   watch, announced as one session file per agent's session) and [`mcp`] (`prw mcp`'s
 //!   JSON-RPC).
@@ -28,17 +32,24 @@
 //! [`review`] to the mod's cards word for word (`tests/fixtures.rs`).
 
 pub mod accounts;
+pub mod act;
+pub mod address;
 pub mod batch;
+pub mod comment;
 pub mod entries;
+pub mod fix;
 pub mod gh;
+pub mod handoff;
 pub mod layout;
 mod lenient;
 pub mod mcp;
+pub mod merge;
 pub mod order;
 pub mod panes;
 pub mod poll;
 pub mod protocol;
 pub mod rate;
+pub mod resolve;
 pub mod review;
 pub mod search;
 pub mod status;

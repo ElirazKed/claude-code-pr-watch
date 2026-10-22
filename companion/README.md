@@ -6,7 +6,7 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 6 of the plan: other agents.** `prw` shows the PRs your sessions watch, from the mod's shared
+**Status: step 7 of the plan: actions.** `prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
@@ -15,7 +15,25 @@ gh logins authored and shows them as "My PRs", so it is of use without Claude ru
 It takes part in the poll as one more session. It announces "My PRs" in its own session file, so a
 running mod fetches them in its rounds. When no mod is polling, it polls GitHub itself, for every live
 session, under the same lease, rate limits and hold as the mod. The header says who polled last.
-`--no-poll` keeps it read-only: it never writes to the cache and never asks GitHub anything.
+`--no-poll` keeps it to reading: it never writes to the cache, and asks GitHub only when you act on a
+PR.
+
+On the selected PR, `m` merges, `c` comments, `f` hands it off and `o` opens it in the browser
+(below). Each goes as the gh login that sees the PR's repo (the one the poll uses), with that login's
+own token, whichever login `gh` has active. After a merge or a comment the PR is fetched again at once, so its card is
+current before the next round.
+
+- **Merge** asks first on the bottom line: "Squash-merge #409 into main?", `y` to merge, `m` for the
+  repo's next allowed method. Where GitHub won't merge yet, it offers auto-merge instead, and cancels
+  one already on. A method the repo refuses is skipped next time; a server error is retried once, after
+  checking whether the merge went through.
+- **Comment** opens a field on the bottom line: Enter posts, Alt-Enter is a new line, a paste goes in
+  whole, Esc keeps the draft for the next `c`. The text goes to `gh` on stdin, never in its arguments.
+- **Hand-offs** copy a prompt for the agent that runs the PR, as the mod drafts it: Resolve (conflicts
+  with the base), Fix (failed checks, with the tail of each failed job's log) or Address (the open
+  review threads, each comment cleaned of markup). With more than one, `f` asks which. The toast says
+  how it was copied: `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, OSC 52 over SSH or where
+  none works. OSC 52 can't confirm the copy, so `v` shows the prompt last copied, to select by hand.
 
 Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
 `prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
@@ -103,10 +121,15 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `g` `G`, Home End    | the first or last                                            |
 | Tab, Shift-Tab       | the next or previous list                                    |
 | `h` `l`, `←` `→`     | three panes: the lists pane or the PRs; narrower: the previous or next list |
+| `m`                  | merge the PR, after a `y` (`m` again: the next method)       |
+| `c`                  | comment on it                                                |
+| `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
+| `o`                  | open it in the browser                                       |
+| `v`                  | show the prompt last copied (`j` `k` scroll, Esc closes)     |
 | `?`                  | the key help                                                 |
-| `q`, Esc, Ctrl-C     | quit (Esc closes the help first)                             |
+| `q`, Esc, Ctrl-C     | quit (Esc closes the help, a question or the field first)    |
 
-Enter (the full PR view), merging, commenting and hand-offs come in later steps.
+Enter (the full PR view) comes in a later step.
 
 ## Layout
 
@@ -127,10 +150,12 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 - `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout, the
   TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`) and the poll's decisions, ported from
-  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), other agents' watches (`watch`)
-  and the MCP messages (`mcp`), tested with properties and against the mod's fixtures
+  the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), other agents' watches (`watch`),
+  the MCP messages (`mcp`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
+  and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), tested with properties and against the mod's fixtures
   (`tests/fixtures.rs`).
 - `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), drawing the model
   (`view.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
-  running `gh` and the clock, behind traits the tests fake), and the other commands (`cli.rs`: `watch`
+  running `gh` and the clock, behind traits the tests fake), the actions (`actions.rs`: running each one as its own thread; `desktop.rs`: the clipboard and the
+  browser), and the other commands (`cli.rs`: `watch`
   and `unwatch`; `mcp.rs`: the tool server; `watches.rs`: the watch files and their sessions).

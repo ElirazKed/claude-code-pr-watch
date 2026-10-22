@@ -1,13 +1,15 @@
 //! Drawing the model: one function per pane, into the areas `prw_core::panes` gives. Nothing
 //! here decides anything the model hasn't; it lays out words the core worked out.
 
-use prw_core::gh::{GhPr, MergeStateStatus, Permission, PrState};
+use prw_core::act::{Ask, Copied, Look, Tone};
+use prw_core::gh::{GhPr, PrState};
 use prw_core::layout::{Layout, layout};
+use prw_core::merge::{Standing, merge_question, next_method, standing};
 use prw_core::panes::{Pane, panes};
 use prw_core::review::{Verdict, reviews_of, threads_beside, verdict_line};
 use prw_core::status::{
-    CheckVerdict, Checks, Mergeable, PillKind, STEPS, Stage, activity, is_conflicted,
-    is_status_context, latest_runs, mergeable_of, meta_of, step_index, verdict_of,
+    CheckVerdict, Checks, Mergeable, PillKind, STEPS, Stage, activity, is_status_context,
+    latest_runs, mergeable_of, meta_of, step_index, verdict_of,
 };
 use prw_core::time::parse_iso;
 use prw_core::ui::{Focus, List, ListId, Model, Poll, Row, agents_live, ago};
@@ -56,7 +58,12 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) {
             Pane::Narrow => narrow(frame, r),
         }
     }
-    if model.is_help() && chosen != Layout::TooNarrow {
+    if chosen == Layout::TooNarrow {
+        return;
+    }
+    if let (Some(top), Some(copied)) = (model.acts().view(), model.acts().copied()) {
+        prompt_pane(frame, area, top, copied);
+    } else if model.is_help() {
         help(frame, area, chosen);
     }
 }
@@ -341,8 +348,16 @@ fn open_count(model: &Model) -> usize {
 
 fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
     let width = usize_of(r.width).saturating_sub(2);
+    if let Some(ask) = model.acts().ask() {
+        frame.render_widget(Paragraph::new(ask_line(ask, width)), r);
+        return;
+    }
     let said = model.header();
-    let (text, colour) = if model.is_waiting() {
+    let (text, colour) = if let Some(toast) = model.acts().toast() {
+        (toast.text.clone(), tone_of(toast.tone))
+    } else if let Some(busy) = model.acts().busy().next() {
+        (format!("◌ {busy}…"), YELLOW)
+    } else if model.is_waiting() {
         (format!("Reading {}", ctx.dir), DIM)
     } else if said.is_read_failing {
         let when = model
@@ -402,6 +417,10 @@ fn hints(frame: &mut Frame, r: Rect, chosen: Layout) {
     let keys = [
         ("j/k", "move"),
         ("tab", "list"),
+        ("m", "merge"),
+        ("c", "comment"),
+        ("f", "hand off"),
+        ("o", "browser"),
         ("?", "help"),
         ("q", "quit"),
         ("h/l", h_l),
@@ -451,11 +470,16 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         ("g G", "first, last"),
         ("tab ⇧tab", "next, previous list"),
         ("h l  ← →", h_l),
+        ("m", "merge, after a y (m again: method)"),
+        ("c", "comment: ⏎ posts, alt-⏎ a new line"),
+        ("f", "fix, resolve or address: copy the prompt"),
+        ("o", "open in the browser"),
+        ("v", "show the prompt last copied"),
         ("?", "this help"),
         ("q  esc", "quit"),
     ];
-    let width = 44.min(area.width.saturating_sub(2));
-    let height = 12.min(area.height.saturating_sub(2));
+    let width = 56.min(area.width.saturating_sub(2));
+    let height = 17.min(area.height.saturating_sub(2));
     let at = Rect::new(
         area.x + (area.width - width) / 2,
         area.y + (area.height - height) / 2,
@@ -472,7 +496,7 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(span(
-        clip("Read-only: prw shows what pr-watch polled.", iw),
+        clip("Actions go as the gh login that sees the repo.", iw),
         fg(DIM),
     )));
     frame.render_widget(Clear, at);
@@ -979,53 +1003,18 @@ fn check_lines(pr: &GhPr, width: usize) -> Vec<(u8, Line<'static>)> {
     out
 }
 
-/// What the card says of merging, where it is open.
+/// What the card says of merging, where it is open, in the colour of where it stands.
 fn merge_words(pr: &GhPr, merge: &Mergeable) -> Option<(String, Color)> {
-    if pr.state != PrState::Open {
-        return None;
-    }
-    let methods = |m: &Mergeable| {
-        m.methods
-            .iter()
-            .map(|m| m.as_str())
-            .collect::<Vec<_>>()
-            .join(" · ")
+    let (words, standing) = standing(pr, merge)?;
+    let colour = match standing {
+        Standing::Auto => TEAL,
+        Standing::Can => GREEN,
+        Standing::Conflicts => PEACH,
+        Standing::Draft | Standing::ReadOnly => DIM,
+        Standing::CanAuto => BLUE,
+        Standing::Waiting => YELLOW,
     };
-    let base = if pr.base_ref_name.is_empty() {
-        "base"
-    } else {
-        pr.base_ref_name.as_str()
-    };
-    let read_only = matches!(
-        pr.repository
-            .as_ref()
-            .and_then(|r| r.viewer_permission.as_ref()),
-        Some(Permission::Read | Permission::Triage)
-    );
-    Some(if merge.is_auto {
-        let how = merge
-            .auto_method
-            .map_or(String::new(), |m| format!(" ({})", m.as_str()));
-        (format!("Auto-merge on{how}"), TEAL)
-    } else if merge.can_merge {
-        (format!("Can merge: {}", methods(merge)), GREEN)
-    } else if is_conflicted(pr) {
-        (format!("Conflicts with {base}"), PEACH)
-    } else if pr.is_draft {
-        ("A draft: not mergeable yet".to_owned(), DIM)
-    } else if read_only {
-        ("Read-only here: you can't merge".to_owned(), DIM)
-    } else if merge.can_auto {
-        ("Auto-merge can be turned on".to_owned(), BLUE)
-    } else {
-        let why = match pr.merge_state_status {
-            Some(MergeStateStatus::Behind) => format!("Behind {base}"),
-            Some(MergeStateStatus::Blocked) => "Blocked by branch rules".to_owned(),
-            Some(MergeStateStatus::Unknown) => "GitHub is still working it out".to_owned(),
-            _ => "Not mergeable yet".to_owned(),
-        };
-        (why, YELLOW)
-    })
+    Some((words, colour))
 }
 
 fn verdict_color(verdict: Option<Verdict>) -> Color {
@@ -1222,7 +1211,7 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
     let gh = model.entry(&row.pr.url).and_then(|e| e.pr.as_ref());
     let head = detail_head(model, row, gh, iw);
     let (checks_head, check_rows) = detail_checks(row, gh, iw);
-    let tail = detail_tail(row, gh, iw);
+    let mut tail = detail_tail(row, gh, iw);
     let mut foot = Vec::new();
     if let Some(when) = checked(model, row) {
         foot.push(Line::from(span(clip(&when, iw), fg(DIM))));
@@ -1231,6 +1220,14 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
     let url = row.pr.url.strip_prefix("https://").unwrap_or(&row.pr.url);
     foot.push(Line::from(span(clip(url, iw), fg(DIM))));
 
+    // The actions a line each where the checks leave room, else as keys on one line.
+    let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
+    let actions = action_lines(model, iw);
+    if ih.saturating_sub(fixed) >= check_rows.len() + actions.len() {
+        tail.extend(actions);
+    } else if !actions.is_empty() {
+        foot.insert(0, action_keys(model, iw));
+    }
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
     let room = ih.saturating_sub(fixed);
     let total = check_rows.len();
@@ -1302,7 +1299,208 @@ fn card(frame: &mut Frame, r: Rect, model: &Model) {
     if let Some(error) = &row.pr.error {
         lines.push(Line::from(span(clip(&format!("⚠ {error}"), iw), fg(RED))));
     }
+    lines.push(action_keys(model, iw));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---- Actions ----------------------------------------------------------------------------
+
+fn look_color(look: Look) -> Color {
+    match look {
+        Look::Merge => GREEN,
+        Look::Handoff => PEACH,
+        Look::Plain => BODY,
+        Look::Busy => YELLOW,
+    }
+}
+
+fn tone_of(tone: Tone) -> Color {
+    match tone {
+        Tone::Good => GREEN,
+        Tone::Bad => RED,
+        Tone::Info => BODY,
+    }
+}
+
+/// The selected PR's actions, one a line, each with its key (the detail pane).
+fn action_lines(model: &Model, iw: usize) -> Vec<Line<'static>> {
+    let offers = model.offers();
+    if offers.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::raw(""), Line::from(span("ACTIONS", label()))];
+    lines.extend(offers.into_iter().map(|o| {
+        Line::from(vec![
+            span(format!("[{}] ", o.key), fg(ACCENT)),
+            span(clip(&o.words, iw.saturating_sub(4)), fg(look_color(o.look))),
+        ])
+    }));
+    lines
+}
+
+/// The actions as keys on one line, as many as fit (the narrow card):
+/// "m merge  f fix  c comment  o open".
+fn action_keys(model: &Model, iw: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for o in model.offers() {
+        let need = cells(o.key) + 1 + cells(&o.short);
+        if used + need > iw {
+            break;
+        }
+        spans.push(span(o.key, fg(ACCENT)));
+        spans.push(span(format!(" {}  ", o.short), fg(look_color(o.look))));
+        used += need + 2;
+    }
+    Line::from(spans)
+}
+
+/// The last `n` cells of `text`.
+fn tail_cells(text: &str, n: usize) -> String {
+    let mut used = 0;
+    let mut kept: Vec<char> = text
+        .chars()
+        .rev()
+        .take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used <= n
+        })
+        .collect();
+    kept.reverse();
+    kept.into_iter().collect()
+}
+
+/// The question on the bottom line, with the keys that answer it.
+fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
+    let key = |k: &str| span(format!("  {k}"), fg(ACCENT));
+    let what = |w: &str| span(format!(" {w}"), fg(DIM));
+    match ask {
+        Ask::Merge {
+            number,
+            base,
+            run,
+            methods,
+            ..
+        } => {
+            let mut tail = vec![key("y"), what("yes"), key("n"), what("no")];
+            if let Some(method) = run.method().filter(|_| methods.len() > 1) {
+                tail.extend([key("m"), what(next_method(methods, method).as_str())]);
+            }
+            let room = width.saturating_sub(tail.iter().map(|s| cells(&s.content)).sum());
+            let mut spans = vec![
+                Span::raw(" "),
+                span(clip(&merge_question(*run, *number, base), room), bold(FG)),
+            ];
+            spans.extend(tail);
+            Line::from(spans)
+        }
+        Ask::Comment {
+            number,
+            text,
+            login,
+            ..
+        } => {
+            let lead = format!(" comment on #{number} › ");
+            let hint = if width >= 70 {
+                "  ⏎ post · alt-⏎ new line · esc cancel"
+            } else {
+                ""
+            };
+            let room = width.saturating_sub(cells(&lead) + cells(hint) + 1);
+            let mut spans = vec![span(lead, bold(ACCENT))];
+            if text.is_empty() {
+                spans.push(span(" ", Style::new().bg(ACCENT)));
+                if !login.is_empty() {
+                    spans.push(span(clip(&format!(" as {login}"), room), fg(DIM)));
+                }
+            } else {
+                spans.push(span(tail_cells(&text.replace('\n', "↵"), room), fg(FG)));
+                spans.push(span(" ", Style::new().bg(ACCENT)));
+            }
+            let used: usize = spans.iter().map(|s| cells(&s.content)).sum();
+            spans.push(Span::raw(
+                " ".repeat(width.saturating_sub(used + cells(hint))),
+            ));
+            spans.push(span(hint, fg(DIM)));
+            Line::from(spans)
+        }
+        Ask::Pick { number, kinds, .. } => {
+            let mut spans = vec![span(format!(" Hand off #{number}:"), bold(FG))];
+            for kind in kinds {
+                spans.extend([
+                    key(&kind.key().to_string()),
+                    span(format!(" {}", kind.about()), fg(BODY)),
+                ]);
+            }
+            spans.extend([key("esc"), what("cancel")]);
+            Line::from(spans)
+        }
+    }
+}
+
+/// `line` cut into pieces of `width` cells, for text that must show whole.
+fn hard_wrap(line: &str, width: usize) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut used = 0;
+    for c in line.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > width.max(1) {
+            out.push(String::new());
+            used = 0;
+        }
+        if let Some(last) = out.last_mut() {
+            last.push(c);
+        }
+        used += w;
+    }
+    out
+}
+
+/// The prompt last copied, the whole screen, to read, or to select and copy by hand where
+/// the copy can't be confirmed (OSC 52). No border, so a selection takes only the text.
+fn prompt_pane(frame: &mut Frame, area: Rect, top: usize, copied: &Copied) {
+    let width = usize_of(area.width);
+    let height = usize_of(area.height).saturating_sub(2);
+    let body: Vec<String> = copied
+        .text
+        .replace('\t', "    ")
+        .split('\n')
+        .flat_map(|line| hard_wrap(line, width))
+        .collect();
+    let top = top.min(body.len().saturating_sub(height));
+    let shown = body.len().min(top + height);
+    let head = format!(
+        " {} prompt for #{} · for {} · j/k scroll · esc closes",
+        copied.kind.name(),
+        copied.number,
+        copied.to
+    );
+    let foot = format!(
+        " lines {}-{shown} of {} · select with the mouse to copy by hand",
+        (top + 1).min(shown),
+        body.len()
+    );
+    let mut lines = vec![filled(
+        vec![span(clip(&head, width), bold(FG))],
+        width,
+        PANEL,
+    )];
+    lines.extend(
+        body[top..shown]
+            .iter()
+            .map(|l| Line::from(span(l.clone(), fg(BODY)))),
+    );
+    lines.extend(std::iter::repeat_n(
+        Line::raw(""),
+        height.saturating_sub(shown - top),
+    ));
+    lines.push(filled(
+        vec![span(clip(&foot, width), fg(DIM))],
+        width,
+        PANEL,
+    ));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).style(Style::new().bg(INK)), area);
 }
 
 #[cfg(test)]
