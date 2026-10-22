@@ -1,0 +1,756 @@
+{
+ "fetchedAt": 1792584000000,
+ "nextAt": 1792584020000,
+ "prs": {
+  "https://github.com/acme/app/pull/412": {
+   "at": 1792583998000,
+   "pr": {
+    "number": 412,
+    "title": "Retry uploads with exponential backoff",
+    "url": "https://github.com/acme/app/pull/412",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 212,
+    "deletions": 40,
+    "headRefName": "feat/upload-retry",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": true,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "lint",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "IN_PROGRESS",
+      "conclusion": null,
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "e2e",
+      "status": "IN_PROGRESS",
+      "conclusion": null,
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "types",
+      "status": "IN_PROGRESS",
+      "conclusion": null,
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "deploy",
+      "status": "QUEUED",
+      "conclusion": null,
+      "startedAt": null,
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "docs",
+      "status": "WAITING",
+      "conclusion": null,
+      "startedAt": null,
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/app/pull/409": {
+   "at": 1792583997000,
+   "pr": {
+    "number": 409,
+    "title": "Release 4.12",
+    "url": "https://github.com/acme/app/pull/409",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "APPROVED",
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 12,
+    "deletions": 4,
+    "headRefName": "release/4.12",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "latestOpinionatedReviews": {
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "lint",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/web/pull/88": {
+   "at": 1792583996000,
+   "pr": {
+    "number": 88,
+    "title": "Keep the cart across a page refresh",
+    "url": "https://github.com/acme/web/pull/88",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": null,
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 64,
+    "deletions": 12,
+    "headRefName": "fix/cart-refresh",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "e2e",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "lint",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "types",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/web/pull/91": {
+   "at": 1792583995000,
+   "pr": {
+    "number": 91,
+    "title": "Bump vite to 6.2",
+    "url": "https://github.com/acme/web/pull/91",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "APPROVED",
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 18,
+    "deletions": 18,
+    "headRefName": "chore/vite-6.2",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "latestOpinionatedReviews": {
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 3,
+     "nodes": [
+      {
+       "isResolved": false,
+       "isOutdated": false
+      },
+      {
+       "isResolved": false,
+       "isOutdated": true
+      },
+      {
+       "isResolved": true,
+       "isOutdated": false
+      }
+     ]
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/web/pull/93": {
+   "at": 1792583994000,
+   "pr": {
+    "number": 93,
+    "title": "Put the promo banner behind a flag",
+    "url": "https://github.com/acme/web/pull/93",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 48,
+    "deletions": 30,
+    "headRefName": "feat/promo-flag",
+    "baseRefName": "main",
+    "author": {
+     "login": "alice"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "requestedReviewer": {
+        "__typename": "User",
+        "login": "alice"
+       }
+      }
+     ]
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/billing/pull/57": {
+   "at": 1792583993000,
+   "pr": {
+    "number": 57,
+    "title": "Prorate plan changes mid-cycle",
+    "url": "https://github.com/acme/billing/pull/57",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "mergeStateStatus": "DIRTY",
+    "mergeable": "CONFLICTING",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 340,
+    "deletions": 95,
+    "headRefName": "feat/proration",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "lint-docs",
+      "status": "COMPLETED",
+      "conclusion": "FAILURE",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     },
+     {
+      "__typename": "CheckRun",
+      "name": "lint",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/billing/pull/59": {
+   "at": 1792583992000,
+   "pr": {
+    "number": 59,
+    "title": "Right-align totals on invoice PDFs",
+    "url": "https://github.com/acme/billing/pull/59",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "CHANGES_REQUESTED",
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 22,
+    "deletions": 9,
+    "headRefName": "fix/pdf-totals",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 2,
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "bob"
+       },
+       "state": "CHANGES_REQUESTED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "latestOpinionatedReviews": {
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      },
+      {
+       "author": {
+        "__typename": "User",
+        "login": "bob"
+       },
+       "state": "CHANGES_REQUESTED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "isResolved": false,
+       "isOutdated": false
+      }
+     ]
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/docs/pull/23": {
+   "at": 1792583991000,
+   "pr": {
+    "number": 23,
+    "title": "Add a quickstart page",
+    "url": "https://github.com/acme/docs/pull/23",
+    "state": "MERGED",
+    "isDraft": false,
+    "reviewDecision": "APPROVED",
+    "mergeStateStatus": "UNKNOWN",
+    "mergeable": "MERGEABLE",
+    "mergedAt": "2026-10-21T11:48:00Z",
+    "closedAt": "2026-10-21T11:48:00Z",
+    "additions": 156,
+    "deletions": 3,
+    "headRefName": "docs/quickstart",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   }
+  },
+  "https://github.com/acme/infra/pull/140": {
+   "at": 1792583990000,
+   "pr": {
+    "number": 140,
+    "title": "Split the staging Terraform state",
+    "url": "https://github.com/acme/infra/pull/140",
+    "state": "OPEN",
+    "isDraft": false,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "MERGEABLE",
+    "mergedAt": null,
+    "closedAt": null,
+    "additions": 120,
+    "deletions": 88,
+    "headRefName": "chore/split-state",
+    "baseRefName": "main",
+    "author": {
+     "login": "octocat"
+    },
+    "autoMergeRequest": null,
+    "viewerCanEnableAutoMerge": false,
+    "viewerCanDisableAutoMerge": false,
+    "latestReviews": {
+     "totalCount": 2,
+     "nodes": [
+      {
+       "author": {
+        "__typename": "User",
+        "login": "carol"
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      },
+      {
+       "author": {
+        "__typename": "Bot",
+        "login": "copilot-pull-request-reviewer"
+       },
+       "state": "COMMENTED",
+       "submittedAt": "2026-10-07T11:50:00Z"
+      }
+     ]
+    },
+    "latestOpinionatedReviews": {
+     "nodes": []
+    },
+    "reviewRequests": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 60,
+     "nodes": [
+      {
+       "isResolved": false,
+       "isOutdated": false
+      },
+      {
+       "isResolved": false,
+       "isOutdated": true
+      },
+      {
+       "isResolved": true,
+       "isOutdated": false
+      }
+     ]
+    },
+    "repository": {
+     "squashMergeAllowed": true,
+     "rebaseMergeAllowed": true,
+     "mergeCommitAllowed": false,
+     "viewerDefaultMergeMethod": "SQUASH",
+     "viewerPermission": "WRITE"
+    },
+    "statusCheckRollup": [
+     {
+      "__typename": "CheckRun",
+      "name": "build",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "startedAt": "2026-10-07T11:50:00Z",
+      "workflow": "CI"
+     }
+    ]
+   },
+   "error": "gh: HTTP 502",
+   "failedSince": 1792583820000
+  },
+  "https://github.com/acme/web/pull/97": {
+   "at": 1792583940000,
+   "error": "Not found, or no gh account can see it",
+   "isUnreachable": true
+  }
+ },
+ "accounts": {
+  "acme": "octocat"
+ },
+ "rate": null,
+ "rates": {
+  "octocat": {
+   "graphql": {
+    "limit": 5000,
+    "remaining": 4620,
+    "resetAt": 1792585800000,
+    "seenAt": 1792584000000
+   },
+   "core": {
+    "limit": 5000,
+    "remaining": 4980,
+    "resetAt": 1792585800000,
+    "seenAt": 1792584000000
+   },
+   "askedAt": 1792583400000
+  }
+ },
+ "latest": {
+  "version": "0.14.1",
+  "checkedAt": 1792580400000
+ }
+}
