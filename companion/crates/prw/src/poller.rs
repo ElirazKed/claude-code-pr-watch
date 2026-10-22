@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use prw_core::accounts::every_login;
-use prw_core::batch::PrRef;
+use prw_core::batch::{PrRef, ref_from_url};
 use prw_core::config::{Config, SEARCH_CAP, Search, parse_config, search_text};
 use prw_core::poll::{
     LEASE_MS, Outcome, Pace, Round, claim, due, may_take, merge, release, should_poll,
@@ -49,6 +49,10 @@ pub const TICK_MS: i64 = 10_000;
 /// [`PRUNE_EVERY_MS`].
 const PRUNE_MS: i64 = 86_400_000;
 const PRUNE_EVERY_MS: i64 = 3_600_000;
+
+/// The most PRs new to `results.json` asked in one tick ([`Poller::ask_new`]): a config of
+/// broad searches comes in over a few ticks, not as one burst.
+const NEW_MAX: usize = 50;
 /// What `prw`'s own list is called.
 pub const MINE: &str = "My PRs";
 /// How a running TUI's own id (its session file, the lease's owner) begins: `prw-<id>`.
@@ -309,6 +313,10 @@ pub struct Poller<G: Gh, C: Clock> {
     kept: HashMap<String, SessionFile>,
     /// Other agents' watches (`prw watch`, `prw mcp`), announced each tick.
     watches: Watches,
+    /// The PRs asked at once as new to `results.json` (each once while it stays watched).
+    asked_new: HashSet<String>,
+    /// What this tick watches, for [`Poller::ask_new`]; empty where its round ran.
+    watched: Vec<String>,
 }
 
 impl<G: Gh, C: Clock> Poller<G, C> {
@@ -330,6 +338,8 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             pruned_at: 0,
             polled_at: None,
             kept: HashMap::new(),
+            asked_new: HashSet::new(),
+            watched: Vec::new(),
         }
     }
 
@@ -410,12 +420,16 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         self.watches.drop_finished(prs, at);
         self.watches.announce(Scope::All);
         let next_at = shared.as_ref().map_or(0, |s| s.next_at);
+        let watched: Vec<String> = self.watches.all().into_iter().map(|w| w.url).collect();
+        self.watched = unique_urls(own.iter().chain(&watched));
         if at >= next_at {
             let sessions = self.files.sessions(&mut self.kept);
             let lease = self.files.read_lease();
             if should_poll(&sessions, lease.as_ref(), next_at, at) && self.take_lease(at) {
                 self.round(&sessions, &own, at);
                 self.files.write_lease(&release(self.files.own()));
+                // The round asked what it had time for; the rest is the next one's.
+                self.watched.clear();
             }
         }
         PollerSaid {
@@ -534,6 +548,43 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         self.search_error = errors.into_iter().next();
     }
 
+    /// The PRs the last tick watched that `results.json` has no entry for yet, asked now
+    /// rather than at the next round (the mod's `fetchNow` for a new watch): a PR a search
+    /// found, or an agent watched, shows within a tick. Run after the tick's lists are sent,
+    /// so they show at once; at most [`NEW_MAX`] a tick, the rest the next. Each is asked once
+    /// while it stays watched; one that fails waits for the round like any other.
+    pub fn ask_new(&mut self) {
+        let urls = std::mem::take(&mut self.watched);
+        if urls.is_empty() {
+            return;
+        }
+        let watched: HashSet<&str> = urls.iter().map(String::as_str).collect();
+        self.asked_new.retain(|url| watched.contains(url.as_str()));
+        let raw = self.files.read_raw().unwrap_or_default();
+        let none = Map::new();
+        let prs = raw.get("prs").and_then(Value::as_object).unwrap_or(&none);
+        let refs: Vec<PrRef> = urls
+            .iter()
+            .filter(|url| !prs.contains_key(url.as_str()))
+            .filter_map(|url| ref_from_url(url))
+            .filter(|r| !self.asked_new.contains(&r.url))
+            .take(NEW_MAX)
+            .collect();
+        self.asked_new.extend(refs.iter().map(|r| r.url.clone()));
+        if refs.is_empty() {
+            return;
+        }
+        let mut ctx = Ctx {
+            gh: &self.gh,
+            clock: &self.clock,
+            auth: &mut self.auth,
+            log: Some(self.files.log_path()),
+        };
+        // Asked unbidden, unlike a refresh the person pressed: a login low on points is left
+        // to the round, as the round leaves it.
+        fetch_now(&self.files, &mut ctx, &refs, true);
+    }
+
     /// One call of searches, as the login whose `token` this is.
     fn ask(&self, asks: &[Ask], token: &str) -> Result<prw_core::search::Found, String> {
         let aliases: Vec<&str> = asks.iter().map(|a| a.alias.as_str()).collect();
@@ -639,6 +690,16 @@ fn unique_urls<'a>(urls: impl IntoIterator<Item = &'a String>) -> Vec<String> {
 /// merged into `results.json` as it stands just before the write, with none of a round's
 /// bookkeeping. Held by a secondary limit, it asks nothing: the next round does.
 pub fn refresh<G: Gh, C: Clock>(files: &Files, ctx: &mut Ctx<'_, G, C>, refs: &[PrRef]) {
+    fetch_now(files, ctx, refs, false);
+}
+
+/// [`refresh`], skipping the logins low on points where `is_wary`.
+fn fetch_now<G: Gh, C: Clock>(
+    files: &Files,
+    ctx: &mut Ctx<'_, G, C>,
+    refs: &[PrRef],
+    is_wary: bool,
+) {
     let at = ctx.clock.now();
     let before_raw = files.read_raw().unwrap_or_default();
     let before = shared_of(before_raw.clone());
@@ -646,7 +707,14 @@ pub fn refresh<G: Gh, C: Clock>(files: &Files, ctx: &mut Ctx<'_, G, C>, refs: &[
         return;
     }
     let mut accounts = before.accounts.clone();
-    let fetched = ctx.fetch_refs(refs, &mut accounts, before.rates, at, at + GH_MS * 2, false);
+    let fetched = ctx.fetch_refs(
+        refs,
+        &mut accounts,
+        before.rates,
+        at,
+        at + GH_MS * 2,
+        is_wary,
+    );
     let outcome = Outcome {
         found: fetched.found,
         failed: fetched.errors,
@@ -686,6 +754,7 @@ where
             if send.send(poller.tick()).is_err() {
                 break;
             }
+            poller.ask_new();
             // Sleep out the tick in short steps, so a stop is seen soon.
             while !stop.load(Ordering::Relaxed)
                 && poller.clock.now().saturating_sub(started) < TICK_MS
@@ -816,9 +885,13 @@ mod tests {
     fn a_live_mod_polls_and_prw_only_announces() {
         let dir = Dir::new("mod");
         mod_session(&dir.0, &[THEIRS]);
-        // The mod's last round, its next one not yet due.
+        // The mod's last round, its next one not yet due, which asked prw's PR too.
         let at = now();
-        let results = json!({"fetchedAt": at - 5_000, "nextAt": at + 15_000, "prs": {}});
+        let results = json!({
+            "fetchedAt": at - 5_000,
+            "nextAt": at + 15_000,
+            "prs": {MINE_URL: {"at": at - 5_000}},
+        });
         fs::write(dir.0.join("results.json"), results.to_string()).unwrap();
         let files = Files::new(dir.0.clone(), "prw-test".into());
         let mut poller = Poller::new(files, gh(), FakeClock::new(at, 1));
@@ -836,6 +909,61 @@ mod tests {
                 .iter()
                 .any(|c| c.argv.iter().any(|a| a.contains("...pr")))
         );
+    }
+
+    #[test]
+    fn a_pr_new_to_the_file_is_asked_at_once_and_only_once() {
+        let dir = Dir::new("new");
+        mod_session(&dir.0, &[THEIRS]);
+        let at = now();
+        let results = json!({"fetchedAt": at - 5_000, "nextAt": at + 15_000, "prs": {}});
+        fs::write(dir.0.join("results.json"), results.to_string()).unwrap();
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(at, 1));
+        let batches = |poller: &Poller<FakeGh, FakeClock>| {
+            poller
+                .gh
+                .calls
+                .borrow()
+                .iter()
+                .filter(|c| c.argv.iter().any(|a| a.contains("...pr")))
+                .count()
+        };
+        // The tick says what it found first; the ask comes after.
+        let said = poller.tick();
+        assert_eq!(batches(&poller), 0);
+        poller.ask_new();
+        // prw's own PR shows now; the mod's waits for its round, which keeps its time.
+        let after = json_at(dir.0.join("results.json"));
+        assert!(after["prs"][MINE_URL]["pr"].is_object(), "{after}");
+        assert!(after["prs"].get(THEIRS).is_none());
+        assert_eq!(after["nextAt"], results["nextAt"]);
+        assert_eq!(after["fetchedAt"], results["fetchedAt"]);
+        assert_eq!(said.polled_at, None);
+        assert_eq!(batches(&poller), 1);
+        // A PR that stays new (its entry gone, say) isn't asked again each tick.
+        fs::write(dir.0.join("results.json"), results.to_string()).unwrap();
+        poller.tick();
+        poller.ask_new();
+        assert_eq!(batches(&poller), 1);
+    }
+
+    #[test]
+    fn new_prs_come_in_a_few_a_tick_and_not_after_a_round() {
+        let dir = Dir::new("burst");
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1));
+        let many: Vec<String> = (0..NEW_MAX + 10).map(team_url).collect();
+        poller.watched.clone_from(&many);
+        poller.ask_new();
+        assert_eq!(poller.asked_new.len(), NEW_MAX);
+        poller.watched.clone_from(&many);
+        poller.ask_new();
+        assert_eq!(poller.asked_new.len(), NEW_MAX + 10);
+        // A tick whose round ran leaves nothing to ask after it.
+        let said = poller.tick();
+        assert!(said.polled_at.is_some());
+        assert_eq!(poller.watched, Vec::<String>::new());
     }
 
     #[test]
