@@ -118,6 +118,42 @@ impl Cursor<'_> {
     }
 }
 
+/// The largest time a JS `Date` holds (ms): `toISOString` throws past it.
+const MAX_DATE_MS: i64 = 8_640_000_000_000_000;
+
+/// A time (ms) as JS `Date.prototype.toISOString` writes it, `2026-10-07T11:50:00.000Z`, for
+/// the years 0 to 9999 that need no sign; `None` outside them.
+#[must_use]
+pub fn format_iso(ms: i64) -> Option<String> {
+    // `unsigned_abs`: `i64::MIN.abs()` overflows, and a saturated `as i64` cast makes one.
+    if ms.unsigned_abs() > MAX_DATE_MS.unsigned_abs() {
+        return None;
+    }
+    let (days, ms_of_day) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    let (year, month, day) = civil_from_days(days);
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+    let (hour, minute) = (ms_of_day / 3_600_000, ms_of_day / 60_000 % 60);
+    let (second, milli) = (ms_of_day / 1_000 % 60, ms_of_day % 1_000);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milli:03}Z"
+    ))
+}
+
+/// A proleptic Gregorian date from days since 1970-01-01 (Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
 /// Days from 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's `days_from_civil`).
 /// A day past the month's end counts on into the next.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -132,7 +168,27 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_iso;
+    use super::{format_iso, parse_iso};
+
+    #[test]
+    fn writes_what_to_iso_string_writes() {
+        // Each from node's `new Date(ms).toISOString()`.
+        assert_eq!(format_iso(0).as_deref(), Some("1970-01-01T00:00:00.000Z"));
+        assert_eq!(
+            format_iso(1_791_378_000_000).as_deref(),
+            Some("2026-10-07T13:00:00.000Z")
+        );
+        assert_eq!(
+            format_iso(1_709_164_800_123).as_deref(),
+            Some("2024-02-29T00:00:00.123Z")
+        );
+        assert_eq!(format_iso(-1).as_deref(), Some("1969-12-31T23:59:59.999Z"));
+        assert_eq!(format_iso(i64::MAX), None);
+        assert_eq!(format_iso(i64::MIN), None);
+        for ms in [0, 1_791_373_800_123, 951_782_400_000, 253_402_300_799_999] {
+            assert_eq!(format_iso(ms).as_deref().and_then(parse_iso), Some(ms));
+        }
+    }
 
     #[test]
     fn reads_what_date_parse_reads() {
