@@ -141,9 +141,7 @@ impl<G: Gh, C: Clock> Runner<G, C> {
         self.refresh(url);
         // A login that can't see the PR: the fetch found it as another, and kept that one.
         match self.accounts().remove(&owner) {
-            Some(kept) if kept != login => Outcome::SwitchFailed(format!(
-                "{login} can't see it: {owner}'s PRs stay as {kept}"
-            )),
+            Some(kept) if kept != login => Outcome::PutBack { owner, login, kept },
             _ => Outcome::Switched { owner, login },
         }
     }

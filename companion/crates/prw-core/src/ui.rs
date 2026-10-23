@@ -12,8 +12,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::accounts::{Logins, login_for, next_login};
-use crate::act::{Acts, Ask, Done, Job, Offer, Target};
+use crate::accounts::{Logins, login_for, switch_to};
+use crate::act::{Acts, Done, Job, Offer, Target};
 use crate::layout::{Layout, layout};
 use crate::order::{Tracked, order};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
@@ -498,8 +498,8 @@ impl Model {
 
     /// The PR an action key acts on: the one an open question is about, else the selected
     /// one.
-    fn target(&self, ask: Option<&Ask>) -> Option<Target<'_>> {
-        let row = match ask {
+    fn target(&self, acts: &Acts) -> Option<Target<'_>> {
+        let row = match acts.ask() {
             Some(ask) => self
                 .list()
                 .rows
@@ -508,10 +508,11 @@ impl Model {
                 .find(|r| r.pr.url == ask.url())?,
             None => self.selected_row()?,
         };
-        Some(self.target_of(row))
+        Some(self.target_of(row, acts))
     }
 
-    fn target_of<'a>(&'a self, row: &'a Row) -> Target<'a> {
+    /// `acts`: the model's, apart while a key acts.
+    fn target_of<'a>(&'a self, row: &'a Row, acts: &Acts) -> Target<'a> {
         let owner = row.repo.split('/').next().unwrap_or_default();
         let logins = self.poller.as_ref().map(|p| &p.logins);
         let none = BTreeMap::new();
@@ -520,7 +521,7 @@ impl Model {
         Target {
             row,
             pr: self.entry(&row.pr.url).and_then(|e| e.pr.as_ref()),
-            next: logins.and_then(|l| next_login(l, &login)),
+            next: logins.and_then(|l| switch_to(l, &login, acts.tried(owner))),
             login,
         }
     }
@@ -529,7 +530,7 @@ impl Model {
     /// worth saying).
     #[must_use]
     pub fn login_of(&self, row: &Row) -> Option<String> {
-        let target = self.target_of(row);
+        let target = self.target_of(row, &self.acts);
         target.next.is_some().then_some(target.login)
     }
 
@@ -537,7 +538,7 @@ impl Model {
     #[must_use]
     pub fn offers(&self) -> Vec<Offer> {
         self.selected_row()
-            .map(|row| self.acts.offers(&self.target_of(row)))
+            .map(|row| self.acts.offers(&self.target_of(row, &self.acts)))
             .unwrap_or_default()
     }
 
@@ -614,7 +615,7 @@ impl Model {
         if !self.is_help {
             // Taken out while they act, so the target borrows the rest without a copy.
             let mut acts = std::mem::take(&mut self.acts);
-            let target = self.target(acts.ask());
+            let target = self.target(&acts);
             let cmds = acts.key(key, target, self.now);
             acts.clamp_view(usize::from(self.width), usize::from(self.height));
             self.acts = acts;

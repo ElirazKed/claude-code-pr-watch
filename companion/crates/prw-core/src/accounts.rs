@@ -90,6 +90,23 @@ pub fn next_login(logins: &Logins, current: &str) -> Option<String> {
     Some(all[at.map_or(0, |i| (i + 1) % all.len())].clone())
 }
 
+/// The login `a` moves an owner to from `current`: after `tried`, the one it moved to last,
+/// where the fetch put the owner back (that login couldn't see its PRs), so each press reaches
+/// a login not tried yet; round to `current`, the one after it. `None` with fewer than two.
+#[must_use]
+pub fn switch_to(logins: &Logins, current: &str, tried: Option<&str>) -> Option<String> {
+    // A tried login since logged out has no place in the order: go on from `current`.
+    let from = tried
+        .filter(|&t| t != current && every_login(logins).iter().any(|l| l == t))
+        .unwrap_or(current);
+    let next = next_login(logins, from)?;
+    if next == current {
+        next_login(logins, current)
+    } else {
+        Some(next)
+    }
+}
+
 /// What a fetch learned about `accounts`: the owners whose login it set or changed, so a
 /// writer merges those alone and a login set meanwhile (a switch) isn't put back.
 #[must_use]
@@ -390,6 +407,22 @@ mod tests {
     }
 
     #[test]
+    fn a_login_put_back_is_passed_over_on_the_next_press() {
+        let known = logins("a", &["b", "c"]);
+        assert_eq!(switch_to(&known, "a", None).as_deref(), Some("b"));
+        // b couldn't see them, so the owner is back on a: c next, not b again.
+        assert_eq!(switch_to(&known, "a", Some("b")).as_deref(), Some("c"));
+        // c couldn't either: round past a to b.
+        assert_eq!(switch_to(&known, "a", Some("c")).as_deref(), Some("b"));
+        // c took: on from c.
+        assert_eq!(switch_to(&known, "c", Some("c")).as_deref(), Some("a"));
+        assert_eq!(switch_to(&logins("a", &[]), "a", Some("b")), None);
+        // A tried login since logged out: on from the current one, not from the first.
+        let known = logins("a", &["b", "c", "d"]);
+        assert_eq!(switch_to(&known, "c", Some("x")).as_deref(), Some("d"));
+    }
+
+    #[test]
     fn a_fetch_hands_on_only_what_it_learned() {
         let before: BTreeMap<String, String> = [
             ("acme".into(), "hubot".into()),
@@ -428,6 +461,23 @@ mod tests {
             let mut every = all.clone();
             every.sort();
             proptest::prop_assert_eq!(seen, every);
+        }
+
+        #[test]
+        fn pressing_while_every_switch_is_put_back_reaches_every_other_login(
+            others in proptest::collection::btree_set("[a-e]", 1..5),
+        ) {
+            let others: Vec<&str> = others.iter().map(String::as_str).collect();
+            let known = logins("z", &others);
+            let mut tried: Option<String> = None;
+            let mut reached = std::collections::BTreeSet::new();
+            for _ in 0..others.len() {
+                let to = switch_to(&known, "z", tried.as_deref()).unwrap();
+                proptest::prop_assert_ne!(to.as_str(), "z");
+                reached.insert(to.clone());
+                tried = Some(to);
+            }
+            proptest::prop_assert_eq!(reached.len(), others.len());
         }
 
         #[test]
