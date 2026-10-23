@@ -6,6 +6,10 @@
 //! (`poller`) watches every gh login's own open PRs and takes the poll when no mod is
 //! polling, so `prw` is of use without Claude running at all.
 //!
+//! A click goes to the model as what the view drew there (`view::Hits`): a list, a row, a key's
+//! hint, an answer. The mouse is the terminal's again while the prompt pane shows, so a drag
+//! selects its text.
+//!
 //! The action keys (merge, comment, hand-offs, the browser) give the model's commands, which
 //! the loop carries out: a job on a thread of its own (`actions`), a copy or a browser at once
 //! (`desktop`). What came of each goes back to the model as a message.
@@ -26,6 +30,7 @@ mod watches;
 mod render_tests;
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::process::{self, ExitCode};
@@ -40,13 +45,14 @@ use prw_core::ui::{Cmd, Key, Model, Msg, PollerSaid, update};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::crossterm::execute;
+use ratatui::crossterm::{Command as Escape, execute};
 
 use crate::actions::Runner;
 use crate::cache::{Reader, default_config, default_dir, ms_of};
 use crate::poller::{ConfigFile, Files, Poller};
+use crate::view::Hits;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -94,7 +100,9 @@ Options:
 
 Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q quit.
 On the selected PR: m merge (asks first), c comment, f hand off to an agent (copies
-the prompt), o open in the browser, v show the prompt last copied.
+the prompt), o open in the browser, a switch its gh login, v show the prompt last copied.
+A click picks a list or a PR, or presses the key it shows (a hint, an action, an
+answer); the wheel moves in the pane under it. While v shows, the mouse selects text.
 ";
 
 /// How to run.
@@ -325,6 +333,12 @@ fn run(options: &Options) -> io::Result<()> {
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     // Pasted text comes whole, newlines too, rather than as keys that might act.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
+    // A panic gives the mouse back too, before ratatui's hook restores the rest.
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), Clicks(false));
+        restore(info);
+    }));
     let stop = Arc::new(AtomicBool::new(false));
     let said = demo.or_else(|| {
         files.clone().map(|files| {
@@ -347,7 +361,7 @@ fn run(options: &Options) -> io::Result<()> {
         &hands,
         &finished,
     );
-    let _ = execute!(io::stdout(), DisableBracketedPaste);
+    let _ = execute!(io::stdout(), Clicks(false), DisableBracketedPaste);
     // Its PRs are no longer watched: the session file goes, and a held lease is given back.
     // A tick still running dies with the process.
     stop.store(true, Ordering::Relaxed);
@@ -431,7 +445,9 @@ fn event_loop(
     let ctx = view::Ctx {
         dir: &shown,
         home: &home,
+        beat: 0,
     };
+    let started = Instant::now();
     let size = terminal.size()?;
     let (mut model, _) = feed(
         Model::new(size.width, size.height),
@@ -439,11 +455,27 @@ fn event_loop(
         hands,
     );
     let mut last_tick = Instant::now();
+    let mut hits = Hits::default();
+    let mut is_clicking = false;
     loop {
-        terminal.draw(|frame| view::render(frame, &model, ctx))?;
+        // The mouse is prw's but while the prompt pane shows, to select from.
+        let wants_clicks = model.acts().view().is_none();
+        if wants_clicks != is_clicking {
+            // As with the paste mode, a terminal that won't take it is no reason to stop.
+            let _ = execute!(io::stdout(), Clicks(wants_clicks));
+            is_clicking = wants_clicks;
+        }
+        let beat = started.elapsed().as_millis() / view::BEAT.as_millis();
+        let ctx = view::Ctx {
+            beat: u64::try_from(beat).unwrap_or(0),
+            ..ctx
+        };
+        terminal.draw(|frame| hits = view::render(frame, &model, ctx))?;
+        let drawn_at = Instant::now();
+        let is_animated = view::is_animated(&model);
         // Wait for a key, a paste, a resize or a finished job until the next tick; only a
-        // message redraws. A tick that is due comes first, so a stream of keys can't hold it
-        // off.
+        // message redraws, or, while something on screen moves, the next beat. A tick that is
+        // due comes first, so a stream of keys can't hold it off.
         let msgs: Vec<Msg> = loop {
             if let Ok(done) = finished.try_recv() {
                 break vec![Msg::Done(done)];
@@ -461,9 +493,14 @@ fn event_loop(
                     .chain([Msg::Tick(now)])
                     .collect();
             }
-            if event::poll(timeout.min(SLICE))? {
+            let beat = is_animated.then(|| view::BEAT.saturating_sub(drawn_at.elapsed()));
+            if beat.is_some_and(|b| b.is_zero()) {
+                break Vec::new();
+            }
+            if event::poll(timeout.min(SLICE).min(beat.unwrap_or(SLICE)))? {
                 let msg = match event::read()? {
                     Event::Key(key) => key_of(key).map(Msg::Key),
+                    Event::Mouse(mouse) => mouse_of(mouse, &hits),
                     Event::Paste(text) => Some(Msg::Paste(text)),
                     Event::Resize(width, height) => Some(Msg::Resize(width, height)),
                     _ => None,
@@ -478,6 +515,32 @@ fn event_loop(
             return Ok(());
         }
         model = next;
+    }
+}
+
+/// Clicks and the wheel reported (`true`), or not: the X10 buttons in SGR coordinates, no
+/// motion, so a mouse moving costs nothing.
+struct Clicks(bool);
+
+impl Escape for Clicks {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str(if self.0 {
+            "\x1b[?1000h\x1b[?1006h"
+        } else {
+            "\x1b[?1006l\x1b[?1000l"
+        })
+    }
+}
+
+/// A click or the wheel as the model takes it, from where the screen drew what: a left click
+/// on what it hit, the wheel a row at a time in the pane under it.
+fn mouse_of(mouse: MouseEvent, hits: &Hits) -> Option<Msg> {
+    let (x, y) = (mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => hits.at(x, y).map(Msg::Click),
+        MouseEventKind::ScrollDown => hits.pane_at(x, y).map(|pane| Msg::Scroll(pane, 1)),
+        MouseEventKind::ScrollUp => hits.pane_at(x, y).map(|pane| Msg::Scroll(pane, -1)),
+        _ => None,
     }
 }
 

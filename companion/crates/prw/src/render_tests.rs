@@ -4,13 +4,13 @@
 use proptest::prelude::*;
 use prw_core::act::{Done, Outcome};
 use prw_core::handoff::Kind;
-use prw_core::ui::{Key, Model, Msg, PollerSaid, Session, update};
+use prw_core::ui::{Focus, Hit, Key, Model, Msg, PollerSaid, Session, update};
 use prw_core::{parse_session, parse_shared};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use unicode_width::UnicodeWidthStr;
 
-use crate::view::{Ctx, render};
+use crate::view::{Ctx, Hits, is_animated, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
 const SEARCHES: &str = include_str!("../../../demo/searches.json");
@@ -36,6 +36,7 @@ const SESSIONS: [(&str, &str); 4] = [
 const CTX: Ctx<'static> = Ctx {
     dir: "companion/demo",
     home: "/home/ada",
+    beat: 0,
 };
 
 /// The demo, 12 s after its round, every session live.
@@ -66,9 +67,21 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>) -> Model {
 
 /// The screen's text, one line per row.
 fn screen(model: &Model, width: u16, height: u16) -> String {
+    drawn(model, width, height).0
+}
+
+/// The screen's text, and where its clicks land.
+fn drawn(model: &Model, width: u16, height: u16) -> (String, Hits) {
+    drawn_at(model, width, height, 0)
+}
+
+/// The screen's text and its clicks, at the animation's `beat`.
+fn drawn_at(model: &Model, width: u16, height: u16, beat: u64) -> (String, Hits) {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+    let mut hits = Hits::default();
+    let ctx = Ctx { beat, ..CTX };
     terminal
-        .draw(|frame| render(frame, model, CTX))
+        .draw(|frame| hits = render(frame, model, ctx))
         .expect("draw");
     let buffer = terminal.backend().buffer();
     let mut out = String::new();
@@ -86,7 +99,34 @@ fn screen(model: &Model, width: u16, height: u16) -> String {
         }
         out.push('\n');
     }
-    out
+    (out, hits)
+}
+
+/// The cell where `word` first shows on screen row `y`.
+fn cell_of(text: &str, y: usize, word: &str) -> (u16, u16) {
+    let line = text.lines().nth(y).expect("a row");
+    let at = line
+        .find(word)
+        .unwrap_or_else(|| panic!("no {word:?} in {line:?}"));
+    let x = u16::try_from(UnicodeWidthStr::width(&line[..at])).expect("a column");
+    (x, u16::try_from(y).expect("a row"))
+}
+
+/// The first screen row that says `word`.
+fn row_saying(text: &str, word: &str) -> usize {
+    text.lines()
+        .position(|l| l.contains(word))
+        .unwrap_or_else(|| panic!("no {word:?} on\n{text}"))
+}
+
+/// A click where `word` shows on row `y`, as the loop gives it to the model.
+fn click(model: Model, y: usize, word: &str) -> Model {
+    let (text, hits) = drawn(&model, model.size().0, model.size().1);
+    let (x, y) = cell_of(&text, y, word);
+    let hit = hits
+        .at(x, y)
+        .unwrap_or_else(|| panic!("{word:?} takes no click"));
+    feed(model, [Msg::Click(hit)])
 }
 
 fn assert_says(text: &str, words: &[&str]) {
@@ -268,6 +308,101 @@ proptest! {
         let _ = screen(&model, width, height);
         // And an empty model, before anything was read.
         let _ = screen(&Model::new(width, height), width, height);
+    }
+}
+
+#[test]
+fn a_click_picks_a_row_then_a_hint_asks_and_an_answer_closes() {
+    let model = demo(120, 30);
+    let text = screen(&model, 120, 30);
+    let model = click(model, row_saying(&text, "#409"), "#409");
+    assert_eq!(model.selected_row().map(|r| r.pr.number), Some(409));
+    // The hints' merge, on the bottom row.
+    let model = click(model, 29, "merge");
+    let (text, hits) = drawn(&model, 120, 30);
+    assert_says(&text, &["y yes", "n no"]);
+    // While it asks, only its answers take a click.
+    let (x, y) = cell_of(&text, row_saying(&text, "#57"), "#57");
+    assert_eq!(hits.at(x, y), None);
+    let model = click(model, row_saying(&text, "n no"), "n no");
+    assert!(model.acts().ask().is_none());
+}
+
+#[test]
+fn a_click_picks_a_list_and_the_wheel_moves_where_it_is() {
+    let model = demo(120, 30);
+    let text = screen(&model, 120, 30);
+    // The lists pane's, not the card's watchers.
+    let model = click(model, row_saying(&text, "│ ◇ billing"), "billing");
+    assert_eq!(model.list().label, "billing");
+    assert_eq!(model.focus(), Focus::Lists);
+    let (text, hits) = drawn(&model, 120, 30);
+    let (x, y) = cell_of(&text, row_saying(&text, "LISTS"), "LISTS");
+    assert_eq!(hits.pane_at(x, y), Some(Focus::Lists));
+    let (x, y) = cell_of(&text, row_saying(&text, "CHECKS"), "CHECKS");
+    assert_eq!(hits.pane_at(x, y), Some(Focus::Prs));
+    // The strip's lists, narrower.
+    let model = demo(84, 30);
+    let model = click(model, 1, "billing");
+    assert_eq!(model.list().label, "billing");
+}
+
+#[test]
+fn a_moving_pr_spins_and_a_still_one_doesnt() {
+    let model = demo(120, 30);
+    assert!(is_animated(&model));
+    assert!(!is_animated(&Model::new(120, 30)));
+    let first = drawn_at(&model, 120, 30, 0).0;
+    let next = drawn_at(&model, 120, 30, 1).0;
+    // #412's CI runs, #301 is loading: each its own frame (its number sets it apart).
+    assert_says(&first, &["⠹ #412", "⠙ #301"]);
+    assert_says(&next, &["⠸ #412", "⠹ #301"]);
+    // #97 couldn't be read, #57 conflicts: nothing under way.
+    assert_says(&next, &["◌ #97", "⚠ #57"]);
+    // The selected PR's step turns too: #412's CI.
+    let model = feed(model, to_row(7));
+    assert_eq!(model.selected_row().map(|r| r.pr.number), Some(412));
+    assert_says(&drawn_at(&model, 120, 30, 0).0, &["⠹ CI"]);
+}
+
+#[test]
+fn a_click_anywhere_closes_the_help() {
+    let model = feed(demo(84, 30), [Msg::Key(Key::Char('?'))]);
+    let (_, hits) = drawn(&model, 84, 30);
+    assert_eq!(hits.at(0, 0), Some(Hit::Key(Key::Char('?'))));
+    assert!(!feed(model, [Msg::Click(Hit::Key(Key::Char('?')))]).is_help());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(60))]
+
+    /// Every row a click lands on shows that row's PR, and every list its name.
+    #[test]
+    fn clicks_land_on_what_the_screen_shows(
+        width in 40_u16..=200,
+        height in 8_u16..=60,
+        tabs in 0_usize..4,
+    ) {
+        let model = feed(demo(width, height), std::iter::repeat_n(Msg::Key(Key::Tab), tabs));
+        let (text, hits) = drawn(&model, width, height);
+        let lines: Vec<&str> = text.lines().collect();
+        for y in 0..height {
+            for x in 0..width {
+                let line = lines[usize::from(y)];
+                match hits.at(x, y) {
+                    Some(Hit::Row(i)) => {
+                        let number = format!("#{}", model.list().rows[i].pr.number);
+                        prop_assert!(line.contains(&number), "{number} not on {line:?}");
+                    }
+                    Some(Hit::List(i)) => {
+                        let label = &model.lists()[i].label;
+                        let head: String = label.chars().take(2).collect();
+                        prop_assert!(line.contains(&head), "{label} not on {line:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

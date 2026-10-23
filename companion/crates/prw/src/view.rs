@@ -1,5 +1,6 @@
 //! Drawing the model: one function per pane, into the areas `prw_core::panes` gives. Nothing
-//! here decides anything the model hasn't; it lays out words the core worked out.
+//! here decides anything the model hasn't; it lays out words the core worked out, and notes
+//! where it put what a click can land on ([`Hits`]).
 
 use prw_core::act::{Ask, Copied, Look, Tone, prompt_body};
 use prw_core::gh::{GhPr, PrState};
@@ -12,9 +13,9 @@ use prw_core::status::{
     latest_runs, mergeable_of, meta_of, step_index, verdict_of,
 };
 use prw_core::time::parse_iso;
-use prw_core::ui::{Focus, List, ListId, Model, Poll, Row, agents_live, ago};
+use prw_core::ui::{Focus, Hit, Key, List, ListId, Model, Poll, Row, agents_live, ago};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
@@ -32,10 +33,164 @@ pub struct Ctx<'a> {
     pub dir: &'a str,
     /// The home directory, which a session's `cwd` shows as `~`; "" for none.
     pub home: &'a str,
+    /// The animation's frame, one every [`BEAT`]: what turns the spinners and runs the shine.
+    pub beat: u64,
 }
 
-/// Draws the whole screen.
-pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) {
+/// How long each frame of the animation shows, as the mod's (`FRAME_MS`).
+pub const BEAT: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// The spinner's frames, the mod's (`BRAILLE`).
+const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Whether a row's PR moves on screen: something under way, and not a read that failed.
+fn is_spinning(row: &Row) -> bool {
+    row.pr.derived.is_moving && !(row.pr.error.is_some() && row.pr.state.is_none())
+}
+
+/// Whether anything on screen moves (a PR the list shows, a job's spinner on the status
+/// line), so the loop draws a frame every [`BEAT`]. Nothing does under the prompt pane or on a
+/// screen too narrow to draw.
+pub fn is_animated(model: &Model) -> bool {
+    let acts = model.acts();
+    if acts.view().is_some() || model.layout() == Layout::TooNarrow {
+        return false;
+    }
+    let is_busy_shown =
+        acts.ask().is_none() && acts.toast().is_none() && acts.busy().next().is_some();
+    is_busy_shown || model.list().rows.iter().any(is_spinning)
+}
+
+/// `from` moved `share` (0..=1) of the way to `to`, where both are RGB.
+fn mix(from: Color, to: Color, share: f64) -> Color {
+    let (Color::Rgb(r, g, b), Color::Rgb(r2, g2, b2)) = (from, to) else {
+        return from;
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "between two bytes, so a byte"
+    )]
+    let step = |one: u8, other: u8| {
+        (f64::from(one) + (f64::from(other) - f64::from(one)) * share).round() as u8
+    };
+    Color::Rgb(step(r, r2), step(g, g2), step(b, b2))
+}
+
+/// The spinner at `beat`, its PR's `seed` (its number) setting it apart from the others' (the
+/// mod's `spinnerCell`): the frames in turn, `colour` pulsing toward white.
+fn spinner(beat: u64, seed: u64, colour: Color) -> Span<'static> {
+    let at = beat.wrapping_add(seed);
+    let glyph = SPIN[usize::try_from(at % 10).unwrap_or(0)];
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a phase: precision past 2^52 frames doesn't matter"
+    )]
+    let pulse = f64::midpoint((at as f64 / 3.0).sin(), 1.0);
+    span(glyph, bold(mix(colour, FG, pulse * 0.6)))
+}
+
+/// Where the screen drew what a click can land on. A later zone lies over an earlier one (a
+/// list over its pane, the help over everything). While a question is open, only its answers
+/// take clicks.
+#[derive(Debug, Default)]
+pub struct Hits {
+    zones: Vec<(Rect, Hit)>,
+    is_asking: bool,
+}
+
+impl Hits {
+    /// What a click on this cell lands on.
+    pub fn at(&self, x: u16, y: u16) -> Option<Hit> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(Position::new(x, y)))
+            .map(|&(_, hit)| hit)
+    }
+
+    /// The pane under this cell, for the wheel.
+    pub fn pane_at(&self, x: u16, y: u16) -> Option<Focus> {
+        self.zones.iter().rev().find_map(|&(r, hit)| match hit {
+            Hit::Pane(pane) if r.contains(Position::new(x, y)) => Some(pane),
+            _ => None,
+        })
+    }
+
+    fn add(&mut self, at: Rect, hit: Hit) {
+        if !self.is_asking && !at.is_empty() {
+            self.zones.push((at, hit));
+        }
+    }
+
+    /// The spots of a line drawn across `line` (one row): each at its cells, cut to the row.
+    fn spots(&mut self, line: Rect, spots: Spots) {
+        for (x, width, hit) in spots {
+            let at = Rect::new(line.x.saturating_add(cut(x)), line.y, cut(width), 1);
+            self.add(at.intersection(line), hit);
+        }
+    }
+
+    /// The open question's answers, which alone take clicks while it is open.
+    fn answers(&mut self, line: Rect, spots: Spots) {
+        self.is_asking = false;
+        self.spots(line, spots);
+        self.is_asking = true;
+    }
+}
+
+/// Where on a line its clickable spans lie: their first cell, how many, and what they hit.
+type Spots = Vec<(usize, usize, Hit)>;
+
+/// A line's spans, and the spots among them a click can land on.
+#[derive(Default)]
+struct Marked {
+    spans: Vec<Span<'static>>,
+    spots: Spots,
+}
+
+impl Marked {
+    fn width(&self) -> usize {
+        self.spans.iter().map(Span::width).sum()
+    }
+
+    fn push(&mut self, span: Span<'static>) {
+        self.spans.push(span);
+    }
+
+    /// `spans`, a click on any of them landing on `hit`.
+    fn hit(&mut self, spans: impl IntoIterator<Item = Span<'static>>, hit: Hit) {
+        let x = self.width();
+        self.spans.extend(spans);
+        self.spots.push((x, self.width() - x, hit));
+    }
+
+    fn done(self) -> (Line<'static>, Spots) {
+        (Line::from(self.spans), self.spots)
+    }
+}
+
+/// A cell count as the screen takes it (no screen is 65536 cells wide).
+fn cut(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// The row `i` of `r` (counted from its top), where `r` has it.
+fn row_of(r: Rect, i: usize) -> Option<Rect> {
+    (i < usize_of(r.height)).then(|| Rect::new(r.x, r.y + cut(i), r.width, 1))
+}
+
+/// An offer's key, as the model takes it.
+fn offer_key(key: &str) -> Option<Hit> {
+    key.chars().next().map(|c| Hit::Key(Key::Char(c)))
+}
+
+/// Draws the whole screen, and says where what a click can land on went.
+pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
+    let mut hits = Hits {
+        zones: Vec::new(),
+        is_asking: model.acts().ask().is_some(),
+    };
     let area = frame.area();
     frame
         .buffer_mut()
@@ -46,26 +201,34 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) {
         if r.is_empty() {
             continue;
         }
+        let h = &mut hits;
         match pane {
             Pane::Header => header(frame, r, model, chosen),
-            Pane::Lists => lists_pane(frame, r, model),
-            Pane::Strip => strip(frame, r, model, chosen),
-            Pane::Table => table(frame, r, model, chosen, ctx),
-            Pane::Detail if chosen == Layout::Side => card(frame, r, model),
-            Pane::Detail => detail(frame, r, model),
-            Pane::Status => status(frame, r, model, ctx),
-            Pane::Hints => hints(frame, r, chosen),
+            Pane::Lists => lists_pane(frame, r, model, h),
+            Pane::Strip => strip(frame, r, model, chosen, h),
+            Pane::Table => table(frame, r, model, chosen, ctx, h),
+            Pane::Detail if chosen == Layout::Side => card(frame, r, model, ctx, h),
+            Pane::Detail => detail(frame, r, model, ctx, h),
+            Pane::Status => status(frame, r, model, ctx, h),
+            Pane::Hints => hints(frame, r, chosen, h),
             Pane::Narrow => narrow(frame, r),
         }
     }
     if chosen == Layout::TooNarrow {
-        return;
+        return hits;
     }
     if let (Some(top), Some(copied)) = (model.acts().view(), model.acts().copied()) {
+        // The mouse is the terminal's while it shows, to select the prompt with.
         prompt_pane(frame, area, top, copied);
-    } else if model.is_help() {
-        help(frame, area, chosen);
+        return Hits::default();
     }
+    if model.is_help() {
+        help(frame, area, chosen);
+        // A click anywhere closes it, and the wheel moves nothing under it.
+        hits.zones.clear();
+        hits.add(area, Hit::Key(Key::Char('?')));
+    }
+    hits
 }
 
 // ---- Text -------------------------------------------------------------------------------
@@ -216,17 +379,34 @@ fn meter(n: usize, frac: f64, on: Color) -> Vec<Span<'static>> {
     out
 }
 
-/// The checks bar (look.ts's `allot` and `barRuns`): passed green, failed red, pending
-/// yellow, each a share of `width` (at least one cell where there is any).
-fn bar(checks: &Checks, width: usize) -> Vec<Span<'static>> {
-    let counts = [checks.passed, checks.failed, checks.pending];
-    let colours = [GREEN, RED, YELLOW];
-    allot(&counts, width)
+/// The checks bar (look.ts's `allot` and `barCells`): passed green, failed red, pending
+/// yellow, each a share of `width` (at least one cell where there is any). A shine runs along
+/// the pending, a cell a beat.
+fn bar(checks: &Checks, width: usize, beat: u64) -> Vec<Span<'static>> {
+    let [passed, failed, pending] =
+        allot(&[checks.passed, checks.failed, checks.pending], width)[..]
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Span<'static>> = [(passed, GREEN), (failed, RED)]
         .into_iter()
-        .zip(colours)
         .filter(|(n, _)| *n > 0)
         .map(|(n, colour)| span("━".repeat(n), fg(colour)))
-        .collect()
+        .collect();
+    out.extend(shine(pending, beat).map(|colour| span("━", fg(colour))));
+    out
+}
+
+/// The pending run's `n` cells at `beat`: yellow, but for a glint passing through (the mod's).
+fn shine(n: usize, beat: u64) -> impl Iterator<Item = Color> {
+    let lap = n as u64 + 8;
+    #[expect(clippy::cast_precision_loss, reason = "a bar a few dozen cells wide")]
+    let at = (beat % lap) as f64 - 4.0;
+    (0..n).map(move |i| {
+        #[expect(clippy::cast_precision_loss, reason = "a cell of a bar")]
+        let near = (1.0 - (i as f64 - at).abs() / 3.0).max(0.0);
+        mix(YELLOW, FG, near * 0.85)
+    })
 }
 
 /// `width` cells shared out by `counts` (look.ts's `allot`): each count that isn't 0 gets one
@@ -346,17 +526,27 @@ fn open_count(model: &Model) -> usize {
         .count()
 }
 
-fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
+fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
     let width = usize_of(r.width).saturating_sub(2);
     if let Some(ask) = model.acts().ask() {
-        frame.render_widget(Paragraph::new(ask_line(ask, width)), r);
+        let (line, spots) = ask_line(ask, width);
+        hits.answers(r, spots);
+        frame.render_widget(Paragraph::new(line), r);
         return;
     }
     let said = model.header();
     let (text, colour) = if let Some(toast) = model.acts().toast() {
         (toast.text.clone(), tone_of(toast.tone))
     } else if let Some(busy) = model.acts().busy().next() {
-        (format!("◌ {busy}…"), YELLOW)
+        // The spinner, then the words.
+        let words = clip(&format!("{busy}…"), width.saturating_sub(2));
+        let line = Line::from(vec![
+            Span::raw(" "),
+            spinner(ctx.beat, 0, YELLOW),
+            span(format!(" {words}"), fg(YELLOW)),
+        ]);
+        frame.render_widget(Paragraph::new(line), r);
+        return;
     } else if model.is_waiting() {
         (format!("Reading {}", ctx.dir), DIM)
     } else if said.is_read_failing {
@@ -411,40 +601,43 @@ fn counted(n: usize, noun: &str) -> String {
     }
 }
 
-fn hints(frame: &mut Frame, r: Rect, chosen: Layout) {
+fn hints(frame: &mut Frame, r: Rect, chosen: Layout, hits: &mut Hits) {
     // Most needed first: a narrow screen drops the last.
     let h_l = if chosen == Layout::Three {
         "pane"
     } else {
         "list"
     };
+    let char = |c| Key::Char(c);
     let keys = [
-        ("j/k", "move"),
-        ("tab", "list"),
-        ("m", "merge"),
-        ("c", "comment"),
-        ("f", "hand off"),
-        ("o", "browser"),
-        ("?", "help"),
-        ("q", "quit"),
-        ("a", "account"),
-        ("h/l", h_l),
-        ("g/G", "top/end"),
+        ("j/k", "move", char('j')),
+        ("tab", "list", Key::Tab),
+        ("m", "merge", char('m')),
+        ("c", "comment", char('c')),
+        ("f", "hand off", char('f')),
+        ("o", "browser", char('o')),
+        ("?", "help", char('?')),
+        ("q", "quit", char('q')),
+        ("a", "account", char('a')),
+        ("h/l", h_l, char('l')),
+        ("g/G", "top/end", char('g')),
     ];
     let width = usize_of(r.width);
-    let mut spans = vec![span(" ", Style::new())];
-    let mut used = 1;
-    for (key, what) in keys {
-        let need = cells(key) + 1 + cells(what) + 2;
-        if used + need > width {
+    let mut line = Marked::default();
+    line.push(span(" ", Style::new()));
+    for (key, what, press) in keys {
+        if line.width() + cells(key) + 1 + cells(what) + 2 > width {
             break;
         }
-        spans.push(span(key, fg(ACCENT)));
-        spans.push(span(format!(" {what}  "), fg(DIM)));
-        used += need;
+        line.hit(
+            [span(key, fg(ACCENT)), span(format!(" {what}"), fg(DIM))],
+            Hit::Key(press),
+        );
+        line.push(span("  ", fg(DIM)));
     }
+    hits.spots(r, line.spots);
     frame.render_widget(
-        Paragraph::new(filled(spans, width, PANEL)).style(Style::new().bg(PANEL)),
+        Paragraph::new(filled(line.spans, width, PANEL)).style(Style::new().bg(PANEL)),
         r,
     );
 }
@@ -505,6 +698,10 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         clip("Actions go as the gh login that sees the repo.", iw),
         fg(DIM),
     )));
+    lines.push(Line::from(span(
+        clip("A click picks a list or a PR, or presses its key.", iw),
+        fg(DIM),
+    )));
     frame.render_widget(Clear, at);
     frame.render_widget(
         Paragraph::new(lines)
@@ -560,9 +757,10 @@ fn list_line(list: &List, is_on: bool, w: usize) -> Line<'static> {
     filled(spans, w, bg)
 }
 
-fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
+fn lists_pane(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
     let block = boxed("Lists", model.focus() == Focus::Lists);
     let inner = block.inner(r);
+    hits.add(r, Hit::Pane(Focus::Lists));
     frame.render_widget(block, r);
     let w = usize_of(inner.width);
     let ix = 1;
@@ -577,6 +775,9 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
         if Some(i) == first_session {
             lines.push(Line::raw(""));
             lines.push(section("SESSIONS"));
+        }
+        if let Some(at) = row_of(inner, lines.len()) {
+            hits.add(at, Hit::List(i));
         }
         lines.push(list_line(list, i == model.list_index(), w));
     }
@@ -647,7 +848,7 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
+fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut Hits) {
     let width = usize_of(r.width);
     let lists = model.lists();
     let at = model.list_index();
@@ -662,8 +863,16 @@ fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
         let room = width.saturating_sub(3 + 2 + cells(&count) + 3 + cells(&of) + 1);
         spans.push(span(clip(&list.label, room), bold(FG)));
         spans.push(span(count, fg(DIM)));
-        spans.push(span(" ▸", fg(ACCENT)));
         let used: usize = spans.iter().map(Span::width).sum();
+        spans.push(span(" ▸", fg(ACCENT)));
+        hits.spots(
+            r,
+            vec![
+                (0, 3, Hit::Key(Key::BackTab)),
+                (used, 2, Hit::Key(Key::Tab)),
+            ],
+        );
+        let used = used + 2;
         spans.push(Span::raw(
             " ".repeat(width.saturating_sub(used + cells(&of))),
         ));
@@ -687,24 +896,36 @@ fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
     {
         first += 1;
     }
-    let mut spans = vec![span(if first > 0 { "‹" } else { " " }, fg(DIM))];
-    let mut used = 1;
+    let mut line = Marked::default();
+    if first > 0 {
+        line.hit([span("‹", fg(DIM))], Hit::Key(Key::BackTab));
+    } else {
+        line.push(span(" ", fg(DIM)));
+    }
     let mut shown = first;
     for (i, list) in lists.iter().enumerate().skip(first) {
         let text = label_of(list);
+        let used = line.width();
         if used + cells(&text) + 1 + 4 > width && i != at {
             break;
         }
         let style = if i == at { bold(FG).bg(SEL) } else { fg(BODY) };
-        spans.push(span(clip(&text, width.saturating_sub(used + 1)), style));
-        spans.push(Span::raw(" "));
-        used += cells(&text) + 1;
+        line.hit(
+            [span(clip(&text, width.saturating_sub(used + 1)), style)],
+            Hit::List(i),
+        );
+        line.push(Span::raw(" "));
         shown = i + 1;
     }
     if shown < lists.len() {
-        spans.push(span(format!("+{} ›", lists.len() - shown), fg(DIM)));
+        line.hit(
+            [span(format!("+{} ›", lists.len() - shown), fg(DIM))],
+            Hit::Key(Key::Tab),
+        );
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), r);
+    let (line, spots) = line.done();
+    hits.spots(r, spots);
+    frame.render_widget(Paragraph::new(line), r);
 }
 
 // ---- The table --------------------------------------------------------------------------
@@ -734,7 +955,7 @@ fn table_state(row: &Row) -> String {
 
 const STATUS_W: usize = 11;
 
-fn status_cell(row: &Row, bg: Color) -> Vec<Span<'static>> {
+fn status_cell(row: &Row, bg: Color, beat: u64) -> Vec<Span<'static>> {
     let d = &row.pr.derived;
     let colour = if row.pr.error.is_some() && row.pr.state.is_none() {
         RED
@@ -743,14 +964,17 @@ fn status_cell(row: &Row, bg: Color) -> Vec<Span<'static>> {
     };
     if d.pill == PillKind::CiRunning && d.checks.total > 0 {
         let count = format!(" {}/{}", d.checks.passed, d.checks.total);
-        let mut spans: Vec<Span<'static>> =
-            bar(&d.checks, STATUS_W.saturating_sub(cells(&count)).min(5))
-                .into_iter()
-                .map(|s| {
-                    let style = s.style.bg(bg);
-                    s.style(style)
-                })
-                .collect();
+        let mut spans: Vec<Span<'static>> = bar(
+            &d.checks,
+            STATUS_W.saturating_sub(cells(&count)).min(5),
+            beat,
+        )
+        .into_iter()
+        .map(|s| {
+            let style = s.style.bg(bg);
+            s.style(style)
+        })
+        .collect();
         let used: usize = spans.iter().map(Span::width).sum();
         spans.push(span(fit(&count, STATUS_W - used), fg(colour).bg(bg)));
         return spans;
@@ -888,13 +1112,19 @@ impl Columns {
         ])
     }
 
-    fn row(self, row: &Row, is_sel: bool) -> Line<'static> {
+    fn row(self, row: &Row, is_sel: bool, beat: u64) -> Line<'static> {
         let bg = if is_sel { SEL } else { INK };
         let on = |style: Style| style.bg(bg);
         let kind = row.pr.derived.pill;
+        let glyph = if is_spinning(row) {
+            let turning = spinner(beat, row.pr.number, pill_color(kind));
+            turning.patch_style(on(Style::new()))
+        } else {
+            span(mark(kind), on(fg(pill_color(kind))))
+        };
         let mut spans = vec![
             span(if is_sel { "▌" } else { " " }, on(fg(ACCENT))),
-            span(mark(kind), on(fg(pill_color(kind)))),
+            glyph,
             span(" ", on(Style::new())),
             span(
                 fit(&format!("#{}", row.pr.number), self.number),
@@ -926,12 +1156,13 @@ impl Columns {
             spans.push(span(fit(&format!(" {}", row.repo), self.repo), on(fg(DIM))));
         }
         spans.push(span(" ", on(Style::new())));
-        spans.extend(status_cell(row, bg));
+        spans.extend(status_cell(row, bg, beat));
         filled(spans, self.width, bg)
     }
 }
 
-fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx) {
+fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let list = model.list();
     let title = if r.width >= 56 {
         format!("{}  ·  {}", list.label, about(model, list, ctx.home))
@@ -960,7 +1191,10 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx) {
     let sel = model.selected_index().unwrap_or(0);
     let offset = sel.saturating_sub(visible - 1);
     for (i, row) in list.rows.iter().enumerate().skip(offset).take(visible) {
-        lines.push(columns.row(row, i == sel));
+        if let Some(at) = row_of(inner, lines.len()) {
+            hits.add(at, Hit::Row(i));
+        }
+        lines.push(columns.row(row, i == sel, ctx.beat));
     }
     let total = list.rows.len();
     let block = if total > visible {
@@ -977,8 +1211,8 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx) {
 // ---- The selected PR --------------------------------------------------------------------
 
 /// The four steps, the current one marked (the mod's stepper): done ✓, the current one its
-/// pill's glyph (◌ while moving), the rest ○.
-fn stepper(row: &Row, width: usize) -> Line<'static> {
+/// pill's glyph (the spinner while moving), the rest ○.
+fn stepper(row: &Row, width: usize, beat: u64) -> Line<'static> {
     let d = &row.pr.derived;
     let step = usize::from(step_index(d.stage));
     let done = if d.stage == Stage::Merged {
@@ -997,6 +1231,10 @@ fn stepper(row: &Row, width: usize) -> Line<'static> {
     for (i, name) in STEPS.iter().enumerate() {
         let (glyph, style) = match i.cmp(&step) {
             std::cmp::Ordering::Less => ("✓".to_owned(), fg(done)),
+            std::cmp::Ordering::Equal if is_spinning(row) => {
+                spans.push(spinner(beat, row.pr.number, colour));
+                (String::new(), bold(colour))
+            }
             std::cmp::Ordering::Equal => {
                 let glyph = if d.is_moving {
                     "◌".to_owned()
@@ -1007,7 +1245,12 @@ fn stepper(row: &Row, width: usize) -> Line<'static> {
             }
             std::cmp::Ordering::Greater => ("○".to_owned(), fg(DIM)),
         };
-        spans.push(span(format!("{glyph} {name}"), style));
+        let text = if glyph.is_empty() {
+            format!(" {name}")
+        } else {
+            format!("{glyph} {name}")
+        };
+        spans.push(span(text, style));
         if i + 1 < STEPS.len() {
             let joint = if i < step { "━" } else { "┈" };
             let style = if i < step { fg(done) } else { fg(DIM) };
@@ -1142,7 +1385,13 @@ fn title_lines(row: &Row, iw: usize) -> Vec<Line<'static>> {
 }
 
 /// The card's top: title, branch and diff, who, the pill, the headline, the steps.
-fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Line<'static>> {
+fn detail_head(
+    model: &Model,
+    row: &Row,
+    gh: Option<&GhPr>,
+    iw: usize,
+    beat: u64,
+) -> Vec<Line<'static>> {
     let d = &row.pr.derived;
     let mut head = title_lines(row, iw);
     if let Some(pr) = gh {
@@ -1189,7 +1438,7 @@ fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Li
     for l in wrap(&headline, iw, 2) {
         head.push(Line::from(span(l, fg(tone_color(d.tone)))));
     }
-    head.push(stepper(row, iw));
+    head.push(stepper(row, iw, beat));
     head
 }
 
@@ -1198,6 +1447,7 @@ fn detail_checks(
     row: &Row,
     gh: Option<&GhPr>,
     iw: usize,
+    beat: u64,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let checks = &row.pr.derived.checks;
     let Some(pr) = gh.filter(|_| checks.total > 0) else {
@@ -1210,7 +1460,7 @@ fn detail_checks(
             span(fit("CHECKS", iw.saturating_sub(cells(&count))), label()),
             span(count, fg(DIM)),
         ]),
-        Line::from(bar(checks, iw)),
+        Line::from(bar(checks, iw, beat)),
     ];
     // What CI is doing, unless the headline says it already (CI running, a draft).
     let doing = activity(checks);
@@ -1268,15 +1518,16 @@ fn detail_tail(row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Line<'static>> {
 
 /// The selected PR as a full card (three panes, strip): the URL at the bottom, the check
 /// rows taking what the rest leaves ("+ N more" standing for the ones cut).
-fn detail(frame: &mut Frame, r: Rect, model: &Model) {
+fn detail(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
     };
     let iw = usize_of(inner.width);
     let ih = usize_of(inner.height);
     let gh = model.entry(&row.pr.url).and_then(|e| e.pr.as_ref());
-    let head = detail_head(model, row, gh, iw);
-    let (checks_head, check_rows) = detail_checks(row, gh, iw);
+    let head = detail_head(model, row, gh, iw, ctx.beat);
+    let (checks_head, check_rows) = detail_checks(row, gh, iw, ctx.beat);
     let mut tail = detail_tail(row, gh, iw);
     let mut foot = Vec::new();
     if let Some(when) = checked(model, row) {
@@ -1288,11 +1539,19 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
 
     // The actions a line each where the checks leave room, else as keys on one line.
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
+    let offers = model.offers();
     let actions = action_lines(model, iw);
+    // Where the actions went: a line each in the tail (from this line of it), or as keys.
+    let mut actions_at = None;
+    let mut keys = None;
     if ih.saturating_sub(fixed) >= check_rows.len() + actions.len() {
+        // Past the lines action_lines puts above the offers.
+        actions_at = Some(tail.len() + actions.len() - offers.len());
         tail.extend(actions);
     } else if !actions.is_empty() {
-        foot.insert(0, action_keys(model, iw));
+        let (line, spots) = action_keys(model, iw);
+        foot.insert(0, line);
+        keys = Some(spots);
     }
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
     let room = ih.saturating_sub(fixed);
@@ -1306,15 +1565,29 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
         let more = format!("+ {} more", total - (room - 1));
         lines.push(Line::from(span(more, fg(DIM))));
     }
+    let tail_at = lines.len();
     lines.extend(tail);
     let gap = ih.saturating_sub(lines.len() + foot.len());
     lines.extend(std::iter::repeat_n(Line::raw(""), gap));
+    let foot_at = lines.len();
     lines.extend(foot);
     frame.render_widget(Paragraph::new(lines), inner);
+    if let Some(at) = actions_at {
+        for (i, offer) in offers.iter().enumerate() {
+            if let (Some(line), Some(hit)) = (row_of(inner, tail_at + at + i), offer_key(offer.key))
+            {
+                hits.add(line, hit);
+            }
+        }
+    }
+    if let (Some(spots), Some(line)) = (keys, row_of(inner, foot_at)) {
+        hits.spots(line, spots);
+    }
 }
 
 /// The selected PR in a few lines, under the table (side layout).
-fn card(frame: &mut Frame, r: Rect, model: &Model) {
+fn card(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
     };
@@ -1335,7 +1608,7 @@ fn card(frame: &mut Frame, r: Rect, model: &Model) {
         clip(&d.headline, iw),
         fg(tone_color(d.tone)),
     )));
-    lines.push(stepper(row, iw));
+    lines.push(stepper(row, iw, ctx.beat));
     let mut facts = Vec::new();
     if d.checks.total > 0 {
         facts.push(format!("{}/{} checks", d.checks.passed, d.checks.total));
@@ -1366,7 +1639,11 @@ fn card(frame: &mut Frame, r: Rect, model: &Model) {
     if let Some(error) = &row.pr.error {
         lines.push(Line::from(span(clip(&format!("⚠ {error}"), iw), fg(RED))));
     }
-    lines.push(action_keys(model, iw));
+    let (keys, spots) = action_keys(model, iw);
+    if let Some(line) = row_of(inner, lines.len()) {
+        hits.spots(line, spots);
+    }
+    lines.push(keys);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1407,19 +1684,23 @@ fn action_lines(model: &Model, iw: usize) -> Vec<Line<'static>> {
 
 /// The actions as keys on one line, as many as fit (the narrow card):
 /// "m merge  f fix  c comment  o open".
-fn action_keys(model: &Model, iw: usize) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut used = 0;
+fn action_keys(model: &Model, iw: usize) -> (Line<'static>, Spots) {
+    let mut line = Marked::default();
     for o in model.offers() {
-        let need = cells(o.key) + 1 + cells(&o.short);
-        if used + need > iw {
+        if line.width() + cells(o.key) + 1 + cells(&o.short) > iw {
             break;
         }
-        spans.push(span(o.key, fg(ACCENT)));
-        spans.push(span(format!(" {}  ", o.short), fg(look_color(o.look))));
-        used += need + 2;
+        let spans = [
+            span(o.key, fg(ACCENT)),
+            span(format!(" {}", o.short), fg(look_color(o.look))),
+        ];
+        match offer_key(o.key) {
+            Some(hit) => line.hit(spans, hit),
+            None => line.spans.extend(spans),
+        }
+        line.push(span("  ", Style::new()));
     }
-    Line::from(spans)
+    line.done()
 }
 
 /// The last `n` cells of `text`.
@@ -1437,10 +1718,11 @@ fn tail_cells(text: &str, n: usize) -> String {
     kept.into_iter().collect()
 }
 
-/// The question on the bottom line, with the keys that answer it.
-fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
+/// The question on the bottom line, with the keys that answer it (a click on one presses it).
+fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
     let key = |k: &str| span(format!("  {k}"), fg(ACCENT));
     let what = |w: &str| span(format!(" {w}"), fg(DIM));
+    let mut line = Marked::default();
     match ask {
         Ask::Merge {
             number,
@@ -1449,17 +1731,20 @@ fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
             methods,
             ..
         } => {
-            let mut tail = vec![key("y"), what("yes"), key("n"), what("no")];
+            let mut answers = vec![('y', "yes".to_owned()), ('n', "no".to_owned())];
             if let Some(method) = run.method().filter(|_| methods.len() > 1) {
-                tail.extend([key("m"), what(next_method(methods, method).as_str())]);
+                answers.push(('m', next_method(methods, method).as_str().to_owned()));
             }
-            let room = width.saturating_sub(tail.iter().map(|s| cells(&s.content)).sum());
-            let mut spans = vec![
-                Span::raw(" "),
-                span(clip(&merge_question(*run, *number, base), room), bold(FG)),
-            ];
-            spans.extend(tail);
-            Line::from(spans)
+            let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
+            let room = width.saturating_sub(tail);
+            line.push(Span::raw(" "));
+            line.push(span(
+                clip(&merge_question(*run, *number, base), room),
+                bold(FG),
+            ));
+            for (k, w) in answers {
+                line.hit([key(&k.to_string()), what(&w)], Hit::Key(Key::Char(k)));
+            }
         }
         Ask::Comment {
             number,
@@ -1468,41 +1753,51 @@ fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
             ..
         } => {
             let lead = format!(" comment on #{number} › ");
+            // "  ⏎ post · alt-⏎ new line · esc cancel", where there is room: the post and the
+            // cancel take clicks.
+            let parts = ["  ", "⏎ post", " · alt-⏎ new line · ", "esc cancel"];
             let hint = if width >= 70 {
-                "  ⏎ post · alt-⏎ new line · esc cancel"
+                parts.iter().map(|p| cells(p)).sum()
             } else {
-                ""
+                0
             };
-            let room = width.saturating_sub(cells(&lead) + cells(hint) + 1);
-            let mut spans = vec![span(lead, bold(ACCENT))];
+            let room = width.saturating_sub(cells(&lead) + hint + 1);
+            line.push(span(lead, bold(ACCENT)));
             if text.is_empty() {
-                spans.push(span(" ", Style::new().bg(ACCENT)));
+                line.push(span(" ", Style::new().bg(ACCENT)));
                 if !login.is_empty() {
-                    spans.push(span(clip(&format!(" as {login}"), room), fg(DIM)));
+                    line.push(span(clip(&format!(" as {login}"), room), fg(DIM)));
                 }
             } else {
-                spans.push(span(tail_cells(&text.replace('\n', "↵"), room), fg(FG)));
-                spans.push(span(" ", Style::new().bg(ACCENT)));
+                line.push(span(tail_cells(&text.replace('\n', "↵"), room), fg(FG)));
+                line.push(span(" ", Style::new().bg(ACCENT)));
             }
-            let used: usize = spans.iter().map(|s| cells(&s.content)).sum();
-            spans.push(Span::raw(
-                " ".repeat(width.saturating_sub(used + cells(hint))),
+            line.push(Span::raw(
+                " ".repeat(width.saturating_sub(line.width() + hint)),
             ));
-            spans.push(span(hint, fg(DIM)));
-            Line::from(spans)
+            if hint > 0 {
+                let [gap, post, alt, cancel] = parts;
+                line.push(span(gap, fg(DIM)));
+                line.hit([span(post, fg(DIM))], Hit::Key(Key::Enter));
+                line.push(span(alt, fg(DIM)));
+                line.hit([span(cancel, fg(DIM))], Hit::Key(Key::Esc));
+            }
         }
         Ask::Pick { number, kinds, .. } => {
-            let mut spans = vec![span(format!(" Hand off #{number}:"), bold(FG))];
+            line.push(span(format!(" Hand off #{number}:"), bold(FG)));
             for kind in kinds {
-                spans.extend([
-                    key(&kind.key().to_string()),
-                    span(format!(" {}", kind.about()), fg(BODY)),
-                ]);
+                line.hit(
+                    [
+                        key(&kind.key().to_string()),
+                        span(format!(" {}", kind.about()), fg(BODY)),
+                    ],
+                    Hit::Key(Key::Char(kind.key())),
+                );
             }
-            spans.extend([key("esc"), what("cancel")]);
-            Line::from(spans)
+            line.hit([key("esc"), what("cancel")], Hit::Key(Key::Esc));
         }
     }
+    line.done()
 }
 
 /// The prompt last copied, the whole screen, to read, or to select and copy by hand where
@@ -1567,6 +1862,22 @@ mod tests {
         assert_eq!(tilde("/home/adam", "/home/ada"), "/home/adam");
         assert_eq!(short_count(4620), "4.6k");
         assert_eq!(short_count(812), "812");
+    }
+
+    #[test]
+    fn a_glint_runs_along_the_pending_and_rests_off_it() {
+        // At the first beat it stands four cells before the run: all yellow.
+        assert!(shine(10, 0).all(|c| c == YELLOW));
+        // Six beats on, at the third cell, brightest there and fading either side.
+        let cells: Vec<Color> = shine(10, 6).collect();
+        assert_eq!(cells[2], mix(YELLOW, FG, 0.85));
+        assert!(cells[1] != YELLOW && cells[5] == YELLOW && cells[9] == YELLOW);
+        for beat in 0..40 {
+            assert_eq!(shine(7, beat).count(), 7);
+        }
+        assert_eq!(mix(YELLOW, FG, 0.0), YELLOW);
+        assert_eq!(mix(YELLOW, FG, 1.0), FG);
+        assert_eq!(mix(Color::Reset, FG, 0.5), Color::Reset);
     }
 
     #[test]

@@ -168,6 +168,12 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 
 Enter (the full PR view) comes in a later step.
 
+The mouse works too. A click picks a list or a PR, or presses the key it shows: a hint on the
+bottom row, an action on the card, an answer to the question on the status line (while a question
+is open, only its answers take clicks). The wheel moves in the pane under it. While `v` shows the
+prompt, prw lets go of the mouse, so a plain drag selects the prompt's text; elsewhere most
+terminals select with Shift (iTerm2: Option) held.
+
 ## Layout
 
 The screen adapts to the terminal's width (`prw_core::layout`, and `prw_core::panes` for where each
@@ -182,6 +188,11 @@ pane goes):
 
 The cut-offs sit between the design's reference widths (120, 84 and 49 columns), so each lands well
 inside its own band. A wider terminal never gets a smaller layout.
+
+A PR with something under way (CI running, GitHub still computing, a first fetch) turns the mod's
+spinner in the table and on its card's step, and a glint runs along the checks bar's pending part;
+a job prw runs (a merge, a comment) spins on the status line. prw draws a frame every 90 ms only
+while something on screen moves, and otherwise only when something changes.
 
 ## Crates
 
