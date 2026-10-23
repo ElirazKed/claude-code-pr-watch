@@ -343,7 +343,7 @@ impl Acts {
         self.ask.is_some() || self.view.is_some()
     }
 
-    fn say(&mut self, text: impl Into<String>, tone: Tone, now: i64) {
+    pub(crate) fn say(&mut self, text: impl Into<String>, tone: Tone, now: i64) {
         let ms = if tone == Tone::Bad {
             ERROR_MS
         } else {

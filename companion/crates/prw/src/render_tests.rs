@@ -474,6 +474,32 @@ fn a_toast_fades_at_the_end_of_its_time() {
 }
 
 #[test]
+fn the_version_shows_and_so_does_a_newer_one() {
+    let own = format!("pr-watch companion {}", env!("CARGO_PKG_VERSION"));
+    let model = demo(120, 30);
+    assert_says(&screen(&model, 120, 30), &[&own]);
+    let newer = PollerSaid {
+        latest: Some("99.0.0".into()),
+        ..PollerSaid::default()
+    };
+    let model = feed(model, [Msg::Poller(newer)]);
+    // Said on the status line while it says nothing else, after the toast.
+    let now = model.now();
+    let model = feed(model, [Msg::Tick(now), Msg::Tick(now + 7_000)]);
+    assert_eq!(model.acts().toast(), None);
+    let text = screen(&model, 120, 30);
+    assert_says(
+        &text,
+        &[&own, "4 sessions live · 5 lists · ↑ prw 99.0.0 is out"],
+    );
+    assert_says(&screen(&model, 49, 30), &["↑ prw 99.0.0 is out"]);
+    let help = feed(model, [Msg::Key(Key::Char('?'))]);
+    let title = format!("Keys · prw {}", env!("CARGO_PKG_VERSION"));
+    assert_says(&screen(&help, 120, 30), &[&title, "↑ prw 99.0.0 is out"]);
+    assert_says(&screen(&help, 120, 14), &[&title]);
+}
+
+#[test]
 fn a_click_anywhere_closes_the_help() {
     let model = feed(demo(84, 30), [Msg::Key(Key::Char('?'))]);
     let (_, hits) = drawn(&model, 84, 30);

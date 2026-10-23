@@ -13,11 +13,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::accounts::{Logins, login_for, switch_to};
-use crate::act::{Acts, Done, Job, Offer, Target};
+use crate::act::{Acts, Done, Job, Offer, Target, Tone};
 use crate::layout::{Layout, layout};
 use crate::order::{Tracked, order};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
 use crate::status::{PillKind, derive};
+use crate::version;
 
 /// A session file is live while its mtime is less than this old (the mod's `ALIVE_MS`).
 pub const ALIVE_MS: i64 = 60_000;
@@ -197,6 +198,8 @@ pub struct PollerSaid {
     pub problems: Vec<String>,
     /// gh's logins, as it last read them: which one a PR goes as, and the one a switch moves to.
     pub logins: Logins,
+    /// The newest `prw` GitHub last said, where `config.toml` lets it ask.
+    pub latest: Option<String>,
 }
 
 /// A saved search as `prw`'s poller last ran it (and as `companion/demo/searches.json` has
@@ -367,6 +370,8 @@ pub struct Model {
     /// up (at the start, or once it's back) light nothing.
     lit: BTreeMap<String, Lit>,
     is_settled: bool,
+    /// The newer `prw` a toast has said: each is said once.
+    told_newer: Option<String>,
 }
 
 impl Model {
@@ -391,6 +396,7 @@ impl Model {
             header: Header::default(),
             lit: BTreeMap::new(),
             is_settled: false,
+            told_newer: None,
         };
         model.rebuild();
         model
@@ -529,6 +535,32 @@ impl Model {
     #[must_use]
     pub const fn acts(&self) -> &Acts {
         &self.acts
+    }
+
+    /// A `prw` newer than this one, where GitHub said there is.
+    #[must_use]
+    pub fn newer(&self) -> Option<&str> {
+        self.poller
+            .as_ref()?
+            .latest
+            .as_deref()
+            .filter(|latest| version::is_newer(latest, version::OWN))
+    }
+
+    /// A newer `prw` is said once, by a toast of its own: not over one already showing (an
+    /// error the user hasn't read yet), but on a later tick.
+    fn tell_newer(&mut self) {
+        if self.acts.toast().is_some() {
+            return;
+        }
+        let Some(newer) = self.newer().map(str::to_owned) else {
+            return;
+        };
+        if self.told_newer.as_deref() != Some(newer.as_str()) {
+            let text = format!("↑ prw {newer} is out (this is {})", version::OWN);
+            self.acts.say(text, Tone::Info, self.now);
+            self.told_newer = Some(newer);
+        }
     }
 
     /// Whether a PR is lit, and how.
@@ -759,6 +791,7 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             model.is_settled = model.shared.is_some();
             model.acts.tick(at);
             model.rebuild();
+            model.tell_newer();
             Vec::new()
         }
         Msg::Paste(text) => {
@@ -775,6 +808,7 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             Vec::new()
         }
         Msg::Poller(said) => {
+            // The news waits for the tick that follows (and sets the time its toast runs from).
             model.poller = Some(said);
             model.rebuild();
             Vec::new()
@@ -1424,6 +1458,34 @@ mod tests {
             ],
         );
         assert_eq!(model.lit(A), None);
+    }
+
+    #[test]
+    fn a_newer_prw_is_said_once_and_never_over_another_toast() {
+        let said = |latest: &str| {
+            Msg::Poller(PollerSaid {
+                latest: Some(latest.to_owned()),
+                ..PollerSaid::default()
+            })
+        };
+        // The same version as this one: nothing to say. A newer one: said once.
+        let model = read(Model::new(120, 30), [Msg::Tick(1_000), said(version::OWN)]);
+        assert_eq!((model.newer(), model.acts().toast()), (None, None));
+        let model = read(model, [said("99.0.0"), Msg::Tick(2_000)]);
+        assert_eq!(model.newer(), Some("99.0.0"));
+        let toast = model.acts().toast().cloned().expect("a toast");
+        assert!(toast.text.contains("prw 99.0.0 is out"), "{}", toast.text);
+        let model = read(model, [Msg::Tick(toast.until), said("99.0.0")]);
+        assert_eq!(model.acts().toast(), None);
+        // A toast already showing (an error) isn't covered: the news waits for it to go.
+        let mut busy = read(Model::new(120, 30), [Msg::Tick(1_000)]);
+        busy.acts.say("merge refused", Tone::Bad, 1_000);
+        let busy = read(busy, [said("99.0.0")]);
+        let error = busy.acts().toast().cloned().expect("the error");
+        assert_eq!(error.text, "merge refused");
+        let busy = read(busy, [Msg::Tick(error.until)]);
+        let news = busy.acts().toast().expect("the news");
+        assert!(news.text.contains("prw 99.0.0 is out"), "{}", news.text);
     }
 
     proptest::proptest! {

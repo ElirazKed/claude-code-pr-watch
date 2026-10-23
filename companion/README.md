@@ -96,6 +96,14 @@ any session's. They stay out of All and the header's counts, which are your sess
 `--config <file>` (or `PRW_CONFIG`) reads another file; `$XDG_CONFIG_HOME/prw/config.toml` is used
 where that is set. `--no-poll` and `--demo` run no search (the demo shows `demo/searches.json`).
 
+### Versions
+
+prw has a version of its own, apart from the mod's: `prw --version`, the header (three panes) and the
+key help say it. Every two hours at most, prw reads `companion/Cargo.toml` on this repo's default
+branch (one `gh api` call, as any login), and when a newer prw is out a toast says so once, and
+then the status line (while it says nothing else) and the key help (`↑ prw <version> is out`).
+`check_version = false` at the top of `config.toml` turns it off; `--no-poll` and `--demo` never ask.
+
 ### The demo cache
 
 `demo/` is a hand-made cache: a `results.json` of acme/* PRs built from the status fixtures (CI
