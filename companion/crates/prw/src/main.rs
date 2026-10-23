@@ -445,7 +445,9 @@ fn event_loop(
     let ctx = view::Ctx {
         dir: &shown,
         home: &home,
+        beat: 0,
     };
+    let started = Instant::now();
     let size = terminal.size()?;
     let (mut model, _) = feed(
         Model::new(size.width, size.height),
@@ -462,10 +464,17 @@ fn event_loop(
             execute!(io::stdout(), Clicks(wants_clicks))?;
             is_clicking = wants_clicks;
         }
+        let beat = started.elapsed().as_millis() / view::BEAT.as_millis();
+        let ctx = view::Ctx {
+            beat: u64::try_from(beat).unwrap_or(0),
+            ..ctx
+        };
         terminal.draw(|frame| hits = view::render(frame, &model, ctx))?;
+        let drawn_at = Instant::now();
+        let is_animated = view::is_animated(&model);
         // Wait for a key, a paste, a resize or a finished job until the next tick; only a
-        // message redraws. A tick that is due comes first, so a stream of keys can't hold it
-        // off.
+        // message redraws, or, while something on screen moves, the next beat. A tick that is
+        // due comes first, so a stream of keys can't hold it off.
         let msgs: Vec<Msg> = loop {
             if let Ok(done) = finished.try_recv() {
                 break vec![Msg::Done(done)];
@@ -483,7 +492,11 @@ fn event_loop(
                     .chain([Msg::Tick(now)])
                     .collect();
             }
-            if event::poll(timeout.min(SLICE))? {
+            let beat = is_animated.then(|| view::BEAT.saturating_sub(drawn_at.elapsed()));
+            if beat.is_some_and(|b| b.is_zero()) {
+                break Vec::new();
+            }
+            if event::poll(timeout.min(SLICE).min(beat.unwrap_or(SLICE)))? {
                 let msg = match event::read()? {
                     Event::Key(key) => key_of(key).map(Msg::Key),
                     Event::Mouse(mouse) => mouse_of(mouse, &hits),

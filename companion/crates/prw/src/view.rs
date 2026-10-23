@@ -33,6 +33,54 @@ pub struct Ctx<'a> {
     pub dir: &'a str,
     /// The home directory, which a session's `cwd` shows as `~`; "" for none.
     pub home: &'a str,
+    /// The animation's frame, one every [`BEAT`]: what turns the spinners and runs the shine.
+    pub beat: u64,
+}
+
+/// How long each frame of the animation shows, as the mod's (`FRAME_MS`).
+pub const BEAT: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// The spinner's frames, the mod's (`BRAILLE`).
+const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Whether a row's PR moves on screen: something under way, and not a read that failed.
+fn is_spinning(row: &Row) -> bool {
+    row.pr.derived.is_moving && !(row.pr.error.is_some() && row.pr.state.is_none())
+}
+
+/// Whether anything on screen moves (a PR the list shows, a job running), so the loop
+/// draws a frame every [`BEAT`].
+pub fn is_animated(model: &Model) -> bool {
+    model.list().rows.iter().any(is_spinning) || model.acts().busy().next().is_some()
+}
+
+/// `from` moved `share` (0..=1) of the way to `to`, where both are RGB.
+fn mix(from: Color, to: Color, share: f64) -> Color {
+    let (Color::Rgb(r, g, b), Color::Rgb(r2, g2, b2)) = (from, to) else {
+        return from;
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "between two bytes, so a byte"
+    )]
+    let step = |one: u8, other: u8| {
+        (f64::from(one) + (f64::from(other) - f64::from(one)) * share).round() as u8
+    };
+    Color::Rgb(step(r, r2), step(g, g2), step(b, b2))
+}
+
+/// The spinner at `beat`, its PR's `seed` (its number) setting it apart from the others' (the
+/// mod's `spinnerCell`): the frames in turn, `colour` pulsing toward white.
+fn spinner(beat: u64, seed: u64, colour: Color) -> Span<'static> {
+    let at = beat.wrapping_add(seed);
+    let glyph = SPIN[usize::try_from(at % 10).unwrap_or(0)];
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a phase: precision past 2^52 frames doesn't matter"
+    )]
+    let pulse = f64::midpoint((at as f64 / 3.0).sin(), 1.0);
+    span(glyph, bold(mix(colour, FG, pulse * 0.6)))
 }
 
 /// Where the screen drew what a click can land on. A later zone lies over an earlier one (a
@@ -152,8 +200,8 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
             Pane::Lists => lists_pane(frame, r, model, h),
             Pane::Strip => strip(frame, r, model, chosen, h),
             Pane::Table => table(frame, r, model, chosen, ctx, h),
-            Pane::Detail if chosen == Layout::Side => card(frame, r, model, h),
-            Pane::Detail => detail(frame, r, model, h),
+            Pane::Detail if chosen == Layout::Side => card(frame, r, model, ctx, h),
+            Pane::Detail => detail(frame, r, model, ctx, h),
             Pane::Status => status(frame, r, model, ctx, h),
             Pane::Hints => hints(frame, r, chosen, h),
             Pane::Narrow => narrow(frame, r),
@@ -323,17 +371,34 @@ fn meter(n: usize, frac: f64, on: Color) -> Vec<Span<'static>> {
     out
 }
 
-/// The checks bar (look.ts's `allot` and `barRuns`): passed green, failed red, pending
-/// yellow, each a share of `width` (at least one cell where there is any).
-fn bar(checks: &Checks, width: usize) -> Vec<Span<'static>> {
-    let counts = [checks.passed, checks.failed, checks.pending];
-    let colours = [GREEN, RED, YELLOW];
-    allot(&counts, width)
+/// The checks bar (look.ts's `allot` and `barCells`): passed green, failed red, pending
+/// yellow, each a share of `width` (at least one cell where there is any). A shine runs along
+/// the pending, a cell a beat.
+fn bar(checks: &Checks, width: usize, beat: u64) -> Vec<Span<'static>> {
+    let [passed, failed, pending] =
+        allot(&[checks.passed, checks.failed, checks.pending], width)[..]
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Span<'static>> = [(passed, GREEN), (failed, RED)]
         .into_iter()
-        .zip(colours)
         .filter(|(n, _)| *n > 0)
         .map(|(n, colour)| span("━".repeat(n), fg(colour)))
-        .collect()
+        .collect();
+    out.extend(shine(pending, beat).map(|colour| span("━", fg(colour))));
+    out
+}
+
+/// The pending run's `n` cells at `beat`: yellow, but for a glint passing through (the mod's).
+fn shine(n: usize, beat: u64) -> impl Iterator<Item = Color> {
+    let lap = n as u64 + 8;
+    #[expect(clippy::cast_precision_loss, reason = "a bar a few dozen cells wide")]
+    let at = (beat % lap) as f64 - 4.0;
+    (0..n).map(move |i| {
+        #[expect(clippy::cast_precision_loss, reason = "a cell of a bar")]
+        let near = (1.0 - (i as f64 - at).abs() / 3.0).max(0.0);
+        mix(YELLOW, FG, near * 0.85)
+    })
 }
 
 /// `width` cells shared out by `counts` (look.ts's `allot`): each count that isn't 0 gets one
@@ -465,7 +530,15 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
     let (text, colour) = if let Some(toast) = model.acts().toast() {
         (toast.text.clone(), tone_of(toast.tone))
     } else if let Some(busy) = model.acts().busy().next() {
-        (format!("◌ {busy}…"), YELLOW)
+        // The spinner, then the words.
+        let words = clip(&format!("{busy}…"), width.saturating_sub(2));
+        let line = Line::from(vec![
+            Span::raw(" "),
+            spinner(ctx.beat, 0, YELLOW),
+            span(format!(" {words}"), fg(YELLOW)),
+        ]);
+        frame.render_widget(Paragraph::new(line), r);
+        return;
     } else if model.is_waiting() {
         (format!("Reading {}", ctx.dir), DIM)
     } else if said.is_read_failing {
@@ -874,7 +947,7 @@ fn table_state(row: &Row) -> String {
 
 const STATUS_W: usize = 11;
 
-fn status_cell(row: &Row, bg: Color) -> Vec<Span<'static>> {
+fn status_cell(row: &Row, bg: Color, beat: u64) -> Vec<Span<'static>> {
     let d = &row.pr.derived;
     let colour = if row.pr.error.is_some() && row.pr.state.is_none() {
         RED
@@ -883,14 +956,17 @@ fn status_cell(row: &Row, bg: Color) -> Vec<Span<'static>> {
     };
     if d.pill == PillKind::CiRunning && d.checks.total > 0 {
         let count = format!(" {}/{}", d.checks.passed, d.checks.total);
-        let mut spans: Vec<Span<'static>> =
-            bar(&d.checks, STATUS_W.saturating_sub(cells(&count)).min(5))
-                .into_iter()
-                .map(|s| {
-                    let style = s.style.bg(bg);
-                    s.style(style)
-                })
-                .collect();
+        let mut spans: Vec<Span<'static>> = bar(
+            &d.checks,
+            STATUS_W.saturating_sub(cells(&count)).min(5),
+            beat,
+        )
+        .into_iter()
+        .map(|s| {
+            let style = s.style.bg(bg);
+            s.style(style)
+        })
+        .collect();
         let used: usize = spans.iter().map(Span::width).sum();
         spans.push(span(fit(&count, STATUS_W - used), fg(colour).bg(bg)));
         return spans;
@@ -1028,13 +1104,19 @@ impl Columns {
         ])
     }
 
-    fn row(self, row: &Row, is_sel: bool) -> Line<'static> {
+    fn row(self, row: &Row, is_sel: bool, beat: u64) -> Line<'static> {
         let bg = if is_sel { SEL } else { INK };
         let on = |style: Style| style.bg(bg);
         let kind = row.pr.derived.pill;
+        let glyph = if is_spinning(row) {
+            let turning = spinner(beat, row.pr.number, pill_color(kind));
+            turning.patch_style(on(Style::new()))
+        } else {
+            span(mark(kind), on(fg(pill_color(kind))))
+        };
         let mut spans = vec![
             span(if is_sel { "▌" } else { " " }, on(fg(ACCENT))),
-            span(mark(kind), on(fg(pill_color(kind)))),
+            glyph,
             span(" ", on(Style::new())),
             span(
                 fit(&format!("#{}", row.pr.number), self.number),
@@ -1066,7 +1148,7 @@ impl Columns {
             spans.push(span(fit(&format!(" {}", row.repo), self.repo), on(fg(DIM))));
         }
         spans.push(span(" ", on(Style::new())));
-        spans.extend(status_cell(row, bg));
+        spans.extend(status_cell(row, bg, beat));
         filled(spans, self.width, bg)
     }
 }
@@ -1104,7 +1186,7 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hi
         if let Some(at) = row_of(inner, lines.len()) {
             hits.add(at, Hit::Row(i));
         }
-        lines.push(columns.row(row, i == sel));
+        lines.push(columns.row(row, i == sel, ctx.beat));
     }
     let total = list.rows.len();
     let block = if total > visible {
@@ -1121,8 +1203,8 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hi
 // ---- The selected PR --------------------------------------------------------------------
 
 /// The four steps, the current one marked (the mod's stepper): done ✓, the current one its
-/// pill's glyph (◌ while moving), the rest ○.
-fn stepper(row: &Row, width: usize) -> Line<'static> {
+/// pill's glyph (the spinner while moving), the rest ○.
+fn stepper(row: &Row, width: usize, beat: u64) -> Line<'static> {
     let d = &row.pr.derived;
     let step = usize::from(step_index(d.stage));
     let done = if d.stage == Stage::Merged {
@@ -1141,6 +1223,10 @@ fn stepper(row: &Row, width: usize) -> Line<'static> {
     for (i, name) in STEPS.iter().enumerate() {
         let (glyph, style) = match i.cmp(&step) {
             std::cmp::Ordering::Less => ("✓".to_owned(), fg(done)),
+            std::cmp::Ordering::Equal if is_spinning(row) => {
+                spans.push(spinner(beat, row.pr.number, colour));
+                (String::new(), bold(colour))
+            }
             std::cmp::Ordering::Equal => {
                 let glyph = if d.is_moving {
                     "◌".to_owned()
@@ -1151,7 +1237,12 @@ fn stepper(row: &Row, width: usize) -> Line<'static> {
             }
             std::cmp::Ordering::Greater => ("○".to_owned(), fg(DIM)),
         };
-        spans.push(span(format!("{glyph} {name}"), style));
+        let text = if glyph.is_empty() {
+            format!(" {name}")
+        } else {
+            format!("{glyph} {name}")
+        };
+        spans.push(span(text, style));
         if i + 1 < STEPS.len() {
             let joint = if i < step { "━" } else { "┈" };
             let style = if i < step { fg(done) } else { fg(DIM) };
@@ -1286,7 +1377,13 @@ fn title_lines(row: &Row, iw: usize) -> Vec<Line<'static>> {
 }
 
 /// The card's top: title, branch and diff, who, the pill, the headline, the steps.
-fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Line<'static>> {
+fn detail_head(
+    model: &Model,
+    row: &Row,
+    gh: Option<&GhPr>,
+    iw: usize,
+    beat: u64,
+) -> Vec<Line<'static>> {
     let d = &row.pr.derived;
     let mut head = title_lines(row, iw);
     if let Some(pr) = gh {
@@ -1333,7 +1430,7 @@ fn detail_head(model: &Model, row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Li
     for l in wrap(&headline, iw, 2) {
         head.push(Line::from(span(l, fg(tone_color(d.tone)))));
     }
-    head.push(stepper(row, iw));
+    head.push(stepper(row, iw, beat));
     head
 }
 
@@ -1342,6 +1439,7 @@ fn detail_checks(
     row: &Row,
     gh: Option<&GhPr>,
     iw: usize,
+    beat: u64,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let checks = &row.pr.derived.checks;
     let Some(pr) = gh.filter(|_| checks.total > 0) else {
@@ -1354,7 +1452,7 @@ fn detail_checks(
             span(fit("CHECKS", iw.saturating_sub(cells(&count))), label()),
             span(count, fg(DIM)),
         ]),
-        Line::from(bar(checks, iw)),
+        Line::from(bar(checks, iw, beat)),
     ];
     // What CI is doing, unless the headline says it already (CI running, a draft).
     let doing = activity(checks);
@@ -1412,7 +1510,7 @@ fn detail_tail(row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Line<'static>> {
 
 /// The selected PR as a full card (three panes, strip): the URL at the bottom, the check
 /// rows taking what the rest leaves ("+ N more" standing for the ones cut).
-fn detail(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
+fn detail(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
     hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
@@ -1420,8 +1518,8 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
     let iw = usize_of(inner.width);
     let ih = usize_of(inner.height);
     let gh = model.entry(&row.pr.url).and_then(|e| e.pr.as_ref());
-    let head = detail_head(model, row, gh, iw);
-    let (checks_head, check_rows) = detail_checks(row, gh, iw);
+    let head = detail_head(model, row, gh, iw, ctx.beat);
+    let (checks_head, check_rows) = detail_checks(row, gh, iw, ctx.beat);
     let mut tail = detail_tail(row, gh, iw);
     let mut foot = Vec::new();
     if let Some(when) = checked(model, row) {
@@ -1478,7 +1576,7 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
 }
 
 /// The selected PR in a few lines, under the table (side layout).
-fn card(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
+fn card(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
     hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
@@ -1500,7 +1598,7 @@ fn card(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
         clip(&d.headline, iw),
         fg(tone_color(d.tone)),
     )));
-    lines.push(stepper(row, iw));
+    lines.push(stepper(row, iw, ctx.beat));
     let mut facts = Vec::new();
     if d.checks.total > 0 {
         facts.push(format!("{}/{} checks", d.checks.passed, d.checks.total));
@@ -1756,6 +1854,22 @@ mod tests {
         assert_eq!(tilde("/home/adam", "/home/ada"), "/home/adam");
         assert_eq!(short_count(4620), "4.6k");
         assert_eq!(short_count(812), "812");
+    }
+
+    #[test]
+    fn a_glint_runs_along_the_pending_and_rests_off_it() {
+        // At the first beat it stands four cells before the run: all yellow.
+        assert!(shine(10, 0).all(|c| c == YELLOW));
+        // Six beats on, at the third cell, brightest there and fading either side.
+        let cells: Vec<Color> = shine(10, 6).collect();
+        assert_eq!(cells[2], mix(YELLOW, FG, 0.85));
+        assert!(cells[1] != YELLOW && cells[5] == YELLOW && cells[9] == YELLOW);
+        for beat in 0..40 {
+            assert_eq!(shine(7, beat).count(), 7);
+        }
+        assert_eq!(mix(YELLOW, FG, 0.0), YELLOW);
+        assert_eq!(mix(YELLOW, FG, 1.0), FG);
+        assert_eq!(mix(Color::Reset, FG, 0.5), Color::Reset);
     }
 
     #[test]

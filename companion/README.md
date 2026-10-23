@@ -189,6 +189,11 @@ pane goes):
 The cut-offs sit between the design's reference widths (120, 84 and 49 columns), so each lands well
 inside its own band. A wider terminal never gets a smaller layout.
 
+A PR with something under way (CI running, GitHub still computing, a first fetch) turns the mod's
+spinner in the table and on its card's step, and a glint runs along the checks bar's pending part;
+a job prw runs (a merge, a comment) spins on the status line. prw draws a frame every 90 ms only
+while something on screen moves, and otherwise only when something changes.
+
 ## Crates
 
 - `crates/prw-core`: the pure kernel (no I/O, no clock): protocol types, status logic, the layout, the

@@ -10,7 +10,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use unicode_width::UnicodeWidthStr;
 
-use crate::view::{Ctx, Hits, render};
+use crate::view::{Ctx, Hits, is_animated, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
 const SEARCHES: &str = include_str!("../../../demo/searches.json");
@@ -36,6 +36,7 @@ const SESSIONS: [(&str, &str); 4] = [
 const CTX: Ctx<'static> = Ctx {
     dir: "companion/demo",
     home: "/home/ada",
+    beat: 0,
 };
 
 /// The demo, 12 s after its round, every session live.
@@ -71,10 +72,16 @@ fn screen(model: &Model, width: u16, height: u16) -> String {
 
 /// The screen's text, and where its clicks land.
 fn drawn(model: &Model, width: u16, height: u16) -> (String, Hits) {
+    drawn_at(model, width, height, 0)
+}
+
+/// The screen's text and its clicks, at the animation's `beat`.
+fn drawn_at(model: &Model, width: u16, height: u16, beat: u64) -> (String, Hits) {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
     let mut hits = Hits::default();
+    let ctx = Ctx { beat, ..CTX };
     terminal
-        .draw(|frame| hits = render(frame, model, CTX))
+        .draw(|frame| hits = render(frame, model, ctx))
         .expect("draw");
     let buffer = terminal.backend().buffer();
     let mut out = String::new();
@@ -338,6 +345,24 @@ fn a_click_picks_a_list_and_the_wheel_moves_where_it_is() {
     let model = demo(84, 30);
     let model = click(model, 1, "billing");
     assert_eq!(model.list().label, "billing");
+}
+
+#[test]
+fn a_moving_pr_spins_and_a_still_one_doesnt() {
+    let model = demo(120, 30);
+    assert!(is_animated(&model));
+    assert!(!is_animated(&Model::new(120, 30)));
+    let first = drawn_at(&model, 120, 30, 0).0;
+    let next = drawn_at(&model, 120, 30, 1).0;
+    // #412's CI runs, #301 is loading: each its own frame (its number sets it apart).
+    assert_says(&first, &["⠹ #412", "⠙ #301"]);
+    assert_says(&next, &["⠸ #412", "⠹ #301"]);
+    // #97 couldn't be read, #57 conflicts: nothing under way.
+    assert_says(&next, &["◌ #97", "⚠ #57"]);
+    // The selected PR's step turns too: #412's CI.
+    let model = feed(model, to_row(7));
+    assert_eq!(model.selected_row().map(|r| r.pr.number), Some(412));
+    assert_says(&drawn_at(&model, 120, 30, 0).0, &["⠹ CI"]);
 }
 
 #[test]
