@@ -1,5 +1,6 @@
 //! Drawing the model: one function per pane, into the areas `prw_core::panes` gives. Nothing
-//! here decides anything the model hasn't; it lays out words the core worked out.
+//! here decides anything the model hasn't; it lays out words the core worked out, and notes
+//! where it put what a click can land on ([`Hits`]).
 
 use prw_core::act::{Ask, Copied, Look, Tone, prompt_body};
 use prw_core::gh::{GhPr, PrState};
@@ -12,9 +13,9 @@ use prw_core::status::{
     latest_runs, mergeable_of, meta_of, step_index, verdict_of,
 };
 use prw_core::time::parse_iso;
-use prw_core::ui::{Focus, List, ListId, Model, Poll, Row, agents_live, ago};
+use prw_core::ui::{Focus, Hit, Key, List, ListId, Model, Poll, Row, agents_live, ago};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
@@ -34,8 +35,107 @@ pub struct Ctx<'a> {
     pub home: &'a str,
 }
 
-/// Draws the whole screen.
-pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) {
+/// Where the screen drew what a click can land on. A later zone lies over an earlier one (a
+/// list over its pane, the help over everything). While a question is open, only its answers
+/// take clicks.
+#[derive(Debug, Default)]
+pub struct Hits {
+    zones: Vec<(Rect, Hit)>,
+    is_asking: bool,
+}
+
+impl Hits {
+    /// What a click on this cell lands on.
+    pub fn at(&self, x: u16, y: u16) -> Option<Hit> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(Position::new(x, y)))
+            .map(|&(_, hit)| hit)
+    }
+
+    /// The pane under this cell, for the wheel.
+    pub fn pane_at(&self, x: u16, y: u16) -> Option<Focus> {
+        self.zones.iter().rev().find_map(|&(r, hit)| match hit {
+            Hit::Pane(pane) if r.contains(Position::new(x, y)) => Some(pane),
+            _ => None,
+        })
+    }
+
+    fn add(&mut self, at: Rect, hit: Hit) {
+        if !self.is_asking && !at.is_empty() {
+            self.zones.push((at, hit));
+        }
+    }
+
+    /// The spots of a line drawn across `line` (one row): each at its cells, cut to the row.
+    fn spots(&mut self, line: Rect, spots: Spots) {
+        for (x, width, hit) in spots {
+            let at = Rect::new(line.x.saturating_add(cut(x)), line.y, cut(width), 1);
+            self.add(at.intersection(line), hit);
+        }
+    }
+
+    /// The open question's answers, which alone take clicks while it is open.
+    fn answers(&mut self, line: Rect, spots: Spots) {
+        self.is_asking = false;
+        self.spots(line, spots);
+        self.is_asking = true;
+    }
+}
+
+/// Where on a line its clickable spans lie: their first cell, how many, and what they hit.
+type Spots = Vec<(usize, usize, Hit)>;
+
+/// A line's spans, and the spots among them a click can land on.
+#[derive(Default)]
+struct Marked {
+    spans: Vec<Span<'static>>,
+    spots: Spots,
+}
+
+impl Marked {
+    fn width(&self) -> usize {
+        self.spans.iter().map(Span::width).sum()
+    }
+
+    fn push(&mut self, span: Span<'static>) {
+        self.spans.push(span);
+    }
+
+    /// `spans`, a click on any of them landing on `hit`.
+    fn hit(&mut self, spans: impl IntoIterator<Item = Span<'static>>, hit: Hit) {
+        let x = self.width();
+        self.spans.extend(spans);
+        self.spots.push((x, self.width() - x, hit));
+    }
+
+    fn done(self) -> (Line<'static>, Spots) {
+        (Line::from(self.spans), self.spots)
+    }
+}
+
+/// A cell count as the screen takes it (no screen is 65536 cells wide).
+fn cut(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// The row `i` of `r` (counted from its top), where `r` has it.
+fn row_of(r: Rect, i: usize) -> Option<Rect> {
+    (i < usize_of(r.height)).then(|| Rect::new(r.x, r.y + cut(i), r.width, 1))
+}
+
+/// An offer's key, as the model takes it.
+fn offer_key(key: &str) -> Option<Hit> {
+    key.chars().next().map(|c| Hit::Key(Key::Char(c)))
+}
+
+/// Draws the whole screen, and says where what a click can land on went.
+pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
+    let mut hits = Hits {
+        zones: Vec::new(),
+        is_asking: model.acts().ask().is_some(),
+    };
     let area = frame.area();
     frame
         .buffer_mut()
@@ -46,26 +146,33 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) {
         if r.is_empty() {
             continue;
         }
+        let h = &mut hits;
         match pane {
             Pane::Header => header(frame, r, model, chosen),
-            Pane::Lists => lists_pane(frame, r, model),
-            Pane::Strip => strip(frame, r, model, chosen),
-            Pane::Table => table(frame, r, model, chosen, ctx),
-            Pane::Detail if chosen == Layout::Side => card(frame, r, model),
-            Pane::Detail => detail(frame, r, model),
-            Pane::Status => status(frame, r, model, ctx),
-            Pane::Hints => hints(frame, r, chosen),
+            Pane::Lists => lists_pane(frame, r, model, h),
+            Pane::Strip => strip(frame, r, model, chosen, h),
+            Pane::Table => table(frame, r, model, chosen, ctx, h),
+            Pane::Detail if chosen == Layout::Side => card(frame, r, model, h),
+            Pane::Detail => detail(frame, r, model, h),
+            Pane::Status => status(frame, r, model, ctx, h),
+            Pane::Hints => hints(frame, r, chosen, h),
             Pane::Narrow => narrow(frame, r),
         }
     }
     if chosen == Layout::TooNarrow {
-        return;
+        return hits;
     }
     if let (Some(top), Some(copied)) = (model.acts().view(), model.acts().copied()) {
+        // The mouse is the terminal's while it shows, to select the prompt with.
         prompt_pane(frame, area, top, copied);
-    } else if model.is_help() {
-        help(frame, area, chosen);
+        return Hits::default();
     }
+    if model.is_help() {
+        help(frame, area, chosen);
+        // A click anywhere closes it.
+        hits.add(area, Hit::Key(Key::Char('?')));
+    }
+    hits
 }
 
 // ---- Text -------------------------------------------------------------------------------
@@ -346,10 +453,12 @@ fn open_count(model: &Model) -> usize {
         .count()
 }
 
-fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx) {
+fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
     let width = usize_of(r.width).saturating_sub(2);
     if let Some(ask) = model.acts().ask() {
-        frame.render_widget(Paragraph::new(ask_line(ask, width)), r);
+        let (line, spots) = ask_line(ask, width);
+        hits.answers(r, spots);
+        frame.render_widget(Paragraph::new(line), r);
         return;
     }
     let said = model.header();
@@ -411,40 +520,43 @@ fn counted(n: usize, noun: &str) -> String {
     }
 }
 
-fn hints(frame: &mut Frame, r: Rect, chosen: Layout) {
+fn hints(frame: &mut Frame, r: Rect, chosen: Layout, hits: &mut Hits) {
     // Most needed first: a narrow screen drops the last.
     let h_l = if chosen == Layout::Three {
         "pane"
     } else {
         "list"
     };
+    let char = |c| Key::Char(c);
     let keys = [
-        ("j/k", "move"),
-        ("tab", "list"),
-        ("m", "merge"),
-        ("c", "comment"),
-        ("f", "hand off"),
-        ("o", "browser"),
-        ("?", "help"),
-        ("q", "quit"),
-        ("a", "account"),
-        ("h/l", h_l),
-        ("g/G", "top/end"),
+        ("j/k", "move", char('j')),
+        ("tab", "list", Key::Tab),
+        ("m", "merge", char('m')),
+        ("c", "comment", char('c')),
+        ("f", "hand off", char('f')),
+        ("o", "browser", char('o')),
+        ("?", "help", char('?')),
+        ("q", "quit", char('q')),
+        ("a", "account", char('a')),
+        ("h/l", h_l, char('l')),
+        ("g/G", "top/end", char('g')),
     ];
     let width = usize_of(r.width);
-    let mut spans = vec![span(" ", Style::new())];
-    let mut used = 1;
-    for (key, what) in keys {
-        let need = cells(key) + 1 + cells(what) + 2;
-        if used + need > width {
+    let mut line = Marked::default();
+    line.push(span(" ", Style::new()));
+    for (key, what, press) in keys {
+        if line.width() + cells(key) + 1 + cells(what) + 2 > width {
             break;
         }
-        spans.push(span(key, fg(ACCENT)));
-        spans.push(span(format!(" {what}  "), fg(DIM)));
-        used += need;
+        line.hit(
+            [span(key, fg(ACCENT)), span(format!(" {what}"), fg(DIM))],
+            Hit::Key(press),
+        );
+        line.push(span("  ", fg(DIM)));
     }
+    hits.spots(r, line.spots);
     frame.render_widget(
-        Paragraph::new(filled(spans, width, PANEL)).style(Style::new().bg(PANEL)),
+        Paragraph::new(filled(line.spans, width, PANEL)).style(Style::new().bg(PANEL)),
         r,
     );
 }
@@ -505,6 +617,10 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         clip("Actions go as the gh login that sees the repo.", iw),
         fg(DIM),
     )));
+    lines.push(Line::from(span(
+        clip("A click picks a list or a PR, or presses its key.", iw),
+        fg(DIM),
+    )));
     frame.render_widget(Clear, at);
     frame.render_widget(
         Paragraph::new(lines)
@@ -560,9 +676,10 @@ fn list_line(list: &List, is_on: bool, w: usize) -> Line<'static> {
     filled(spans, w, bg)
 }
 
-fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
+fn lists_pane(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
     let block = boxed("Lists", model.focus() == Focus::Lists);
     let inner = block.inner(r);
+    hits.add(r, Hit::Pane(Focus::Lists));
     frame.render_widget(block, r);
     let w = usize_of(inner.width);
     let ix = 1;
@@ -577,6 +694,9 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
         if Some(i) == first_session {
             lines.push(Line::raw(""));
             lines.push(section("SESSIONS"));
+        }
+        if let Some(at) = row_of(inner, lines.len()) {
+            hits.add(at, Hit::List(i));
         }
         lines.push(list_line(list, i == model.list_index(), w));
     }
@@ -647,7 +767,7 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
+fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut Hits) {
     let width = usize_of(r.width);
     let lists = model.lists();
     let at = model.list_index();
@@ -662,8 +782,16 @@ fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
         let room = width.saturating_sub(3 + 2 + cells(&count) + 3 + cells(&of) + 1);
         spans.push(span(clip(&list.label, room), bold(FG)));
         spans.push(span(count, fg(DIM)));
-        spans.push(span(" ▸", fg(ACCENT)));
         let used: usize = spans.iter().map(Span::width).sum();
+        spans.push(span(" ▸", fg(ACCENT)));
+        hits.spots(
+            r,
+            vec![
+                (0, 3, Hit::Key(Key::BackTab)),
+                (used, 2, Hit::Key(Key::Tab)),
+            ],
+        );
+        let used = used + 2;
         spans.push(Span::raw(
             " ".repeat(width.saturating_sub(used + cells(&of))),
         ));
@@ -687,24 +815,36 @@ fn strip(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
     {
         first += 1;
     }
-    let mut spans = vec![span(if first > 0 { "‹" } else { " " }, fg(DIM))];
-    let mut used = 1;
+    let mut line = Marked::default();
+    if first > 0 {
+        line.hit([span("‹", fg(DIM))], Hit::Key(Key::BackTab));
+    } else {
+        line.push(span(" ", fg(DIM)));
+    }
     let mut shown = first;
     for (i, list) in lists.iter().enumerate().skip(first) {
         let text = label_of(list);
+        let used = line.width();
         if used + cells(&text) + 1 + 4 > width && i != at {
             break;
         }
         let style = if i == at { bold(FG).bg(SEL) } else { fg(BODY) };
-        spans.push(span(clip(&text, width.saturating_sub(used + 1)), style));
-        spans.push(Span::raw(" "));
-        used += cells(&text) + 1;
+        line.hit(
+            [span(clip(&text, width.saturating_sub(used + 1)), style)],
+            Hit::List(i),
+        );
+        line.push(Span::raw(" "));
         shown = i + 1;
     }
     if shown < lists.len() {
-        spans.push(span(format!("+{} ›", lists.len() - shown), fg(DIM)));
+        line.hit(
+            [span(format!("+{} ›", lists.len() - shown), fg(DIM))],
+            Hit::Key(Key::Tab),
+        );
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), r);
+    let (line, spots) = line.done();
+    hits.spots(r, spots);
+    frame.render_widget(Paragraph::new(line), r);
 }
 
 // ---- The table --------------------------------------------------------------------------
@@ -931,7 +1071,8 @@ impl Columns {
     }
 }
 
-fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx) {
+fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let list = model.list();
     let title = if r.width >= 56 {
         format!("{}  ·  {}", list.label, about(model, list, ctx.home))
@@ -960,6 +1101,9 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx) {
     let sel = model.selected_index().unwrap_or(0);
     let offset = sel.saturating_sub(visible - 1);
     for (i, row) in list.rows.iter().enumerate().skip(offset).take(visible) {
+        if let Some(at) = row_of(inner, lines.len()) {
+            hits.add(at, Hit::Row(i));
+        }
         lines.push(columns.row(row, i == sel));
     }
     let total = list.rows.len();
@@ -1268,7 +1412,8 @@ fn detail_tail(row: &Row, gh: Option<&GhPr>, iw: usize) -> Vec<Line<'static>> {
 
 /// The selected PR as a full card (three panes, strip): the URL at the bottom, the check
 /// rows taking what the rest leaves ("+ N more" standing for the ones cut).
-fn detail(frame: &mut Frame, r: Rect, model: &Model) {
+fn detail(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
     };
@@ -1289,10 +1434,16 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
     // The actions a line each where the checks leave room, else as keys on one line.
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
     let actions = action_lines(model, iw);
+    // Where the actions went: a line each in the tail (from this line of it), or as keys.
+    let mut actions_at = None;
+    let mut keys = None;
     if ih.saturating_sub(fixed) >= check_rows.len() + actions.len() {
+        actions_at = Some(tail.len() + 2);
         tail.extend(actions);
     } else if !actions.is_empty() {
-        foot.insert(0, action_keys(model, iw));
+        let (line, spots) = action_keys(model, iw);
+        foot.insert(0, line);
+        keys = Some(spots);
     }
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
     let room = ih.saturating_sub(fixed);
@@ -1306,15 +1457,29 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model) {
         let more = format!("+ {} more", total - (room - 1));
         lines.push(Line::from(span(more, fg(DIM))));
     }
+    let tail_at = lines.len();
     lines.extend(tail);
     let gap = ih.saturating_sub(lines.len() + foot.len());
     lines.extend(std::iter::repeat_n(Line::raw(""), gap));
+    let foot_at = lines.len();
     lines.extend(foot);
     frame.render_widget(Paragraph::new(lines), inner);
+    if let Some(at) = actions_at {
+        for (i, offer) in model.offers().iter().enumerate() {
+            if let (Some(line), Some(hit)) = (row_of(inner, tail_at + at + i), offer_key(offer.key))
+            {
+                hits.add(line, hit);
+            }
+        }
+    }
+    if let (Some(spots), Some(line)) = (keys, row_of(inner, foot_at)) {
+        hits.spots(line, spots);
+    }
 }
 
 /// The selected PR in a few lines, under the table (side layout).
-fn card(frame: &mut Frame, r: Rect, model: &Model) {
+fn card(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
+    hits.add(r, Hit::Pane(Focus::Prs));
     let Some((row, inner)) = selected_box(frame, r, model) else {
         return;
     };
@@ -1366,7 +1531,11 @@ fn card(frame: &mut Frame, r: Rect, model: &Model) {
     if let Some(error) = &row.pr.error {
         lines.push(Line::from(span(clip(&format!("⚠ {error}"), iw), fg(RED))));
     }
-    lines.push(action_keys(model, iw));
+    let (keys, spots) = action_keys(model, iw);
+    if let Some(line) = row_of(inner, lines.len()) {
+        hits.spots(line, spots);
+    }
+    lines.push(keys);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1407,19 +1576,23 @@ fn action_lines(model: &Model, iw: usize) -> Vec<Line<'static>> {
 
 /// The actions as keys on one line, as many as fit (the narrow card):
 /// "m merge  f fix  c comment  o open".
-fn action_keys(model: &Model, iw: usize) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut used = 0;
+fn action_keys(model: &Model, iw: usize) -> (Line<'static>, Spots) {
+    let mut line = Marked::default();
     for o in model.offers() {
-        let need = cells(o.key) + 1 + cells(&o.short);
-        if used + need > iw {
+        if line.width() + cells(o.key) + 1 + cells(&o.short) > iw {
             break;
         }
-        spans.push(span(o.key, fg(ACCENT)));
-        spans.push(span(format!(" {}  ", o.short), fg(look_color(o.look))));
-        used += need + 2;
+        let spans = [
+            span(o.key, fg(ACCENT)),
+            span(format!(" {}", o.short), fg(look_color(o.look))),
+        ];
+        match offer_key(o.key) {
+            Some(hit) => line.hit(spans, hit),
+            None => line.spans.extend(spans),
+        }
+        line.push(span("  ", Style::new()));
     }
-    Line::from(spans)
+    line.done()
 }
 
 /// The last `n` cells of `text`.
@@ -1437,10 +1610,11 @@ fn tail_cells(text: &str, n: usize) -> String {
     kept.into_iter().collect()
 }
 
-/// The question on the bottom line, with the keys that answer it.
-fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
+/// The question on the bottom line, with the keys that answer it (a click on one presses it).
+fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
     let key = |k: &str| span(format!("  {k}"), fg(ACCENT));
     let what = |w: &str| span(format!(" {w}"), fg(DIM));
+    let mut line = Marked::default();
     match ask {
         Ask::Merge {
             number,
@@ -1449,17 +1623,22 @@ fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
             methods,
             ..
         } => {
-            let mut tail = vec![key("y"), what("yes"), key("n"), what("no")];
+            let mut answers = vec![("y", "yes".to_owned()), ("n", "no".to_owned())];
             if let Some(method) = run.method().filter(|_| methods.len() > 1) {
-                tail.extend([key("m"), what(next_method(methods, method).as_str())]);
+                answers.push(("m", next_method(methods, method).as_str().to_owned()));
             }
-            let room = width.saturating_sub(tail.iter().map(|s| cells(&s.content)).sum());
-            let mut spans = vec![
-                Span::raw(" "),
-                span(clip(&merge_question(*run, *number, base), room), bold(FG)),
-            ];
-            spans.extend(tail);
-            Line::from(spans)
+            let tail: usize = answers.iter().map(|(k, w)| 3 + cells(k) + cells(w)).sum();
+            let room = width.saturating_sub(tail);
+            line.push(Span::raw(" "));
+            line.push(span(
+                clip(&merge_question(*run, *number, base), room),
+                bold(FG),
+            ));
+            for (k, w) in answers {
+                if let Some(hit) = offer_key(k) {
+                    line.hit([key(k), what(&w)], hit);
+                }
+            }
         }
         Ask::Comment {
             number,
@@ -1468,41 +1647,51 @@ fn ask_line(ask: &Ask, width: usize) -> Line<'static> {
             ..
         } => {
             let lead = format!(" comment on #{number} › ");
+            // "  ⏎ post · alt-⏎ new line · esc cancel", where there is room: the post and the
+            // cancel take clicks.
+            let parts = ["  ", "⏎ post", " · alt-⏎ new line · ", "esc cancel"];
             let hint = if width >= 70 {
-                "  ⏎ post · alt-⏎ new line · esc cancel"
+                parts.iter().map(|p| cells(p)).sum()
             } else {
-                ""
+                0
             };
-            let room = width.saturating_sub(cells(&lead) + cells(hint) + 1);
-            let mut spans = vec![span(lead, bold(ACCENT))];
+            let room = width.saturating_sub(cells(&lead) + hint + 1);
+            line.push(span(lead, bold(ACCENT)));
             if text.is_empty() {
-                spans.push(span(" ", Style::new().bg(ACCENT)));
+                line.push(span(" ", Style::new().bg(ACCENT)));
                 if !login.is_empty() {
-                    spans.push(span(clip(&format!(" as {login}"), room), fg(DIM)));
+                    line.push(span(clip(&format!(" as {login}"), room), fg(DIM)));
                 }
             } else {
-                spans.push(span(tail_cells(&text.replace('\n', "↵"), room), fg(FG)));
-                spans.push(span(" ", Style::new().bg(ACCENT)));
+                line.push(span(tail_cells(&text.replace('\n', "↵"), room), fg(FG)));
+                line.push(span(" ", Style::new().bg(ACCENT)));
             }
-            let used: usize = spans.iter().map(|s| cells(&s.content)).sum();
-            spans.push(Span::raw(
-                " ".repeat(width.saturating_sub(used + cells(hint))),
+            line.push(Span::raw(
+                " ".repeat(width.saturating_sub(line.width() + hint)),
             ));
-            spans.push(span(hint, fg(DIM)));
-            Line::from(spans)
+            if hint > 0 {
+                let [gap, post, alt, cancel] = parts;
+                line.push(span(gap, fg(DIM)));
+                line.hit([span(post, fg(DIM))], Hit::Key(Key::Enter));
+                line.push(span(alt, fg(DIM)));
+                line.hit([span(cancel, fg(DIM))], Hit::Key(Key::Esc));
+            }
         }
         Ask::Pick { number, kinds, .. } => {
-            let mut spans = vec![span(format!(" Hand off #{number}:"), bold(FG))];
+            line.push(span(format!(" Hand off #{number}:"), bold(FG)));
             for kind in kinds {
-                spans.extend([
-                    key(&kind.key().to_string()),
-                    span(format!(" {}", kind.about()), fg(BODY)),
-                ]);
+                line.hit(
+                    [
+                        key(&kind.key().to_string()),
+                        span(format!(" {}", kind.about()), fg(BODY)),
+                    ],
+                    Hit::Key(Key::Char(kind.key())),
+                );
             }
-            spans.extend([key("esc"), what("cancel")]);
-            Line::from(spans)
+            line.hit([key("esc"), what("cancel")], Hit::Key(Key::Esc));
         }
     }
+    line.done()
 }
 
 /// The prompt last copied, the whole screen, to read, or to select and copy by hand where

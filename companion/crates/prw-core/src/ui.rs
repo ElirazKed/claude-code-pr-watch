@@ -151,6 +151,23 @@ pub enum Msg {
     Copied(Result<String, String>),
     /// The browser a [`Cmd::Open`] asked for, for this URL: opened, or why not.
     Opened(String, Result<(), String>),
+    /// A click, on what the view drew there.
+    Click(Hit),
+    /// The wheel, over a pane: rows down (positive) or up.
+    Scroll(Focus, isize),
+}
+
+/// What a click lands on, as the view drew it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Hit {
+    /// A key's hint, an offer, or a question's answer: as if the key were pressed.
+    Key(Key),
+    /// A list, by its index in [`Model::lists`].
+    List(usize),
+    /// A row of the selected list, by its index.
+    Row(usize),
+    /// A pane where nothing else is: the movement keys move there.
+    Pane(Focus),
 }
 
 /// What `prw`'s own poller said after a tick.
@@ -587,7 +604,12 @@ impl Model {
 
     /// Moves the selection in the focused pane by `by` rows (clamped at the ends).
     fn step(&mut self, by: isize) {
-        match self.focus() {
+        self.step_in(self.focus(), by);
+    }
+
+    /// Moves the selection in `pane` by `by` rows (clamped at the ends).
+    fn step_in(&mut self, pane: Focus, by: isize) {
+        match pane {
             Focus::Lists => {
                 let to = self.list_index().saturating_add_signed(by);
                 self.switch_to(to.min(self.lists.len() - 1));
@@ -609,6 +631,30 @@ impl Model {
         let n = self.lists.len();
         let to = (self.list_index() + n).saturating_add_signed(by) % n;
         self.switch_to(to);
+    }
+
+    /// A click: a key's, or a list, a row or a pane picked. A list or a row is focused, so
+    /// the keys go on from it.
+    fn click(&mut self, hit: Hit) -> Vec<Cmd> {
+        let is_three = self.layout() == Layout::Three;
+        match hit {
+            Hit::Key(key) => return self.key(key),
+            Hit::List(index) if index < self.lists.len() => {
+                if is_three {
+                    self.focus = Focus::Lists;
+                }
+                self.switch_to(index);
+            }
+            Hit::Row(index) => {
+                if let Some(row) = self.list().rows.get(index) {
+                    self.selected = Some(row.pr.url.clone());
+                    self.focus = Focus::Prs;
+                }
+            }
+            Hit::Pane(focus) if is_three => self.focus = focus,
+            Hit::List(_) | Hit::Pane(_) => {}
+        }
+        Vec::new()
     }
 
     fn key(&mut self, key: Key) -> Vec<Cmd> {
@@ -709,6 +755,11 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             Vec::new()
         }
         Msg::Key(key) => model.key(key),
+        Msg::Click(hit) => model.click(hit),
+        Msg::Scroll(pane, by) => {
+            model.step_in(pane, by);
+            Vec::new()
+        }
     };
 
     (model, cmds)
@@ -1410,6 +1461,41 @@ mod tests {
             [Cmd::Quit]
         );
         assert_eq!(update(model, Msg::Key(Key::CtrlC)).1, [Cmd::Quit]);
+    }
+
+    #[test]
+    fn clicks_pick_lists_and_rows_and_press_keys() {
+        let sessions = vec![
+            session("s1", by_mod(&[A]), 0),
+            session("s2", by_mod(&[B, C]), 0),
+        ];
+        let model = read(Model::new(120, 30), [Msg::SessionsRead(sessions, 0)]);
+        let model = read(model, [Msg::Click(Hit::List(2))]);
+        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        assert_eq!(model.focus(), Focus::Lists);
+        let second = model.list().rows[1].pr.url.clone();
+        let model = read(model, [Msg::Click(Hit::Row(1))]);
+        assert_eq!(model.selected(), Some(second.as_str()));
+        assert_eq!(model.focus(), Focus::Prs);
+        // Past the end, nothing changes.
+        let model = read(model, [Msg::Click(Hit::Row(9)), Msg::Click(Hit::List(9))]);
+        assert_eq!(model.selected(), Some(second.as_str()));
+        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        // The wheel moves in the pane it's over, the focus where it was.
+        let model = read(model, [Msg::Scroll(Focus::Lists, -1)]);
+        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        assert_eq!(model.focus(), Focus::Prs);
+        let model = read(model, [Msg::Click(Hit::Pane(Focus::Lists))]);
+        assert_eq!(model.focus(), Focus::Lists);
+        let model = read(model, [Msg::Click(Hit::Key(Key::Char('?')))]);
+        assert!(model.is_help());
+        assert_eq!(
+            update(model, Msg::Click(Hit::Key(Key::CtrlC))).1,
+            [Cmd::Quit]
+        );
+        // Narrower, a list picked leaves the focus on the PRs: there is no lists pane.
+        let model = read(Model::new(84, 30), [Msg::Click(Hit::List(0))]);
+        assert_eq!(model.focus(), Focus::Prs);
     }
 
     #[test]

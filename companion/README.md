@@ -168,6 +168,12 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 
 Enter (the full PR view) comes in a later step.
 
+The mouse works too. A click picks a list or a PR, or presses the key it shows: a hint on the
+bottom row, an action on the card, an answer to the question on the status line (while a question
+is open, only its answers take clicks). The wheel moves in the pane under it. While `v` shows the
+prompt, prw lets go of the mouse, so a plain drag selects the prompt's text; elsewhere most
+terminals select with Shift (iTerm2: Option) held.
+
 ## Layout
 
 The screen adapts to the terminal's width (`prw_core::layout`, and `prw_core::panes` for where each
