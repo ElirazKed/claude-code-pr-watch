@@ -100,6 +100,12 @@ pub enum Outcome {
         owner: String,
         login: String,
     },
+    /// `login` couldn't see the PR, so the fetch put the owner back on `kept`.
+    PutBack {
+        owner: String,
+        login: String,
+        kept: String,
+    },
     SwitchFailed(String),
     /// The prompt, and what didn't come for it ("No log for build: …").
     Prompt {
@@ -118,7 +124,7 @@ impl Outcome {
         match self {
             Self::Merged(_) | Self::MergeFailed { .. } => Slot::Merge,
             Self::Commented { .. } | Self::CommentFailed(_) => Slot::Comment,
-            Self::Switched { .. } | Self::SwitchFailed(_) => Slot::Switch,
+            Self::Switched { .. } | Self::PutBack { .. } | Self::SwitchFailed(_) => Slot::Switch,
             Self::Prompt { kind, .. } | Self::PromptFailed { kind, .. } => Slot::Handoff(*kind),
         }
     }
@@ -279,6 +285,9 @@ pub struct Acts {
     pending: BTreeMap<(String, Kind), String>,
     /// The `v` pane's first line, while it shows.
     view: Option<usize>,
+    /// The login `a` moved each owner to that the fetch put back, so the next press goes on
+    /// past it ([`switch_to`](crate::accounts::switch_to)); gone once a switch takes.
+    tried: BTreeMap<String, String>,
 }
 
 impl Acts {
@@ -303,6 +312,12 @@ impl Acts {
     #[must_use]
     pub const fn copied(&self) -> Option<&Copied> {
         self.copied.as_ref()
+    }
+
+    /// The login `a` last moved `owner` to that the fetch put back, this run.
+    #[must_use]
+    pub fn tried(&self, owner: &str) -> Option<&str> {
+        self.tried.get(owner).map(String::as_str)
     }
 
     /// The `v` pane's first line, while it shows.
@@ -761,7 +776,13 @@ impl Acts {
                 self.say(format!("✓ Commented on #{number}{by}"), Tone::Good, now);
             }
             Outcome::Switched { owner, login } => {
+                self.tried.remove(&owner);
                 self.say(format!("✓ {owner}'s PRs go as {login}"), Tone::Good, now);
+            }
+            Outcome::PutBack { owner, login, kept } => {
+                let text = format!("✗ {login} can't see it: {owner}'s PRs stay as {kept}");
+                self.tried.insert(owner, login);
+                self.say(text, Tone::Bad, now);
             }
             Outcome::SwitchFailed(error) => {
                 self.say(format!("✗ #{number}: {error}"), Tone::Bad, now);

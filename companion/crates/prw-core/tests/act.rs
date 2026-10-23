@@ -536,3 +536,66 @@ fn with_one_login_there_is_nothing_to_switch_to_and_nothing_said_of_it() {
         ("One gh login: nothing to switch to", Tone::Info)
     );
 }
+
+#[test]
+fn with_three_logins_a_login_put_back_is_passed_over() {
+    let model = with_logins(model_of(pr(json!({}))), "ada", &["bob", "cy"]);
+    let (model, cmds) = feed(model, keys("a"));
+    let to = |cmds: &[Cmd]| match cmds {
+        [Cmd::Run(Job::Switch { login, .. })] => login.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(to(&cmds), "bob");
+    // bob couldn't see it: the fetch kept ada, and the next press tries cy.
+    let done = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::PutBack {
+            owner: "acme".to_owned(),
+            login: "bob".to_owned(),
+            kept: "ada".to_owned(),
+        },
+    };
+    let (model, _) = feed(model, [Msg::Done(done)]);
+    assert_eq!(
+        toast(&model),
+        ("✗ bob can't see it: acme's PRs stay as ada", Tone::Bad)
+    );
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "As ada → switch to cy")
+    );
+    let (model, cmds) = feed(model, keys("a"));
+    assert_eq!(to(&cmds), "cy");
+    // A switch that never got to the fetch (nothing written) isn't counted as tried.
+    let failed = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::SwitchFailed("Couldn't write results.json".to_owned()),
+    };
+    let (model, _) = feed(model, [Msg::Done(failed)]);
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "As ada → switch to cy")
+    );
+    // One that took forgets what was put back: on from the new login, in order.
+    let took = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::Switched {
+            owner: "acme".to_owned(),
+            login: "cy".to_owned(),
+        },
+    };
+    let (model, _) = feed(model, [Msg::Done(took)]);
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "As ada → switch to bob")
+    );
+}
