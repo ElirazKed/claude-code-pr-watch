@@ -3,13 +3,17 @@
 
 use proptest::prelude::*;
 use prw_core::act::{Done, Outcome};
+use prw_core::gh::PrState;
 use prw_core::handoff::Kind;
-use prw_core::ui::{Focus, Hit, Key, Model, Msg, PollerSaid, Session, update};
+use prw_core::ui::{Focus, Hit, Key, LIT_MS, Model, Msg, PollerSaid, Session, update};
 use prw_core::{parse_session, parse_shared};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+
 use unicode_width::UnicodeWidthStr;
 
+use crate::theme::SEL;
 use crate::view::{Ctx, Hits, is_animated, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
@@ -37,20 +41,26 @@ const CTX: Ctx<'static> = Ctx {
     dir: "companion/demo",
     home: "/home/ada",
     beat: 0,
+    now: 0,
 };
 
-/// The demo, 12 s after its round, every session live.
-fn demo(width: u16, height: u16) -> Model {
-    let shared = parse_shared(RESULTS).expect("the demo's results.json reads");
-    let now = shared.fetched_at + 12_000;
-    let sessions = SESSIONS
+/// The demo's session files, as read at `now`.
+fn sessions_at(now: i64) -> Vec<Session> {
+    SESSIONS
         .iter()
         .map(|&(id, text)| Session {
             id: id.to_owned(),
             file: parse_session(text).expect("a demo session file reads"),
             mtime: now - 5_000,
         })
-        .collect();
+        .collect()
+}
+
+/// The demo, 12 s after its round, every session live.
+fn demo(width: u16, height: u16) -> Model {
+    let shared = parse_shared(RESULTS).expect("the demo's results.json reads");
+    let now = shared.fetched_at + 12_000;
+    let sessions = sessions_at(now);
     feed(
         Model::new(width, height),
         [
@@ -100,6 +110,17 @@ fn drawn_at(model: &Model, width: u16, height: u16, beat: u64) -> (String, Hits)
         out.push('\n');
     }
     (out, hits)
+}
+
+/// The screen's cells, as drawn with `ctx`.
+fn painted(model: &Model, width: u16, height: u16, ctx: Ctx) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            render(frame, model, ctx);
+        })
+        .expect("draw");
+    terminal.backend().buffer().clone()
 }
 
 /// The cell where `word` first shows on screen row `y`.
@@ -350,8 +371,8 @@ fn a_click_picks_a_list_and_the_wheel_moves_where_it_is() {
 #[test]
 fn a_moving_pr_spins_and_a_still_one_doesnt() {
     let model = demo(120, 30);
-    assert!(is_animated(&model));
-    assert!(!is_animated(&Model::new(120, 30)));
+    assert!(is_animated(&model, 0));
+    assert!(!is_animated(&Model::new(120, 30), 0));
     let first = drawn_at(&model, 120, 30, 0).0;
     let next = drawn_at(&model, 120, 30, 1).0;
     // #412's CI runs, #301 is loading: each its own frame (its number sets it apart).
@@ -363,6 +384,93 @@ fn a_moving_pr_spins_and_a_still_one_doesnt() {
     let model = feed(model, to_row(7));
     assert_eq!(model.selected_row().map(|r| r.pr.number), Some(412));
     assert_says(&drawn_at(&model, 120, 30, 0).0, &["⠹ CI"]);
+}
+
+#[test]
+fn a_pr_that_changes_glows_and_a_new_one_wipes_in() {
+    const PR_57: &str = "https://github.com/acme/billing/pull/57";
+    let model = demo(120, 30);
+    let now = model.now();
+    let mut merged = parse_shared(RESULTS).expect("the demo's results.json reads");
+    if let Some(pr) = merged.prs.get_mut(PR_57).and_then(|e| e.pr.as_mut()) {
+        pr.state = PrState::Merged;
+    }
+    // #409 leaves its one session's list, then comes back with #57 merged.
+    let mut without = sessions_at(now);
+    without[0].file.urls.retain(|u| !u.ends_with("/409"));
+    let at = now + 1_000;
+    let model = feed(
+        model,
+        [
+            Msg::Tick(now),
+            Msg::SessionsRead(without, now),
+            Msg::SharedRead(Ok(merged), at),
+            Msg::SessionsRead(sessions_at(at), at),
+        ],
+    );
+    let ctx = |ms: i64| Ctx {
+        now: at + ms,
+        ..CTX
+    };
+    let text = drawn(&model, 120, 30).0;
+    // Its row in the table (the selected one), not the card's title.
+    let (x, y) = cell_of(&text, row_saying(&text, "✓ #57"), "#57");
+    let bg = |ms: i64| painted(&model, 120, 30, ctx(ms))[(x, y)].bg;
+    // Lit in its new pill's colour, easing back to the plain row.
+    assert_ne!(bg(0), bg(LIT_MS));
+    assert_ne!(bg(0), bg(LIT_MS / 2));
+    assert_eq!(bg(LIT_MS), SEL);
+    // #409 wipes in from the left: its title isn't there yet, then is.
+    let y = row_saying(&text, "Release 4.12");
+    let line = |ms: i64| {
+        let buffer = painted(&model, 120, 30, ctx(ms));
+        (0..120)
+            .map(|x| {
+                buffer[(x, u16::try_from(y).expect("a row"))]
+                    .symbol()
+                    .to_owned()
+            })
+            .collect::<String>()
+    };
+    assert!(!line(40).contains("Release 4.12"), "{}", line(40));
+    assert!(line(40).contains('#'));
+    assert!(line(450).contains("Release 4.12"));
+}
+
+#[test]
+fn a_toast_fades_at_the_end_of_its_time() {
+    let model = demo(120, 30);
+    let now = model.now();
+    let model = feed(
+        model,
+        [Msg::Opened(
+            "https://github.com/acme/billing/pull/57".into(),
+            Ok(()),
+        )],
+    );
+    let until = model.acts().toast().expect("a toast").until;
+    let text = drawn(&model, 120, 30).0;
+    let (x, y) = cell_of(&text, row_saying(&text, "Opened #57"), "Opened");
+    let fg = |at: i64| painted(&model, 120, 30, Ctx { now: at, ..CTX })[(x, y)].fg;
+    assert_eq!(fg(now), fg(until - 600));
+    assert_ne!(fg(until - 300), fg(now));
+    // Its time up, the line says what it said before.
+    let gone = painted(&model, 120, 30, Ctx { now: until, ..CTX });
+    let line: String = (0..120).map(|x| gone[(x, y)].symbol()).collect();
+    assert!(line.contains("Watching"), "{line}");
+    // Drawn every beat from a tick before the fade on, and not before that or after.
+    let still = feed(
+        Model::new(120, 30),
+        [Msg::Opened(
+            "https://github.com/acme/billing/pull/57".into(),
+            Ok(()),
+        )],
+    );
+    let until = still.acts().toast().expect("a toast").until;
+    let animated: Vec<bool> = [until - 2_000, until - 1_500, until - 1, until]
+        .map(|at| is_animated(&still, at))
+        .into();
+    assert_eq!(animated, [false, true, true, false]);
 }
 
 #[test]
