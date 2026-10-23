@@ -34,6 +34,18 @@ pub use crate::entries::NOT_FOUND;
 /// with no name (and no writer) to tell them apart.
 pub const UNNAMED: &str = "Claude session";
 
+/// How long a PR stays lit once it shows up or its pill changes (ms): the view fades it out.
+pub const LIT_MS: i64 = 1_500;
+
+/// A PR that just showed up in the lists or changed its pill, as the view lights it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lit {
+    /// When (ms).
+    pub at: i64,
+    /// New to the lists, not changed.
+    pub is_new: bool,
+}
+
 /// Whether a session file with this mtime is live at `now` (both ms). Pure: liveness is
 /// only ever a function of the two.
 #[must_use]
@@ -351,6 +363,10 @@ pub struct Model {
     // Worked out from the rest on each message that changes it. Never empty: All is first.
     lists: Vec<List>,
     header: Header,
+    /// The PRs lit, by URL. None until a tick finds `results.json` read, so the lists filling
+    /// up (at the start, or once it's back) light nothing.
+    lit: BTreeMap<String, Lit>,
+    is_settled: bool,
 }
 
 impl Model {
@@ -373,6 +389,8 @@ impl Model {
             acts: Acts::default(),
             lists: Vec::new(),
             header: Header::default(),
+            lit: BTreeMap::new(),
+            is_settled: false,
         };
         model.rebuild();
         model
@@ -513,6 +531,12 @@ impl Model {
         &self.acts
     }
 
+    /// Whether a PR is lit, and how.
+    #[must_use]
+    pub fn lit(&self, url: &str) -> Option<Lit> {
+        self.lit.get(url).copied()
+    }
+
     /// The PR an action key acts on: the one an open question is about, else the selected
     /// one.
     fn target(&self, acts: &Acts) -> Option<Target<'_>> {
@@ -565,6 +589,8 @@ impl Model {
         let mut was = self.selected_index();
         let own = self.poller.as_ref().map(|p| p.own.as_str());
         let searches = self.poller.as_ref().map_or(&[][..], |p| &p.searches);
+        // Only once settled: before then nothing lights, so the old pills aren't needed.
+        let pills_were = self.is_settled.then(|| pills(&self.lists));
         self.lists = lists_of(
             self.shared.as_ref(),
             &self.sessions,
@@ -572,6 +598,12 @@ impl Model {
             own,
             searches,
         );
+        let now = self.now;
+        if let Some(pills_were) = pills_were {
+            let pills_are = pills(&self.lists);
+            self.lit.extend(lights(&pills_were, &pills_are, now));
+        }
+        self.lit.retain(|_, lit| now - lit.at < LIT_MS);
         if !self.lists.iter().any(|l| l.id == self.list) {
             // A different list: its first row, not the old list's place.
             self.list = ListId::All;
@@ -724,6 +756,7 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         }
         Msg::Tick(at) => {
             model.now = at;
+            model.is_settled = model.shared.is_some();
             model.acts.tick(at);
             model.rebuild();
             Vec::new()
@@ -817,6 +850,32 @@ pub fn tracked_of(url: &str, entry: Option<&Entry>) -> Tracked {
         derived: derive(pr, None),
         error,
     }
+}
+
+/// Each listed PR's pill, by URL.
+fn pills(lists: &[List]) -> BTreeMap<String, PillKind> {
+    lists
+        .iter()
+        .flat_map(|list| &list.rows)
+        .map(|row| (row.pr.url.clone(), row.pr.derived.pill))
+        .collect()
+}
+
+/// The PRs to light `at` this time, from the pills before and now: one the lists gained,
+/// or one whose pill changed.
+fn lights<'a>(
+    was: &'a BTreeMap<String, PillKind>,
+    now: &'a BTreeMap<String, PillKind>,
+    at: i64,
+) -> impl Iterator<Item = (String, Lit)> + 'a {
+    now.iter().filter_map(move |(url, pill)| {
+        let is_new = match was.get(url) {
+            None => true,
+            Some(was) if was != pill => false,
+            Some(_) => return None,
+        };
+        Some((url.clone(), Lit { at, is_new }))
+    })
 }
 
 /// The lists for these files at `now`: All, then `own`'s (this `prw`'s session file, its
@@ -1307,6 +1366,100 @@ mod tests {
 
     fn read(model: Model, msgs: impl IntoIterator<Item = Msg>) -> Model {
         msgs.into_iter().fold(model, |m, msg| update(m, msg).0)
+    }
+
+    #[test]
+    fn a_pr_that_shows_up_or_changes_lights_for_a_while() {
+        let shared = |prs: Vec<(&str, Entry)>| Shared {
+            fetched_at: 1,
+            next_at: 1,
+            prs: prs.into_iter().map(|(u, e)| (u.to_owned(), e)).collect(),
+            ..Shared::default()
+        };
+        let merged = Entry {
+            pr: Some(GhPr {
+                state: PrState::Merged,
+                ..open(1).pr.expect("a PR")
+            }),
+            ..open(1)
+        };
+        // The first reads light nothing: everything is new then.
+        let model = read(
+            Model::new(120, 30),
+            [Msg::SharedRead(
+                Ok(shared(vec![(A, open(1)), (B, open(2))])),
+                0,
+            )],
+        );
+        assert_eq!(model.lit(A), None);
+        let model = read(
+            model,
+            [
+                Msg::Tick(1_000),
+                Msg::SharedRead(
+                    Ok(shared(vec![(A, merged), (B, open(2)), (C, open(3))])),
+                    2_000,
+                ),
+            ],
+        );
+        let changed = Lit {
+            at: 2_000,
+            is_new: false,
+        };
+        assert_eq!(model.lit(A), Some(changed));
+        assert_eq!(model.lit(B), None);
+        assert_eq!(model.lit(C).map(|l| l.is_new), Some(true));
+        // Still lit just before its time, out after it.
+        let model = read(model, [Msg::Tick(2_000 + LIT_MS - 1)]);
+        assert_eq!(model.lit(A), Some(changed));
+        let model = read(model, [Msg::Tick(2_000 + LIT_MS)]);
+        assert_eq!((model.lit(A), model.lit(C)), (None, None));
+        // results.json gone, then back: the lists filling up again is no news.
+        let model = read(
+            model,
+            [
+                Msg::SharedRead(Err(ReadFailure::Missing), 5_000),
+                Msg::Tick(5_000),
+                Msg::SharedRead(Ok(shared(vec![(A, open(1))])), 6_000),
+            ],
+        );
+        assert_eq!(model.lit(A), None);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn lights_name_the_pr_gained_or_changed_and_nothing_else(
+            listed in proptest::collection::btree_map(0..8u8, 0..4u8, 1..8),
+            pick in 0..8usize,
+            other in 0..4usize,
+        ) {
+            const PILLS: [PillKind; 4] =
+                [PillKind::Ready, PillKind::CiRunning, PillKind::Merged, PillKind::Loading];
+            let now: BTreeMap<String, PillKind> = listed
+                .iter()
+                .map(|(&u, &p)| (u.to_string(), PILLS[usize::from(p)]))
+                .collect();
+            let lit = |was: &BTreeMap<String, PillKind>| -> Vec<(String, bool)> {
+                lights(was, &now, 7).map(|(url, l)| (url, l.is_new)).collect()
+            };
+            // Nothing changed: nothing lights. From nothing: everything is new.
+            proptest::prop_assert!(lit(&now).is_empty());
+            let all_new: Vec<(String, bool)> = now.keys().map(|u| (u.clone(), true)).collect();
+            proptest::prop_assert_eq!(lit(&BTreeMap::new()), all_new);
+            // One PR gained, or one PR's pill changed: that PR alone, new or changed.
+            let (url, pill) = now.iter().nth(pick % now.len()).expect("one listed");
+            let mut gained = now.clone();
+            gained.remove(url);
+            proptest::prop_assert_eq!(lit(&gained), [(url.clone(), true)]);
+            let mut changed = now.clone();
+            let was = PILLS[(PILLS.iter().position(|p| p == pill).expect("a pill") + 1 + other % 3) % 4];
+            changed.insert(url.clone(), was);
+            proptest::prop_assert_eq!(lit(&changed), [(url.clone(), false)]);
+            // A PR that left the lists doesn't light.
+            let mut left = now.clone();
+            left.insert("gone".into(), PillKind::Ready);
+            proptest::prop_assert!(lit(&left).is_empty());
+        }
     }
 
     #[test]

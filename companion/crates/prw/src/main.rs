@@ -57,7 +57,7 @@ use crate::view::Hits;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How often the files are looked at, and ages move on.
-const TICK: Duration = Duration::from_secs(1);
+const TICK: Duration = Duration::from_millis(view::TICK_MS as u64);
 /// How soon a finished job shows, at most.
 const SLICE: Duration = Duration::from_millis(100);
 
@@ -446,6 +446,7 @@ fn event_loop(
         dir: &shown,
         home: &home,
         beat: 0,
+        now: 0,
     };
     let started = Instant::now();
     let size = terminal.size()?;
@@ -468,11 +469,12 @@ fn event_loop(
         let beat = started.elapsed().as_millis() / view::BEAT.as_millis();
         let ctx = view::Ctx {
             beat: u64::try_from(beat).unwrap_or(0),
+            now: clock.now(),
             ..ctx
         };
         terminal.draw(|frame| hits = view::render(frame, &model, ctx))?;
         let drawn_at = Instant::now();
-        let is_animated = view::is_animated(&model);
+        let is_animated = view::is_animated(&model, ctx.now);
         // Wait for a key, a paste, a resize or a finished job until the next tick; only a
         // message redraws, or, while something on screen moves, the next beat. A tick that is
         // due comes first, so a stream of keys can't hold it off.

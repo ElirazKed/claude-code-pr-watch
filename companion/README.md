@@ -191,8 +191,10 @@ inside its own band. A wider terminal never gets a smaller layout.
 
 A PR with something under way (CI running, GitHub still computing, a first fetch) turns the mod's
 spinner in the table and on its card's step, and a glint runs along the checks bar's pending part;
-a job prw runs (a merge, a comment) spins on the status line. prw draws a frame every 90 ms only
-while something on screen moves, and otherwise only when something changes.
+a job prw runs (a merge, a comment) spins on the status line. A PR whose status changes glows in
+its new colour for a moment, a PR new to the lists wipes in, and a toast fades out at the end of
+its time. prw draws a frame every 90 ms only while something on screen moves, and otherwise only
+when something changes.
 
 ## Crates
 

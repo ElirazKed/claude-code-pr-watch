@@ -2,7 +2,7 @@
 //! here decides anything the model hasn't; it lays out words the core worked out, and notes
 //! where it put what a click can land on ([`Hits`]).
 
-use prw_core::act::{Ask, Copied, Look, Tone, prompt_body};
+use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, prompt_body};
 use prw_core::gh::{GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
@@ -13,7 +13,9 @@ use prw_core::status::{
     latest_runs, mergeable_of, meta_of, step_index, verdict_of,
 };
 use prw_core::time::parse_iso;
-use prw_core::ui::{Focus, Hit, Key, List, ListId, Model, Poll, Row, agents_live, ago};
+use prw_core::ui::{
+    Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, agents_live, ago,
+};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -35,10 +37,25 @@ pub struct Ctx<'a> {
     pub home: &'a str,
     /// The animation's frame, one every [`BEAT`]: what turns the spinners and runs the shine.
     pub beat: u64,
+    /// The model's clock at this frame (ms): what fades the lit rows and the toast.
+    pub now: i64,
 }
 
 /// How long each frame of the animation shows, as the mod's (`FRAME_MS`).
 pub const BEAT: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// How long a toast takes to fade, at the end of its time (ms).
+const FADE_MS: i64 = 600;
+
+/// How often the loop looks at the files when nothing else wakes it (ms): how far ahead a fade
+/// starts drawing, since that tick would otherwise be its next frame.
+pub const TICK_MS: u16 = 1_000;
+
+/// How far ahead a fade starts drawing (ms): one [`TICK_MS`].
+const LEAD_MS: i64 = TICK_MS as i64;
+
+/// How long a new row takes to wipe in, left to right (ms).
+const WIPE_MS: usize = 450;
 
 /// The spinner's frames, the mod's (`BRAILLE`).
 const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -48,17 +65,62 @@ fn is_spinning(row: &Row) -> bool {
     row.pr.derived.is_moving && !(row.pr.error.is_some() && row.pr.state.is_none())
 }
 
-/// Whether anything on screen moves (a PR the list shows, a job's spinner on the status
-/// line), so the loop draws a frame every [`BEAT`]. Nothing does under the prompt pane or on a
-/// screen too narrow to draw.
-pub fn is_animated(model: &Model) -> bool {
+/// Whether anything on screen moves at `now` (a PR the list shows or lights, a job's spinner
+/// on the status line, a toast about to fade), so the loop draws a frame every [`BEAT`].
+/// Nothing does under the prompt pane or on a screen too narrow to draw.
+pub fn is_animated(model: &Model, now: i64) -> bool {
     let acts = model.acts();
     if acts.view().is_some() || model.layout() == Layout::TooNarrow {
         return false;
     }
-    let is_busy_shown =
-        acts.ask().is_none() && acts.toast().is_none() && acts.busy().next().is_some();
-    is_busy_shown || model.list().rows.iter().any(is_spinning)
+    let toast = toast_at(acts, now);
+    let is_busy_shown = acts.ask().is_none() && toast.is_none() && acts.busy().next().is_some();
+    let is_fading =
+        acts.ask().is_none() && toast.is_some_and(|t| t.until - now <= FADE_MS + LEAD_MS);
+    let is_lit = |row: &Row| glow(model.lit(&row.pr.url), now) > 0.0;
+    is_busy_shown
+        || is_fading
+        || model
+            .list()
+            .rows
+            .iter()
+            .any(|r| is_spinning(r) || is_lit(r))
+}
+
+/// The toast, while it still shows at `now`.
+fn toast_at(acts: &Acts, now: i64) -> Option<&Toast> {
+    acts.toast().filter(|t| t.until > now)
+}
+
+/// How much of a light is left at `now`: 1 as it lights, easing out to 0 at [`LIT_MS`].
+fn glow(lit: Option<Lit>, now: i64) -> f64 {
+    #[expect(clippy::cast_precision_loss, reason = "ms within LIT_MS")]
+    // A light from after this frame (the clock stepped back) isn't drawn.
+    let left = lit
+        .filter(|l| l.at <= now)
+        .map_or(0.0, |l| 1.0 - (now - l.at) as f64 / LIT_MS as f64);
+    left.clamp(0.0, 1.0).powi(2)
+}
+
+/// The first `n` cells of `spans`.
+fn first_cells(spans: Vec<Span<'static>>, n: usize) -> Vec<Span<'static>> {
+    let mut left = n;
+    spans
+        .into_iter()
+        .map(|s| {
+            let kept: String = s
+                .content
+                .chars()
+                .take_while(|ch| {
+                    let w = ch.width().unwrap_or(0);
+                    let fits = w <= left;
+                    left = if fits { left - w } else { 0 };
+                    fits
+                })
+                .collect();
+            Span::styled(kept, s.style)
+        })
+        .collect()
 }
 
 /// `from` moved `share` (0..=1) of the way to `to`, where both are RGB.
@@ -535,8 +597,11 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
         return;
     }
     let said = model.header();
-    let (text, colour) = if let Some(toast) = model.acts().toast() {
-        (toast.text.clone(), tone_of(toast.tone))
+    let (text, colour) = if let Some(toast) = toast_at(model.acts(), ctx.now) {
+        // Its last moments fade it into the ground.
+        #[expect(clippy::cast_precision_loss, reason = "ms within FADE_MS")]
+        let left = ((toast.until - ctx.now) as f64 / FADE_MS as f64).min(1.0);
+        (toast.text.clone(), mix(INK, tone_of(toast.tone), left))
     } else if let Some(busy) = model.acts().busy().next() {
         // The spinner, then the words.
         let words = clip(&format!("{busy}…"), width.saturating_sub(2));
@@ -1112,10 +1177,17 @@ impl Columns {
         ])
     }
 
-    fn row(self, row: &Row, is_sel: bool, beat: u64) -> Line<'static> {
-        let bg = if is_sel { SEL } else { INK };
-        let on = |style: Style| style.bg(bg);
+    /// A PR's row at `beat`; lit, at `now` it glows (a new one in the accent, a changed one
+    /// in its new pill's colour), and a new one wipes in.
+    fn row(self, row: &Row, is_sel: bool, beat: u64, lit: Option<Lit>, now: i64) -> Line<'static> {
         let kind = row.pr.derived.pill;
+        let tint = if lit.is_some_and(|l| l.is_new) {
+            ACCENT
+        } else {
+            pill_color(kind)
+        };
+        let bg = mix(if is_sel { SEL } else { INK }, tint, 0.3 * glow(lit, now));
+        let on = |style: Style| style.bg(bg);
         let glyph = if is_spinning(row) {
             let turning = spinner(beat, row.pr.number, pill_color(kind));
             turning.patch_style(on(Style::new()))
@@ -1157,6 +1229,14 @@ impl Columns {
         }
         spans.push(span(" ", on(Style::new())));
         spans.extend(status_cell(row, bg, beat));
+        let wiping = lit
+            .filter(|l| l.is_new)
+            .and_then(|l| usize::try_from(now - l.at).ok())
+            .filter(|&ms| ms < WIPE_MS);
+        let spans = match wiping {
+            Some(ms) => first_cells(spans, self.width * ms / WIPE_MS),
+            None => spans,
+        };
         filled(spans, self.width, bg)
     }
 }
@@ -1194,7 +1274,8 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hi
         if let Some(at) = row_of(inner, lines.len()) {
             hits.add(at, Hit::Row(i));
         }
-        lines.push(columns.row(row, i == sel, ctx.beat));
+        let line = columns.row(row, i == sel, ctx.beat, model.lit(&row.pr.url), ctx.now);
+        lines.push(line);
     }
     let total = list.rows.len();
     let block = if total > visible {
