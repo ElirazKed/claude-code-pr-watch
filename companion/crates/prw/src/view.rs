@@ -16,6 +16,7 @@ use prw_core::time::parse_iso;
 use prw_core::ui::{
     Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, agents_live, ago,
 };
+use prw_core::version::OWN;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -285,7 +286,7 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
         return Hits::default();
     }
     if model.is_help() {
-        help(frame, area, chosen);
+        help(frame, area, model, chosen);
         // A click anywhere closes it, and the wheel moves nothing under it.
         hits.zones.clear();
         hits.add(area, Hit::Key(Key::Char('?')));
@@ -522,6 +523,7 @@ fn header(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
     let mut left = vec![span(" ◆ pr-watch", bg(bold(ACCENT)))];
     if chosen == Layout::Three {
         left.push(span(" companion", bg(fg(BODY))));
+        left.push(span(format!(" {OWN}"), bg(fg(DIM))));
     }
     let mut words = vec![said.poll.words().to_owned()];
     if let Some(age) = said.age {
@@ -632,21 +634,32 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
         (format!("⚠ {problem}"), YELLOW)
     } else if let Some(error) = model.list().search.as_ref().and_then(|s| s.error.as_ref()) {
         (format!("⚠ {}: {error}", model.list().label), YELLOW)
-    } else if said.live == 0 {
-        (
-            "No live sessions: showing every PR in results.json".to_owned(),
-            DIM,
-        )
     } else {
-        (
+        let quiet = if said.live == 0 {
+            "No live sessions: showing every PR in results.json".to_owned()
+        } else {
             format!(
                 "Watching {} · {} live · {}",
                 counted(open_count(model), "open PR"),
                 counted(said.live, "session"),
                 counted(model.lists().len(), "list")
-            ),
-            DIM,
-        )
+            )
+        };
+        // With nothing else to say, a newer prw stays said after its toast.
+        if let Some(newer) = model.newer() {
+            let news = clip(&news_of(newer), width);
+            let room = width.saturating_sub(cells(&news) + 3);
+            let mut spans = vec![Span::raw(" ")];
+            // Too narrow for both: the news alone, with no stray separator.
+            if room > 1 {
+                spans.push(span(clip(&quiet, room), fg(DIM)));
+                spans.push(span(" · ", fg(DIM)));
+            }
+            spans.push(span(news, fg(ACCENT)));
+            frame.render_widget(Paragraph::new(Line::from(spans)), r);
+            return;
+        }
+        (quiet, DIM)
     };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -655,6 +668,11 @@ fn status(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
         ])),
         r,
     );
+}
+
+/// What the status line and the key help say of a newer `prw`.
+fn news_of(newer: &str) -> String {
+    format!("↑ prw {newer} is out")
 }
 
 /// `n` and the noun, plural but for one.
@@ -722,7 +740,7 @@ fn narrow(frame: &mut Frame, r: Rect) {
     frame.render_widget(Paragraph::new(lines), at);
 }
 
-fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
+fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
     let h_l = if chosen == Layout::Three {
         "lists pane, PRs pane"
     } else {
@@ -743,13 +761,6 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         ("q  esc", "quit"),
     ];
     let width = 56.min(area.width.saturating_sub(2));
-    let height = 18.min(area.height.saturating_sub(2));
-    let at = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
     let iw = usize_of(width).saturating_sub(4);
     let mut lines = vec![Line::raw("")];
     for (key, what) in keys {
@@ -767,10 +778,24 @@ fn help(frame: &mut Frame, area: Rect, chosen: Layout) {
         clip("A click picks a list or a PR, or presses its key.", iw),
         fg(DIM),
     )));
+    // The version is in the title, which a short terminal doesn't cut; a newer one below.
+    if let Some(newer) = model.newer() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(span(clip(&news_of(newer), iw), fg(ACCENT))));
+    }
+    // As tall as what it says, and its borders.
+    let tall = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let height = tall.min(area.height.saturating_sub(2));
+    let at = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
     frame.render_widget(Clear, at);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(boxed("Keys", true).padding(Padding::horizontal(1)))
+            .block(boxed(&format!("Keys · prw {OWN}"), true).padding(Padding::horizontal(1)))
             .style(Style::new().bg(PANEL)),
         at,
     );

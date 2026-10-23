@@ -37,6 +37,9 @@ pub struct Config {
     pub searches: Vec<Search>,
     /// What was wrong with the file, where something was: the searches that read are kept.
     pub problems: Vec<String>,
+    /// Whether to ask GitHub, every couple of hours, for a newer `prw` (`check_version`);
+    /// `None` where the file wouldn't read, so what it said before stands.
+    pub check_version: Option<bool>,
 }
 
 impl Default for Config {
@@ -49,6 +52,7 @@ impl Default for Config {
                 login: None,
             }],
             problems: Vec::new(),
+            check_version: Some(true),
         }
     }
 }
@@ -58,6 +62,12 @@ impl Default for Config {
 struct File {
     #[serde(default)]
     search: Vec<Entry>,
+    #[serde(default = "yes")]
+    check_version: bool,
+}
+
+const fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -78,6 +88,7 @@ pub fn parse_config(text: &str) -> Config {
             return Config {
                 searches: Vec::new(),
                 problems: vec![format!("config.toml: {}", one_line(&error.to_string()))],
+                check_version: None,
             };
         }
     };
@@ -111,7 +122,11 @@ pub fn parse_config(text: &str) -> Config {
         ));
         searches.truncate(SEARCHES_MAX);
     }
-    Config { searches, problems }
+    Config {
+        searches,
+        problems,
+        check_version: Some(file.check_version),
+    }
 }
 
 /// The text GitHub is asked: the query as written, made a PR search where it doesn't say so
@@ -213,6 +228,18 @@ query = "x"
         let typo = parse_config("[[search]]\nname = \"A\"\nqeury = \"x\"\nquery = \"y\"");
         assert_eq!(typo.searches, []);
         assert!(typo.problems[0].contains("qeury"), "{:?}", typo.problems);
+    }
+
+    #[test]
+    fn the_version_check_is_on_unless_a_file_that_reads_says_off() {
+        assert_eq!(Config::default().check_version, Some(true));
+        assert_eq!(parse_config("").check_version, Some(true));
+        // A file that won't read says nothing either way: an earlier "off" stands.
+        assert_eq!(parse_config("not toml [").check_version, None);
+        let off =
+            parse_config("check_version = false\n\n[[search]]\nname = \"a\"\nquery = \"b\"\n");
+        assert_eq!(off.check_version, Some(false));
+        assert_eq!(off.searches.len(), 1);
     }
 
     #[test]

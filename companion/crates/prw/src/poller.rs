@@ -35,6 +35,7 @@ use prw_core::search::{
     searches_query,
 };
 use prw_core::ui::{Listed, PollerSaid, Session, is_live};
+use prw_core::version::{ASK, ASK_MS, is_due, version_in};
 use prw_core::{parse_lease, parse_session};
 use serde_json::{Map, Value};
 
@@ -296,6 +297,7 @@ impl ConfigFile {
                 Config {
                     searches: Vec::new(),
                     problems: vec![format!("config.toml: {error}")],
+                    check_version: None,
                 },
             ),
         };
@@ -326,6 +328,10 @@ pub struct Poller<G: Gh, C: Clock> {
     /// The saved searches now in `config.toml`, and what was wrong with it.
     searches: Vec<Search>,
     problems: Vec<String>,
+    check_version: bool,
+    /// The newest `prw` GitHub last said, and the last ask: when, and whether it answered.
+    latest: Option<String>,
+    asked_latest: Option<(i64, bool)>,
     /// Each search's finds, by the search (a changed query is a new one).
     saved: BTreeMap<(String, String, Option<String>), Saved>,
     searched_at: Option<i64>,
@@ -356,6 +362,9 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             config: ConfigFile::default(),
             searches: Vec::new(),
             problems: Vec::new(),
+            check_version: true,
+            latest: None,
+            asked_latest: None,
             saved: BTreeMap::new(),
             searched_at: None,
             search_error: None,
@@ -407,6 +416,13 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         unique_urls(self.mine.values().flatten())
     }
 
+    /// The newest `prw` on GitHub, as the active login reads it; `None` where nothing does.
+    fn ask_latest(&self) -> Option<String> {
+        let argv: Vec<String> = ASK.iter().map(|&arg| arg.to_owned()).collect();
+        let ran = self.gh.run(&argv, None, ms(ASK_MS)).ok()?;
+        ran.is_ok().then(|| version_in(&ran.stdout)).flatten()
+    }
+
     /// One tick (`tick`): search when due, say what `prw` watches, then take the round where
     /// it is due, the give-way rule allows it, and the lease is this poller's.
     pub fn tick(&mut self) -> PollerSaid {
@@ -417,7 +433,13 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         if let Some(config) = self.config.load() {
             self.searches = config.searches;
             self.problems = config.problems;
+            self.check_version = config.check_version.unwrap_or(self.check_version);
             self.searched_at = None;
+        }
+        if self.check_version && is_due(self.asked_latest, at) {
+            let answer = self.ask_latest();
+            self.asked_latest = Some((at, answer.is_some()));
+            self.latest = answer.or_else(|| self.latest.take());
         }
         let is_search_due = self
             .searched_at
@@ -463,6 +485,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             logins: self.ctx().logins(false, GH_MS),
             searches: listed,
             problems: self.problems.clone(),
+            latest: self.latest.clone().filter(|_| self.check_version),
         }
     }
 
@@ -874,6 +897,40 @@ mod tests {
 
     fn now() -> i64 {
         ms_of(SystemTime::now())
+    }
+
+    #[test]
+    fn the_newest_prw_is_asked_once_in_a_while_and_not_where_the_config_says_off() {
+        let dir = Dir::new("latest");
+        let asks = |gh: &FakeGh| {
+            gh.calls
+                .borrow()
+                .iter()
+                .filter(|c| is("Cargo.toml")(c))
+                .count()
+        };
+        let cargo = "[workspace.package]\nversion = \"99.0.0\"\n";
+        let answers = gh();
+        answers.on(is("Cargo.toml"), move |_| ok(cargo));
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, answers, FakeClock::new(now(), 1));
+        assert_eq!(poller.tick().latest.as_deref(), Some("99.0.0"));
+        assert_eq!(poller.tick().latest.as_deref(), Some("99.0.0"));
+        assert_eq!(asks(&poller.gh), 1);
+        // No answer (nothing reads): what was known stands, and nothing is asked again yet.
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1));
+        assert_eq!(poller.tick().latest, None);
+        poller.tick();
+        assert_eq!(asks(&poller.gh), 1);
+        // Off: never asked.
+        let config = dir.0.join("config.toml");
+        fs::write(&config, "check_version = false\n").unwrap();
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller =
+            Poller::new(files, gh(), FakeClock::new(now(), 1)).with_config(ConfigFile::at(config));
+        assert_eq!(poller.tick().latest, None);
+        assert_eq!(asks(&poller.gh), 0);
     }
 
     #[test]
