@@ -461,7 +461,8 @@ fn event_loop(
         // The mouse is prw's but while the prompt pane shows, to select from.
         let wants_clicks = model.acts().view().is_none();
         if wants_clicks != is_clicking {
-            execute!(io::stdout(), Clicks(wants_clicks))?;
+            // As with the paste mode, a terminal that won't take it is no reason to stop.
+            let _ = execute!(io::stdout(), Clicks(wants_clicks));
             is_clicking = wants_clicks;
         }
         let beat = started.elapsed().as_millis() / view::BEAT.as_millis();

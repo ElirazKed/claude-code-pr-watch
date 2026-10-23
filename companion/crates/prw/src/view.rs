@@ -48,10 +48,17 @@ fn is_spinning(row: &Row) -> bool {
     row.pr.derived.is_moving && !(row.pr.error.is_some() && row.pr.state.is_none())
 }
 
-/// Whether anything on screen moves (a PR the list shows, a job running), so the loop
-/// draws a frame every [`BEAT`].
+/// Whether anything on screen moves (a PR the list shows, a job's spinner on the status
+/// line), so the loop draws a frame every [`BEAT`]. Nothing does under the prompt pane or on a
+/// screen too narrow to draw.
 pub fn is_animated(model: &Model) -> bool {
-    model.list().rows.iter().any(is_spinning) || model.acts().busy().next().is_some()
+    let acts = model.acts();
+    if acts.view().is_some() || model.layout() == Layout::TooNarrow {
+        return false;
+    }
+    let is_busy_shown =
+        acts.ask().is_none() && acts.toast().is_none() && acts.busy().next().is_some();
+    is_busy_shown || model.list().rows.iter().any(is_spinning)
 }
 
 /// `from` moved `share` (0..=1) of the way to `to`, where both are RGB.
@@ -217,7 +224,8 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
     }
     if model.is_help() {
         help(frame, area, chosen);
-        // A click anywhere closes it.
+        // A click anywhere closes it, and the wheel moves nothing under it.
+        hits.zones.clear();
         hits.add(area, Hit::Key(Key::Char('?')));
     }
     hits
@@ -1531,12 +1539,14 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
 
     // The actions a line each where the checks leave room, else as keys on one line.
     let fixed = head.len() + checks_head.len() + tail.len() + foot.len() + 1;
+    let offers = model.offers();
     let actions = action_lines(model, iw);
     // Where the actions went: a line each in the tail (from this line of it), or as keys.
     let mut actions_at = None;
     let mut keys = None;
     if ih.saturating_sub(fixed) >= check_rows.len() + actions.len() {
-        actions_at = Some(tail.len() + 2);
+        // Past the lines action_lines puts above the offers.
+        actions_at = Some(tail.len() + actions.len() - offers.len());
         tail.extend(actions);
     } else if !actions.is_empty() {
         let (line, spots) = action_keys(model, iw);
@@ -1563,7 +1573,7 @@ fn detail(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) 
     lines.extend(foot);
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some(at) = actions_at {
-        for (i, offer) in model.offers().iter().enumerate() {
+        for (i, offer) in offers.iter().enumerate() {
             if let (Some(line), Some(hit)) = (row_of(inner, tail_at + at + i), offer_key(offer.key))
             {
                 hits.add(line, hit);
@@ -1721,11 +1731,11 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
             methods,
             ..
         } => {
-            let mut answers = vec![("y", "yes".to_owned()), ("n", "no".to_owned())];
+            let mut answers = vec![('y', "yes".to_owned()), ('n', "no".to_owned())];
             if let Some(method) = run.method().filter(|_| methods.len() > 1) {
-                answers.push(("m", next_method(methods, method).as_str().to_owned()));
+                answers.push(('m', next_method(methods, method).as_str().to_owned()));
             }
-            let tail: usize = answers.iter().map(|(k, w)| 3 + cells(k) + cells(w)).sum();
+            let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
             let room = width.saturating_sub(tail);
             line.push(Span::raw(" "));
             line.push(span(
@@ -1733,9 +1743,7 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
                 bold(FG),
             ));
             for (k, w) in answers {
-                if let Some(hit) = offer_key(k) {
-                    line.hit([key(k), what(&w)], hit);
-                }
+                line.hit([key(&k.to_string()), what(&w)], Hit::Key(Key::Char(k)));
             }
         }
         Ask::Comment {
