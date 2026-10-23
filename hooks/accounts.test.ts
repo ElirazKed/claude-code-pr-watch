@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { AGAIN_MS, KEEP_MS, NO_LOGINS, bestLogin, everyLogin, isDue, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
+import { AGAIN_MS, KEEP_MS, NO_LOGINS, bestLogin, everyLogin, isDue, learned, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
 
 const T = Date.parse('2026-10-07T12:00:00Z')
 
@@ -96,6 +96,12 @@ describe('which login asks', () => {
     expect(bestLogin([asked, { login: 'hubot', seen: 1, rank: rankOf('ADMIN') }], 2)).toBe('octocat')
     expect(bestLogin([asked, { login: 'hubot', seen: 2, rank: rankOf('READ') }], 2)).toBe('octocat')
     expect(bestLogin([], 0)).toBe('')
+  })
+
+  test('a fetch hands on only what it learned, so a login set meanwhile stands', async () => {
+    const before = { acme: 'hubot', globex: 'octocat' }
+    expect(learned(before, { ...before, globex: 'hubot', initech: 'octocat' })).toEqual({ globex: 'hubot', initech: 'octocat' })
+    expect(learned(before, before)).toEqual({})
   })
 
   test('a login is asked only about the missing PRs it has not answered for', async () => {

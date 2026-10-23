@@ -7,6 +7,7 @@
 //! After a merge or a comment the PR is asked again at once (the mod's `fetchNow`), so the
 //! card shows what happened before the next round; with `--no-poll` nothing is written.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -76,11 +77,7 @@ impl<G: Gh, C: Clock> Runner<G, C> {
     /// The login that acts on `repo` (the one the poll found sees it, else gh's active one),
     /// and its token or why there is none.
     fn token_for(&self, repo: &str) -> (String, Result<String, String>) {
-        let accounts = std::fs::read_to_string(self.dir.join("results.json"))
-            .ok()
-            .and_then(|text| parse_shared(&text).ok())
-            .map(|shared| shared.accounts)
-            .unwrap_or_default();
+        let accounts = self.accounts();
         let owner = repo.split('/').next().unwrap_or_default();
         self.with_ctx(|ctx| {
             let logins = ctx.logins(false, GH_MS);
@@ -88,6 +85,15 @@ impl<G: Gh, C: Clock> Runner<G, C> {
             let token = ctx.token(&login, GH_MS);
             (login, token)
         })
+    }
+
+    /// `results.json`'s owner → login map, as it stands (empty where it doesn't read).
+    fn accounts(&self) -> BTreeMap<String, String> {
+        std::fs::read_to_string(self.dir.join("results.json"))
+            .ok()
+            .and_then(|text| parse_shared(&text).ok())
+            .map(|shared| shared.accounts)
+            .unwrap_or_default()
     }
 
     /// The PR asked again, so its card shows what an action did.
@@ -104,6 +110,12 @@ impl<G: Gh, C: Clock> Runner<G, C> {
         let (number, outcome) = match job {
             Job::Merge { number, run, .. } => (number, self.merge(&url, run)),
             Job::Comment { number, text, .. } => (number, self.comment(&url, number, &text)),
+            Job::Switch {
+                number,
+                owner,
+                login,
+                ..
+            } => (number, self.switch(&url, owner, login)),
             Job::Collect {
                 kind,
                 facts,
@@ -114,6 +126,25 @@ impl<G: Gh, C: Clock> Runner<G, C> {
             url,
             number,
             outcome,
+        }
+    }
+
+    /// `owner` remembered as `login` in `results.json`, and the PR asked again as it, so its
+    /// card shows what that login sees and may do.
+    fn switch(&self, url: &str, owner: String, login: String) -> Outcome {
+        let Some(files) = &self.files else {
+            return Outcome::SwitchFailed("With --no-poll nothing is written".to_owned());
+        };
+        if let Err(error) = files.remember(&owner, &login) {
+            return Outcome::SwitchFailed(format!("Couldn't write results.json: {error}"));
+        }
+        self.refresh(url);
+        // A login that can't see the PR: the fetch found it as another, and kept that one.
+        match self.accounts().remove(&owner) {
+            Some(kept) if kept != login => Outcome::SwitchFailed(format!(
+                "{login} can't see it: {owner}'s PRs stay as {kept}"
+            )),
+            _ => Outcome::Switched { owner, login },
         }
     }
 
@@ -328,6 +359,10 @@ pub fn demo(job: Job) -> Done {
             number,
             Outcome::CommentFailed(format!("Not posted: {NOTHING}")),
         ),
+        Job::Switch { number, .. } => (
+            number,
+            Outcome::SwitchFailed("Not switched: the demo writes nothing".to_owned()),
+        ),
         Job::Collect {
             kind: Kind::Fix,
             facts,
@@ -367,7 +402,7 @@ mod tests {
     use crate::gh::RunError;
     use crate::gh::fake::{Call, FakeClock, FakeGh, failed, ok};
     use prw_core::status::MergeMethod::Squash;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
 
     const URL: &str = "https://github.com/acme/app/pull/7";
@@ -746,6 +781,45 @@ mod tests {
         });
         assert!(
             matches!(done.outcome, Outcome::Prompt { text, .. } if text.contains("- unit · failed"))
+        );
+    }
+
+    #[test]
+    fn a_switch_writes_the_owners_login_and_asks_the_pr_again_as_it() {
+        let dir = Dir::new("switch");
+        let gh = gh();
+        gh.on(starts(&["api", "graphql"]), |_| ok("{}"));
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let runner = Runner::new(gh, FakeClock::new(1_000, 1), dir.0.clone(), Some(files));
+        let job = Job::Switch {
+            url: URL.to_owned(),
+            number: 7,
+            owner: "acme".to_owned(),
+            login: "ada".to_owned(),
+        };
+        let done = runner.run(job.clone());
+        assert_eq!(
+            done.outcome,
+            Outcome::Switched {
+                owner: "acme".to_owned(),
+                login: "ada".to_owned()
+            }
+        );
+        let results: Value =
+            serde_json::from_str(&fs::read_to_string(dir.0.join("results.json")).unwrap()).unwrap();
+        assert_eq!(results["accounts"]["acme"], "ada");
+        // Asked again, as the login switched to.
+        let calls = runner.gh.calls.borrow();
+        let asked = calls
+            .iter()
+            .find(|c| c.argv.first().is_some_and(|a| a == "api"));
+        assert_eq!(asked.and_then(|c| c.token.as_deref()), Some("ada"));
+        drop(calls);
+        // With --no-poll nothing is written.
+        let outcome = self::runner(self::gh(), &dir).run(job).outcome;
+        assert_eq!(
+            outcome,
+            Outcome::SwitchFailed("With --no-poll nothing is written".to_owned())
         );
     }
 }

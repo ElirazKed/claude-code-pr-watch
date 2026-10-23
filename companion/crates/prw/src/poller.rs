@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use prw_core::accounts::every_login;
+use prw_core::accounts::{every_login, learned};
 use prw_core::batch::{PrRef, ref_from_url};
 use prw_core::config::{Config, SEARCH_CAP, Search, parse_config, search_text};
 use prw_core::poll::{
@@ -113,6 +113,30 @@ impl Files {
         fs::create_dir_all(&self.dir)?;
         fs::write(&temp, serde_json::to_vec(shared)?)?;
         fs::rename(&temp, &path)
+    }
+
+    /// `owner`'s PRs go as `login` from now on: `results.json`'s `accounts`, the rest as it
+    /// stands. The mod reads the same map, so it follows.
+    pub fn remember(&self, owner: &str, login: &str) -> io::Result<()> {
+        // Torn or bad, the file isn't written over with the accounts alone: its PRs, rates and
+        // hold would go.
+        let mut raw = match self.read_raw() {
+            Some(raw) => raw,
+            None if self.results().exists() => {
+                return Err(io::Error::other("it doesn't read; try again"));
+            }
+            None => Map::new(),
+        };
+        let accounts = raw
+            .entry("accounts")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !accounts.is_object() {
+            *accounts = Value::Object(Map::new());
+        }
+        if let Some(accounts) = accounts.as_object_mut() {
+            accounts.insert(owner.to_owned(), login.into());
+        }
+        self.write_results(&raw)
     }
 
     fn read_lease(&self) -> Option<Lease> {
@@ -436,6 +460,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             own: self.files.own().to_owned(),
             polled_at: self.polled_at,
             error: self.search_error.clone(),
+            logins: self.ctx().logins(false, GH_MS),
             searches: listed,
             problems: self.problems.clone(),
         }
@@ -649,7 +674,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let outcome = Outcome {
             found: fetched.found,
             failed: fetched.errors,
-            accounts,
+            accounts: learned(&before.accounts, &accounts),
             rates,
             needed: fetched.needed,
             wait_ms: fetched.wait_ms,
@@ -718,7 +743,7 @@ fn fetch_now<G: Gh, C: Clock>(
     let outcome = Outcome {
         found: fetched.found,
         failed: fetched.errors,
-        accounts,
+        accounts: learned(&before.accounts, &accounts),
         rates: fetched.rates,
         needed: fetched.needed,
         wait_ms: fetched.wait_ms,

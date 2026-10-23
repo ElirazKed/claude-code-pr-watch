@@ -38,6 +38,13 @@ pub enum Job {
         number: u64,
         text: String,
     },
+    /// `owner`'s PRs go as `login` from now on, and this one is asked again as it.
+    Switch {
+        url: String,
+        number: u64,
+        owner: String,
+        login: String,
+    },
     /// Read what a Fix or Address prompt needs (the checks and logs, or the threads) and write
     /// the prompt. `failing` are the card's failing checks, for when the checks won't read.
     Collect {
@@ -52,7 +59,7 @@ impl Job {
     #[must_use]
     pub fn url(&self) -> &str {
         match self {
-            Self::Merge { url, .. } | Self::Comment { url, .. } => url,
+            Self::Merge { url, .. } | Self::Comment { url, .. } | Self::Switch { url, .. } => url,
             Self::Collect { facts, .. } => &facts.url,
         }
     }
@@ -61,6 +68,7 @@ impl Job {
         match self {
             Self::Merge { .. } => Slot::Merge,
             Self::Comment { .. } => Slot::Comment,
+            Self::Switch { .. } => Slot::Switch,
             Self::Collect { kind, .. } => Slot::Handoff(*kind),
         }
     }
@@ -87,6 +95,12 @@ pub enum Outcome {
     },
     /// Not posted (or not known to be): what the toast says.
     CommentFailed(String),
+    /// The owner's PRs go as this login now.
+    Switched {
+        owner: String,
+        login: String,
+    },
+    SwitchFailed(String),
     /// The prompt, and what didn't come for it ("No log for build: …").
     Prompt {
         kind: Kind,
@@ -104,6 +118,7 @@ impl Outcome {
         match self {
             Self::Merged(_) | Self::MergeFailed { .. } => Slot::Merge,
             Self::Commented { .. } | Self::CommentFailed(_) => Slot::Comment,
+            Self::Switched { .. } | Self::SwitchFailed(_) => Slot::Switch,
             Self::Prompt { kind, .. } | Self::PromptFailed { kind, .. } => Slot::Handoff(*kind),
         }
     }
@@ -114,6 +129,7 @@ impl Outcome {
 pub enum Slot {
     Merge,
     Comment,
+    Switch,
     Handoff(Kind),
 }
 
@@ -205,14 +221,18 @@ pub enum Look {
 }
 
 /// The selected PR, as an action key needs it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Target<'a> {
     pub row: &'a Row,
     /// Its data, where a round has read it.
     pub pr: Option<&'a GhPr>,
-    /// The login that acts on its repo, as `results.json` maps the owner ("" where it
-    /// doesn't say).
-    pub login: &'a str,
+    /// The login that acts on its repo, as the poll picks it ([`login_for`]: "" where
+    /// nothing says).
+    ///
+    /// [`login_for`]: crate::accounts::login_for
+    pub login: String,
+    /// The login a switch moves its owner to, where gh has another.
+    pub next: Option<String>,
 }
 
 impl Target<'_> {
@@ -344,7 +364,7 @@ impl Acts {
 
     /// What the selected PR offers, for its actions list, most useful first.
     #[must_use]
-    pub fn offers(&self, target: Target<'_>) -> Vec<Offer> {
+    pub fn offers(&self, target: &Target<'_>) -> Vec<Offer> {
         let url = target.url();
         let is_busy = |slot| self.busy.get(&(url.to_owned(), slot));
         let offer = |key, words: String, short: &str, look| Offer {
@@ -393,6 +413,12 @@ impl Acts {
                 Look::Plain,
             ),
         });
+        if let Some(words) = is_busy(Slot::Switch) {
+            offers.push(busy("a", words));
+        } else if let Some(next) = &target.next {
+            let words = format!("As {} → switch to {next}", target.login);
+            offers.push(offer("a", words, "account", Look::Plain));
+        }
         offers.push(offer(
             "o",
             "Open on GitHub ↗".to_owned(),
@@ -431,10 +457,11 @@ impl Acts {
             return Some(self.answer(ask, key, target, now));
         }
         let cmds = match key {
-            Key::Char('m') => self.merge(target?, now),
+            Key::Char('m') => self.merge(&target?, now),
             Key::Char('c') => self.comment(target?),
-            Key::Char('f') => self.hand_off(target?, now),
+            Key::Char('f') => self.hand_off(&target?, now),
             Key::Char('o') => vec![Cmd::Open(target?.url().to_owned())],
+            Key::Char('a') => self.switch(&target?, now),
             Key::Char('v') => {
                 if self.copied.is_some() {
                     self.view = Some(0);
@@ -531,7 +558,7 @@ impl Acts {
                 let chosen = kinds.iter().copied().find(|k| key == Key::Char(k.key()));
                 match (chosen, target) {
                     (Some(kind), Some(target)) if target.url() == url => {
-                        self.run_handoff(kind, target, now)
+                        self.run_handoff(kind, &target, now)
                     }
                     // The PR is gone from the lists: so is the question.
                     (Some(_), _) => Vec::new(),
@@ -556,6 +583,7 @@ impl Acts {
         let words = match &job {
             Job::Merge { number, run, .. } => format!("{} #{number}", run.busy()),
             Job::Comment { number, .. } => format!("Posting the comment on #{number}"),
+            Job::Switch { owner, login, .. } => format!("Moving {owner} to {login}"),
             Job::Collect {
                 kind: Kind::Fix,
                 facts,
@@ -567,7 +595,7 @@ impl Acts {
         vec![Cmd::Run(job)]
     }
 
-    fn merge(&mut self, target: Target<'_>, now: i64) -> Vec<Cmd> {
+    fn merge(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
         let number = target.number();
         let Some(pr) = target.pr else {
             self.say(format!("#{number} hasn't been read yet"), Tone::Info, now);
@@ -609,12 +637,28 @@ impl Acts {
             text: self.drafts.get(&url).cloned().unwrap_or_default(),
             url,
             number: target.number(),
-            login: target.login.to_owned(),
+            login: target.login,
         });
         Vec::new()
     }
 
-    fn hand_off(&mut self, target: Target<'_>, now: i64) -> Vec<Cmd> {
+    /// The PR's owner moved to gh's next login, where there is one.
+    fn switch(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
+        let Some(login) = target.next.clone() else {
+            self.say("One gh login: nothing to switch to", Tone::Info, now);
+            return Vec::new();
+        };
+        let owner = target.row.repo.split('/').next().unwrap_or_default();
+        let job = Job::Switch {
+            url: target.url().to_owned(),
+            number: target.number(),
+            owner: owner.to_owned(),
+            login,
+        };
+        self.start(job, now)
+    }
+
+    fn hand_off(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
         let number = target.number();
         let kinds = target.pr.map(kinds_of).unwrap_or_default();
         match kinds.as_slice() {
@@ -643,7 +687,7 @@ impl Acts {
         }
     }
 
-    fn run_handoff(&mut self, kind: Kind, target: Target<'_>, now: i64) -> Vec<Cmd> {
+    fn run_handoff(&mut self, kind: Kind, target: &Target<'_>, now: i64) -> Vec<Cmd> {
         let Some(pr) = target.pr else {
             return Vec::new();
         };
@@ -715,6 +759,12 @@ impl Acts {
                     format!(" as {login}")
                 };
                 self.say(format!("✓ Commented on #{number}{by}"), Tone::Good, now);
+            }
+            Outcome::Switched { owner, login } => {
+                self.say(format!("✓ {owner}'s PRs go as {login}"), Tone::Good, now);
+            }
+            Outcome::SwitchFailed(error) => {
+                self.say(format!("✗ #{number}: {error}"), Tone::Bad, now);
             }
             Outcome::CommentFailed(error) => {
                 self.say(

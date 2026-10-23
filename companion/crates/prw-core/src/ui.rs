@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::accounts::{Logins, login_for, next_login};
 use crate::act::{Acts, Ask, Done, Job, Offer, Target};
 use crate::layout::{Layout, layout};
 use crate::order::{Tracked, order};
@@ -165,6 +166,8 @@ pub struct PollerSaid {
     pub searches: Vec<Listed>,
     /// What was wrong with `config.toml`, where something was.
     pub problems: Vec<String>,
+    /// gh's logins, as it last read them: which one a PR goes as, and the one a switch moves to.
+    pub logins: Logins,
 }
 
 /// A saved search as `prw`'s poller last ran it (and as `companion/demo/searches.json` has
@@ -510,22 +513,31 @@ impl Model {
 
     fn target_of<'a>(&'a self, row: &'a Row) -> Target<'a> {
         let owner = row.repo.split('/').next().unwrap_or_default();
+        let logins = self.poller.as_ref().map(|p| &p.logins);
+        let none = BTreeMap::new();
+        let accounts = self.shared.as_ref().map_or(&none, |s| &s.accounts);
+        let login = login_for(accounts, owner, logins.unwrap_or(&Logins::default()));
         Target {
             row,
             pr: self.entry(&row.pr.url).and_then(|e| e.pr.as_ref()),
-            login: self
-                .shared
-                .as_ref()
-                .and_then(|s| s.accounts.get(owner))
-                .map_or("", String::as_str),
+            next: logins.and_then(|l| next_login(l, &login)),
+            login,
         }
+    }
+
+    /// The login a row's PR goes as, where there is more than one to choose from (and so
+    /// worth saying).
+    #[must_use]
+    pub fn login_of(&self, row: &Row) -> Option<String> {
+        let target = self.target_of(row);
+        target.next.is_some().then_some(target.login)
     }
 
     /// What the selected PR offers, for its actions list.
     #[must_use]
     pub fn offers(&self) -> Vec<Offer> {
         self.selected_row()
-            .map(|row| self.acts.offers(self.target_of(row)))
+            .map(|row| self.acts.offers(&self.target_of(row)))
             .unwrap_or_default()
     }
 

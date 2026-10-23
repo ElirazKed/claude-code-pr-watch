@@ -351,6 +351,25 @@ fn v_shows_the_prompt_last_copied() {
     assert!(!screen(&closed, 84, 30).contains("line 60 of the prompt"));
 }
 
+#[test]
+fn with_two_logins_the_detail_says_which_and_a_switches() {
+    let logins = prw_core::accounts::Logins {
+        active: "hubot".to_owned(),
+        others: vec!["octocat".to_owned()],
+    };
+    let said = Msg::Poller(PollerSaid {
+        logins,
+        ..PollerSaid::default()
+    });
+    let model = feed(demo(120, 44), std::iter::once(said).chain(to_row(1)));
+    assert_says(
+        &screen(&model, 120, 44),
+        &["· as octocat", "[a] As octocat → switch to hubot"],
+    );
+    // One login: nothing said of it.
+    assert!(!screen(&feed(demo(120, 44), to_row(1)), 120, 44).contains("· as octocat"));
+}
+
 /// The demo with its saved searches, as `--demo` shows them.
 fn searched(width: u16, height: u16) -> Model {
     let searches = serde_json::from_str(SEARCHES).expect("the demo's searches.json reads");
