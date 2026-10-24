@@ -840,3 +840,28 @@ fn what_a_read_leaves_out_is_said_to_be_on_github() {
     let text = screen(&model, 120, 36);
     assert_says(&text, &["3 Files 250", "… 248 more files on GitHub"]);
 }
+
+#[test]
+fn what_people_write_shows_as_markdown() {
+    // #412's description: headings, a link, a table, code, a note, tasks and a fold.
+    let model = opened(120, 50, 7);
+    assert_eq!(model.opened().map(Opened::number), Some(412));
+    let model = feed(model, [Msg::Key(Key::Char('g'))]);
+    let text = screen(&model, 120, 50);
+    assert_says(
+        &text,
+        &[
+            "▌ Why",
+            "Follows the retry",
+            "│ Area             │ Change",
+            "const delay = Math.min(",
+            "> Note",
+            "✓ backoff capped at 8 s",
+            "○ a metric for retries",
+            "▸ How it was tested",
+        ],
+    );
+    for raw in ["## ", "](", "(https://docs", "```", "<details>", "- [x]"] {
+        assert!(!text.contains(raw), "{raw:?} in\n{text}");
+    }
+}

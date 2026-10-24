@@ -12,9 +12,13 @@ use prw_core::time::parse_iso;
 use prw_core::ui::{Focus, Hit, Key, Model, ago, repo_of};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+
+mod markdown;
+
+use markdown::{first_words, markdown};
 
 use super::{
     Ctx, Hits, Marked, cells, check_look, clip, filled, fit, pill, row_of, span, spinner, usize_of,
@@ -41,36 +45,17 @@ fn detab(text: &str) -> String {
     text.replace('\t', "    ")
 }
 
-/// `text` in lines of at most `n` cells, its own line breaks kept.
-fn paragraphs(text: &str, n: usize) -> Vec<String> {
-    text.lines()
-        .flat_map(|line| {
-            let line = detab(line);
-            let text = line.trim();
-            if text.is_empty() {
-                return vec![String::new()];
-            }
-            // Its indent kept, as a code block or a nested list has it.
-            let lead = line.chars().take_while(|c| c.is_whitespace()).count();
-            let indent = " ".repeat(lead.min(n / 2));
-            wrap(text, n.saturating_sub(indent.len()), usize::MAX)
-                .into_iter()
-                .map(|l| format!("{indent}{l}"))
-                .collect()
-        })
-        .collect()
-}
-
-/// `lines` indented `by`, in `style`: all of them where `is_whole`, else the first
-/// [`FOLDED`] and a line saying how many more.
-fn body_lines(lines: Vec<String>, by: usize, style: Style, is_whole: bool) -> Vec<Line<'static>> {
+/// What someone wrote, as markdown `width` cells wide, indented `by`: all of it where
+/// `is_whole`, else the first [`FOLDED`] lines and a line saying how many more.
+fn body_lines(text: &str, by: usize, width: usize, is_whole: bool) -> Vec<Line<'static>> {
+    let lines = markdown(text, width.saturating_sub(by));
     let pad = " ".repeat(by);
     let shown = if is_whole { lines.len() } else { FOLDED };
     let more = lines.len().saturating_sub(shown);
     let mut out: Vec<Line<'static>> = lines
         .into_iter()
         .take(shown)
-        .map(|l| Line::from(span(format!("{pad}{l}"), style)))
+        .map(|l| Line::from([vec![Span::raw(pad.clone())], l.spans].concat()))
         .collect();
     if more > 0 {
         let words = format!(
@@ -89,13 +74,18 @@ fn who(login: Option<&str>, logins: &[&str]) -> Span<'static> {
     span(format!("@{name}"), bold(colour))
 }
 
-/// A line of code on the code ground, `by` cells in: `+` green, `-` red, the rest dim.
+/// A line of a diff on the code ground, `by` cells in: `+` green, `-` red, the rest dim.
 fn code_line(text: &str, by: usize, width: usize) -> Line<'static> {
     let colour = match text.chars().next() {
         Some('+') => GREEN,
         Some('-') => RED,
         _ => DIM,
     };
+    code_in(text, by, width, colour)
+}
+
+/// A line of code on the code ground, `by` cells in, in `colour`.
+fn code_in(text: &str, by: usize, width: usize, colour: Color) -> Line<'static> {
     let room = width.saturating_sub(by);
     Line::from(vec![
         Span::raw(" ".repeat(by)),
@@ -425,11 +415,11 @@ fn said(
             ]);
             let text = tidy(&full.body);
             let lines = if text.is_empty() {
-                vec!["No description.".to_owned()]
+                vec![Line::from(span("No description.", fg(BODY)))]
             } else {
-                paragraphs(&text, width)
+                body_lines(&text, 0, width, is_sel)
             };
-            [vec![head], body_lines(lines, 0, fg(BODY), is_sel)].concat()
+            [vec![head], lines].concat()
         }
         Item::Comment(i) => {
             comment_lines(&full.comments[i], "◦", DIM, 0, is_sel, width, now, logins)
@@ -461,8 +451,8 @@ fn comment_lines(
         who(author, logins),
         span(format!(" · {}", age(&comment.created_at, now)), fg(DIM)),
     ]);
-    let lines = paragraphs(&tidy(&comment.body), width.saturating_sub(by + 2));
-    [vec![head], body_lines(lines, by + 2, fg(BODY), is_sel)].concat()
+    let lines = body_lines(&tidy(&comment.body), by + 2, width, is_sel);
+    [vec![head], lines].concat()
 }
 
 /// A review: its verdict, then what it says.
@@ -486,8 +476,8 @@ fn review_lines(
         span(format!(" {words}"), fg(colour)),
         span(format!(" · {}", age(&review.submitted_at, now)), fg(DIM)),
     ]);
-    let lines = paragraphs(&tidy(&review.body), width.saturating_sub(2));
-    [vec![head], body_lines(lines, 2, fg(BODY), is_sel)].concat()
+    let lines = body_lines(&tidy(&review.body), 2, width, is_sel);
+    [vec![head], lines].concat()
 }
 
 /// A thread: where it is and whether it is open; the code it is on and its comments. A
@@ -523,7 +513,7 @@ fn thread_lines(
     if thread.is_resolved && !is_sel {
         let last = comments.last().map_or_else(String::new, |c| {
             let author = c.author.as_ref().map_or("ghost", |a| a.login.as_str());
-            let text = detab(tidy(&c.body).lines().next().unwrap_or_default());
+            let text = first_words(&tidy(&c.body));
             format!(" · @{author}: {text}")
         });
         let n = thread.comments.total_count.unwrap_or(comments.len());
@@ -745,7 +735,7 @@ fn file_item(
             .and_then(|c| c.author.as_ref())
             .map_or("ghost", |a| a.login.as_str());
         let text = first
-            .map(|c| detab(tidy(&c.body).lines().next().unwrap_or_default()))
+            .map(|c| first_words(&tidy(&c.body)))
             .unwrap_or_default();
         let place = thread
             .line
