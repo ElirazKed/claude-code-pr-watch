@@ -39,7 +39,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use prw_core::act::Done;
 use prw_core::parse_shared;
 use prw_core::ui::{Cmd, Key, Model, Msg, PollerSaid, update};
 use ratatui::DefaultTerminal;
@@ -329,7 +328,7 @@ fn run(options: &Options) -> io::Result<()> {
         ))
     });
     let demo = options.is_demo.then(|| demo_searches(&dir));
-    let reader = Reader::new(dir, options.is_demo);
+    let reader = Reader::new(dir.clone(), options.is_demo);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     // Pasted text comes whole, newlines too, rather than as keys that might act.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
@@ -352,6 +351,7 @@ fn run(options: &Options) -> io::Result<()> {
         runner: runner.as_ref(),
         done,
         env: desktop::Env::read(),
+        dir: &dir,
     };
     let result = event_loop(
         &mut terminal,
@@ -399,9 +399,11 @@ fn own_id() -> String {
 struct Hands<'a> {
     /// Runs the jobs; `None` in a demo.
     runner: Option<&'a Arc<Runner<gh::System, gh::Wall>>>,
-    /// Where a finished job says so.
-    done: Sender<Done>,
+    /// Where a finished job or read says so.
+    done: Sender<Msg>,
     env: desktop::Env,
+    /// The cache, where a demo's full view reads from.
+    dir: &'a std::path::Path,
 }
 
 /// Feeds the messages to the model in turn, carrying out the commands each gives: a copy or a
@@ -421,6 +423,10 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>, hands: &Hands) -> (Mo
                     Some(runner) => actions::start(runner, job, hands.done.clone()),
                     None => queue.push_back(Msg::Done(actions::demo(job))),
                 },
+                Cmd::Read(read) => match hands.runner {
+                    Some(runner) => actions::start_read(runner, read, hands.done.clone()),
+                    None => queue.push_back(Msg::Read(actions::demo_read(read, hands.dir))),
+                },
                 Cmd::Copy(text) => queue.push_back(Msg::Copied(desktop::copy(&text, hands.env))),
                 Cmd::Open(url) => {
                     let by = desktop::open(&url, hands.env);
@@ -438,7 +444,7 @@ fn event_loop(
     clock: &Clock,
     said: Option<&Receiver<PollerSaid>>,
     hands: &Hands,
-    finished: &Receiver<Done>,
+    finished: &Receiver<Msg>,
 ) -> io::Result<()> {
     let home = std::env::var("HOME").unwrap_or_default();
     let shown = view::tilde(&reader.dir().display().to_string(), &home);
@@ -479,8 +485,8 @@ fn event_loop(
         // message redraws, or, while something on screen moves, the next beat. A tick that is
         // due comes first, so a stream of keys can't hold it off.
         let msgs: Vec<Msg> = loop {
-            if let Ok(done) = finished.try_recv() {
-                break vec![Msg::Done(done)];
+            if let Ok(msg) = finished.try_recv() {
+                break vec![msg];
             }
             let timeout = (last_tick + TICK).saturating_duration_since(Instant::now());
             if timeout.is_zero() {

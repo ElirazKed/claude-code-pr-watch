@@ -9,12 +9,15 @@
 //! The selection is a PR's URL, not an index, so it stays on its PR when a round reorders
 //! the list. After every message it points at a row of the selected list, or is `None`
 //! exactly when that list is empty (a property test holds it to that).
+//!
+//! Enter opens the selected PR full size ([`Opened`]): Esc goes back to the lists.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::accounts::{Logins, login_for, switch_to};
-use crate::act::{Acts, Done, Job, Offer, Target, Tone};
+use crate::act::{Acts, Done, Job, Offer, Outcome, Target, Tone};
 use crate::layout::{Layout, layout};
+use crate::opened::{Opened, Read, ReadDone, Tab};
 use crate::order::{Tracked, order};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
 use crate::status::{PillKind, derive};
@@ -168,6 +171,8 @@ pub enum Msg {
     Click(Hit),
     /// The wheel, over a pane: rows down (positive) or up.
     Scroll(Focus, isize),
+    /// What came of a [`Cmd::Read`].
+    Read(ReadDone),
 }
 
 /// What a click lands on, as the view drew it.
@@ -181,6 +186,10 @@ pub enum Hit {
     Row(usize),
     /// A pane where nothing else is: the movement keys move there.
     Pane(Focus),
+    /// A tab of the full view.
+    Tab(Tab),
+    /// An item of the full view's tab, by its index.
+    Item(usize),
 }
 
 /// What `prw`'s own poller said after a tick.
@@ -230,6 +239,8 @@ pub enum Cmd {
     Copy(String),
     /// Open this URL in the browser; a [`Msg::Opened`] says whether it did.
     Open(String),
+    /// Read for the full view, off the UI thread; a [`Msg::Read`] says what came of it.
+    Read(Read),
 }
 
 /// Which pane the movement keys move in. Only the three-pane layout has a lists pane to
@@ -372,6 +383,8 @@ pub struct Model {
     is_settled: bool,
     /// The newer `prw` a toast has said: each is said once.
     told_newer: Option<String>,
+    /// The PR open full size, while one is.
+    opened: Option<Opened>,
 }
 
 impl Model {
@@ -397,6 +410,7 @@ impl Model {
             lit: BTreeMap::new(),
             is_settled: false,
             told_newer: None,
+            opened: None,
         };
         model.rebuild();
         model
@@ -509,6 +523,30 @@ impl Model {
         self.selected_index().map(|i| &self.list().rows[i])
     }
 
+    /// The PR open full size, while one is.
+    #[must_use]
+    pub const fn opened(&self) -> Option<&Opened> {
+        self.opened.as_ref()
+    }
+
+    /// The PR the screen is about: the one open full size (where a list still has it), else
+    /// the selected one.
+    #[must_use]
+    pub fn current_row(&self) -> Option<&Row> {
+        match &self.opened {
+            Some(opened) => self.row_of(opened.url()),
+            None => self.selected_row(),
+        }
+    }
+
+    /// A PR's row: in the selected list first, else in any.
+    fn row_of(&self, url: &str) -> Option<&Row> {
+        std::iter::once(self.list())
+            .chain(&self.lists)
+            .flat_map(|list| &list.rows)
+            .find(|r| r.pr.url == url)
+    }
+
     /// The pane the movement keys move in: the lists only in the three-pane layout.
     #[must_use]
     pub fn focus(&self) -> Focus {
@@ -579,7 +617,7 @@ impl Model {
                 .iter()
                 .chain(&self.lists[0].rows)
                 .find(|r| r.pr.url == ask.url())?,
-            None => self.selected_row()?,
+            None => self.current_row()?,
         };
         Some(self.target_of(row, acts))
     }
@@ -610,7 +648,7 @@ impl Model {
     /// What the selected PR offers, for its actions list.
     #[must_use]
     pub fn offers(&self) -> Vec<Offer> {
-        self.selected_row()
+        self.current_row()
             .map(|row| self.acts.offers(&self.target_of(row, &self.acts)))
             .unwrap_or_default()
     }
@@ -711,12 +749,68 @@ impl Model {
             }
             Hit::Row(index) => {
                 if let Some(row) = self.list().rows.get(index) {
+                    // A click on the selected row opens it, as Enter does.
+                    if self.selected.as_deref() == Some(row.pr.url.as_str()) {
+                        return self.open();
+                    }
                     self.selected = Some(row.pr.url.clone());
                     self.focus = Focus::Prs;
                 }
             }
             Hit::Pane(focus) if is_three => self.focus = focus,
+            Hit::Tab(tab) => {
+                if let Some(opened) = &mut self.opened {
+                    opened.show(tab);
+                }
+            }
+            Hit::Item(index) => {
+                if let Some(opened) = &mut self.opened {
+                    opened.select(index);
+                }
+            }
             Hit::List(_) | Hit::Pane(_) => {}
+        }
+        Vec::new()
+    }
+
+    /// Opens the selected PR full size, on its checks where CI failed, and reads it.
+    fn open(&mut self) -> Vec<Cmd> {
+        let Some(row) = self.selected_row() else {
+            return Vec::new();
+        };
+        let tab = match row.pr.derived.pill {
+            PillKind::CiFailed | PillKind::CiFailing => Tab::Checks,
+            _ => Tab::Conversation,
+        };
+        let Some((opened, read)) = Opened::open(&row.pr.url, tab, self.now) else {
+            return Vec::new();
+        };
+        self.opened = Some(opened);
+        vec![Cmd::Read(read)]
+    }
+
+    /// A key in the full view, where no action took it.
+    fn key_opened(&mut self, key: Key) -> Vec<Cmd> {
+        let Some(opened) = &mut self.opened else {
+            return Vec::new();
+        };
+        match key {
+            Key::Esc if self.is_help => self.is_help = false,
+            Key::Esc | Key::Backspace => self.opened = None,
+            Key::CtrlC | Key::Char('q') => return vec![Cmd::Quit],
+            Key::Char('?') => self.is_help = !self.is_help,
+            Key::Char('j') | Key::Down => opened.step(1),
+            Key::Char('k') | Key::Up => opened.step(-1),
+            Key::Char('g') | Key::Home => opened.step(isize::MIN),
+            Key::Char('G') | Key::End => opened.step(isize::MAX),
+            Key::Tab | Key::Char('l') | Key::Right => opened.show(opened.tab().along(1)),
+            Key::BackTab | Key::Char('h') | Key::Left => opened.show(opened.tab().along(-1)),
+            Key::Char(c) => {
+                if let Some(tab) = Tab::of_key(c) {
+                    opened.show(tab);
+                }
+            }
+            Key::Enter | Key::Newline => {}
         }
         Vec::new()
     }
@@ -732,6 +826,9 @@ impl Model {
             if let Some(cmds) = cmds {
                 return cmds;
             }
+        }
+        if self.opened.is_some() {
+            return self.key_opened(key);
         }
         let is_three = self.layout() == Layout::Three;
         match key {
@@ -749,8 +846,8 @@ impl Model {
             Key::Char('l') | Key::Right if is_three => self.focus = Focus::Prs,
             Key::Tab | Key::Char('l') | Key::Right => self.cycle(1),
             Key::BackTab | Key::Char('h') | Key::Left => self.cycle(-1),
-            // Enter opens the full PR view, a later step; every other key does nothing.
-            Key::Enter | Key::Newline | Key::Backspace | Key::Char(_) => {}
+            Key::Enter => return self.open(),
+            Key::Newline | Key::Backspace | Key::Char(_) => {}
         }
         Vec::new()
     }
@@ -792,13 +889,38 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             model.acts.tick(at);
             model.rebuild();
             model.tell_newer();
-            Vec::new()
+            let held = model.shared.as_ref().and_then(|s| s.held_until);
+            let due = model.opened.as_mut().and_then(|o| o.due(at, held));
+            due.map(Cmd::Read).into_iter().collect()
         }
         Msg::Paste(text) => {
             model.acts.paste(&text);
             Vec::new()
         }
-        Msg::Done(done) => model.acts.done(done, model.now),
+        Msg::Done(done) => {
+            // What a merge, comment or switch did shows in the full view at once.
+            let is_change = matches!(
+                done.outcome,
+                Outcome::Merged(_) | Outcome::Commented { .. } | Outcome::Switched { .. }
+            );
+            let again = model
+                .opened
+                .as_mut()
+                .filter(|o| is_change && o.url() == done.url)
+                .and_then(|o| o.again(model.now));
+            let mut cmds = model.acts.done(done, model.now);
+            cmds.extend(again.map(Cmd::Read));
+            cmds
+        }
+        Msg::Read(done) => match &mut model.opened {
+            Some(opened) if opened.url() == done.url => opened
+                .got(done.got, model.now)
+                .into_iter()
+                .map(Cmd::Read)
+                .collect(),
+            // For a PR no longer open.
+            _ => Vec::new(),
+        },
         Msg::Copied(by) => {
             model.acts.copied_by(by, model.now);
             Vec::new()
@@ -824,7 +946,10 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         Msg::Key(key) => model.key(key),
         Msg::Click(hit) => model.click(hit),
         Msg::Scroll(pane, by) => {
-            model.step_in(pane, by);
+            match &mut model.opened {
+                Some(opened) => opened.step(by),
+                None => model.step_in(pane, by),
+            }
             Vec::new()
         }
     };

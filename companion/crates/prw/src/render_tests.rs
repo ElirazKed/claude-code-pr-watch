@@ -3,8 +3,11 @@
 
 use proptest::prelude::*;
 use prw_core::act::{Done, Outcome};
+use prw_core::batch::ref_from_url;
+use prw_core::full::parse_full;
 use prw_core::gh::PrState;
 use prw_core::handoff::Kind;
+use prw_core::opened::{Got, Opened, ReadDone, Tab};
 use prw_core::ui::{Focus, Hit, Key, LIT_MS, Model, Msg, PollerSaid, Session, update};
 use prw_core::{parse_session, parse_shared};
 use ratatui::Terminal;
@@ -322,10 +325,16 @@ proptest! {
         keys in prop::collection::vec(prop::sample::select(vec![
             Key::Down, Key::Up, Key::Tab, Key::BackTab, Key::Char('h'), Key::Char('l'),
             Key::Char('G'), Key::Char('?'), Key::Char('m'), Key::Char('c'), Key::Char('f'),
-            Key::Char('v'), Key::Char('n'), Key::Char('x'), Key::Esc,
+            Key::Char('v'), Key::Char('n'), Key::Char('x'), Key::Esc, Key::Enter,
+            Key::Char('1'), Key::Char('2'), Key::Char('3'), Key::Char('j'),
         ]), 0..8),
+        is_read in any::<bool>(),
     ) {
-        let model = feed(demo(width, height), keys.into_iter().map(Msg::Key));
+        let mut model = feed(demo(width, height), keys.into_iter().map(Msg::Key));
+        // An open PR, read or not yet.
+        if is_read && let Some(url) = model.opened().map(|o| o.url().to_owned()) {
+            model = feed(model, [read_of(&url)]);
+        }
         let _ = screen(&model, width, height);
         // And an empty model, before anything was read.
         let _ = screen(&Model::new(width, height), width, height);
@@ -673,4 +682,161 @@ fn saved_searches_are_lists_of_their_own() {
             "#97",
         ],
     );
+}
+
+/// What the demo has on a PR for its full view (`demo/full/`), as a read would bring it.
+fn read_of(url: &str) -> Msg {
+    let pr = ref_from_url(url).expect("a PR URL");
+    let reply = match pr.number {
+        59 => include_str!("../../../demo/full/acme-billing-59.json"),
+        88 => include_str!("../../../demo/full/acme-web-88.json"),
+        _ => include_str!("../../../demo/full/acme-app-412.json"),
+    };
+    Msg::Read(ReadDone {
+        url: url.to_owned(),
+        got: Got::Pr(parse_full(reply, "", &pr)),
+    })
+}
+
+/// The demo with row `n`'s PR open full size and read.
+fn opened(width: u16, height: u16, n: usize) -> Model {
+    let model = feed(demo(width, height), to_row(n));
+    let model = feed(model, [Msg::Key(Key::Enter)]);
+    let url = model.opened().expect("open").url().to_owned();
+    feed(model, [read_of(&url)])
+}
+
+#[test]
+fn enter_opens_the_pr_full_size_on_its_first_open_thread() {
+    // #59: changes requested, two threads open and one resolved.
+    let model = opened(120, 36, 2);
+    let text = screen(&model, 120, 36);
+    assert_says(
+        &text,
+        &[
+            "‹ back",
+            "acme/billing #59",
+            "1 Conversation 5",
+            "2 Checks 1",
+            "3 Files 2",
+            "@octocat opened this",
+            "pdf/layout.ts:41",
+            "This should end where the amount column ends",
+            "2 comments · @octocat: Yes, only the glyphs used.",
+            "@bob requested changes",
+            "esc back",
+        ],
+    );
+    // The selection starts on the first open thread, beside the PR's card.
+    let at = row_saying(&text, "pdf/layout.ts:41");
+    assert!(text.lines().nth(at).is_some_and(|l| l.starts_with('▌')));
+    assert_says(&text, &["ACTIONS", "[f] Address"]);
+    // Narrow: the tab alone, wrapped to it.
+    let text = screen(&opened(49, 36, 2), 49, 36);
+    assert_says(
+        &text,
+        &["‹ back", "pdf/layout.ts:41", "ends: 480, not 470."],
+    );
+    let text = screen(&feed(model, [Msg::Key(Key::Char('3'))]), 120, 36);
+    assert_says(
+        &text,
+        &["M pdf/layout.ts", "● 2", "line 41 · @bob", "M pdf/fonts.ts"],
+    );
+}
+
+#[test]
+fn a_failed_pr_opens_on_its_checks_with_each_failed_jobs_log() {
+    // #88: CI failed.
+    let model = opened(120, 40, 1);
+    assert_eq!(model.opened().map(Opened::tab), Some(Tab::Checks));
+    let text = screen(&model, 120, 40);
+    assert_says(&text, &["CI / build", "reading the log…", "✓ CI / types"]);
+    let logs = Msg::Read(ReadDone {
+        url: "https://github.com/acme/web/pull/88".into(),
+        got: Got::Logs(vec![
+            (9101, Ok(include_str!("../../../demo/full/9101.log").into())),
+            (9102, Err("HTTP 404".into())),
+        ]),
+    });
+    let text = screen(&feed(model, [logs]), 120, 40);
+    assert_says(
+        &text,
+        &[
+            "error TS2322",
+            "Process completed with exit code 2.",
+            "last 6 of 6 lines",
+            "no log: HTTP 404",
+        ],
+    );
+    assert!(!text.contains("##[error]"), "{text}");
+}
+
+#[test]
+fn a_click_picks_a_tab_or_an_item_and_back_goes_back() {
+    let model = opened(120, 36, 2);
+    let model = click(model, 3, "2 Checks");
+    assert_eq!(model.opened().map(Opened::tab), Some(Tab::Checks));
+    let model = click(model, 3, "1 Conversation");
+    let text = screen(&model, 120, 36);
+    let model = click(
+        model,
+        row_saying(&text, "pdf/layout.ts:88"),
+        "pdf/layout.ts:88",
+    );
+    let text = screen(&model, 120, 36);
+    let at = row_saying(&text, "pdf/layout.ts:88");
+    assert!(
+        text.lines().nth(at).is_some_and(|l| l.starts_with('▌')),
+        "{text}"
+    );
+    let model = click(model, 1, "‹ back");
+    assert!(model.opened().is_none());
+    // A click on the selected row opens it, as Enter does.
+    let text = screen(&model, 120, 36);
+    let model = click(model, row_saying(&text, "◇ Right-align"), "#59");
+    assert_eq!(model.opened().map(Opened::number), Some(59));
+}
+
+#[test]
+fn what_a_read_leaves_out_is_said_to_be_on_github() {
+    let model = feed(demo(120, 36), to_row(2));
+    let model = feed(model, [Msg::Key(Key::Enter)]);
+    let url = model.opened().expect("open").url().to_owned();
+    let mut reply: serde_json::Value =
+        serde_json::from_str(include_str!("../../../demo/full/acme-billing-59.json"))
+            .expect("json");
+    let pr = &mut reply["data"]["p0"]["pullRequest"];
+    pr["comments"]["totalCount"] = 31.into();
+    pr["reviewThreads"]["totalCount"] = 104.into();
+    pr["files"]["totalCount"] = 250.into();
+    let reply = reply.to_string();
+    let pr = ref_from_url(&url).expect("a PR URL");
+    let model = feed(
+        model,
+        [Msg::Read(ReadDone {
+            url,
+            got: Got::Pr(parse_full(&reply, "", &pr)),
+        })],
+    );
+    // The newest 50 comments and 100 threads came: the rest are older.
+    let comments = 31
+        - model
+            .opened()
+            .and_then(Opened::full)
+            .map_or(0, |f| f.comments.len());
+    let threads = 104
+        - model
+            .opened()
+            .and_then(Opened::full)
+            .map_or(0, |f| f.threads.len());
+    let text = screen(&model, 120, 36);
+    assert_says(
+        &text,
+        &[&format!(
+            "… {comments} older comments, {threads} older threads on GitHub"
+        )],
+    );
+    let model = feed(model, [Msg::Key(Key::Char('3'))]);
+    let text = screen(&model, 120, 36);
+    assert_says(&text, &["3 Files 250", "… 248 more files on GitHub"]);
 }

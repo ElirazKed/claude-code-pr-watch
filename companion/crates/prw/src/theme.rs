@@ -10,6 +10,8 @@ pub const INK: Color = Color::Rgb(0x10, 0x12, 0x1B);
 pub const PANEL: Color = Color::Rgb(0x15, 0x17, 0x22);
 pub const LINE: Color = Color::Rgb(0x26, 0x2A, 0x3E);
 pub const SEL: Color = Color::Rgb(0x1E, 0x21, 0x32);
+/// The ground under code: a thread's hunk, a log's lines.
+pub const CODE: Color = Color::Rgb(0x14, 0x17, 0x25);
 pub const FG: Color = Color::Rgb(0xEC, 0xEA, 0xF4);
 pub const BODY: Color = Color::Rgb(0xC9, 0xC7, 0xDA);
 pub const DIM: Color = Color::Rgb(0x7E, 0x7C, 0x96);

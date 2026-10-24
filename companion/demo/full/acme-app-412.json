@@ -1,0 +1,224 @@
+{
+ "data": {
+  "p0": {
+   "pullRequest": {
+    "body": "An upload failed for good on the first 5xx. This retries up to 5 times with exponential backoff and jitter, and stops at once on a 4xx.\n\n- [x] backoff capped at 8 s\n- [x] tests for the 4xx stop",
+    "createdAt": "2026-10-21T09:00:00Z",
+    "author": {
+     "login": "octocat"
+    },
+    "comments": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "author": {
+        "login": "preview-bot"
+       },
+       "body": "Preview deployed: https://app-412.preview.acme.dev",
+       "createdAt": "2026-10-21T11:30:00Z",
+       "url": ""
+      }
+     ]
+    },
+    "reviews": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "author": {
+        "login": "carol"
+       },
+       "state": "COMMENTED",
+       "body": "The jitter makes sense. One question on the cap.",
+       "submittedAt": "2026-10-21T10:00:00Z"
+      }
+     ]
+    },
+    "reviewThreads": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "id": "PRRT_4",
+       "isResolved": true,
+       "isOutdated": false,
+       "path": "src/upload/retry.ts",
+       "line": 18,
+       "startLine": null,
+       "originalLine": 18,
+       "originalStartLine": null,
+       "comments": {
+        "totalCount": 2,
+        "nodes": [
+         {
+          "author": {
+           "login": "carol"
+          },
+          "body": "Cap the delay? 2^5 seconds is a long wait for a user.",
+          "createdAt": "2026-10-21T10:01:00Z",
+          "url": "",
+          "diffHunk": "@@ -15,4 +15,4 @@ export async function upload(file) {\n   for (let attempt = 0; attempt < 5; attempt++) {\n-    const wait = base * 2 ** attempt\n+    const wait = Math.min(base * 2 ** attempt, 8_000)"
+         },
+         {
+          "author": {
+           "login": "octocat"
+          },
+          "body": "Capped at 8 s.",
+          "createdAt": "2026-10-21T11:00:00Z",
+          "url": ""
+         }
+        ]
+       }
+      }
+     ]
+    },
+    "files": {
+     "totalCount": 3,
+     "nodes": [
+      {
+       "path": "src/upload/retry.ts",
+       "additions": 128,
+       "deletions": 12,
+       "changeType": "MODIFIED"
+      },
+      {
+       "path": "src/upload/client.ts",
+       "additions": 41,
+       "deletions": 26,
+       "changeType": "MODIFIED"
+      },
+      {
+       "path": "src/upload/retry.test.ts",
+       "additions": 43,
+       "deletions": 2,
+       "changeType": "ADDED"
+      }
+     ]
+    },
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "statusCheckRollup": {
+         "contexts": {
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "lint",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-10-21T11:48:00Z",
+            "completedAt": "2026-10-21T11:49:00Z",
+            "databaseId": 9301,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9301",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "build",
+            "status": "IN_PROGRESS",
+            "conclusion": null,
+            "startedAt": "2026-10-21T11:54:00Z",
+            "completedAt": null,
+            "databaseId": 9302,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9302",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "e2e",
+            "status": "IN_PROGRESS",
+            "conclusion": null,
+            "startedAt": "2026-10-21T11:55:00Z",
+            "completedAt": null,
+            "databaseId": 9303,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9303",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "types",
+            "status": "IN_PROGRESS",
+            "conclusion": null,
+            "startedAt": "2026-10-21T11:54:00Z",
+            "completedAt": null,
+            "databaseId": 9304,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9304",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "deploy",
+            "status": "QUEUED",
+            "conclusion": null,
+            "startedAt": null,
+            "completedAt": null,
+            "databaseId": 9305,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9305",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "docs",
+            "status": "WAITING",
+            "conclusion": null,
+            "startedAt": null,
+            "completedAt": null,
+            "databaseId": 9306,
+            "detailsUrl": "https://github.com/acme/app/actions/runs/1/job/9306",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           }
+          ]
+         }
+        },
+        "checkSuites": {
+         "nodes": [
+          {
+           "checkRuns": {
+            "nodes": []
+           }
+          }
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

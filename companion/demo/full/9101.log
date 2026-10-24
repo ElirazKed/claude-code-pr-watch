@@ -1,0 +1,6 @@
+build	Run npm run build	2026-10-24T08:40:00.0000000Z > web@1.0.0 build
+build	Run npm run build	2026-10-24T08:41:00.0000000Z > vite build
+build	Run npm run build	2026-10-24T08:42:00.0000000Z src/cart/store.ts:14:7 - error TS2322: Type 'string | null' is not assignable to type 'string'.
+build	Run npm run build	2026-10-24T08:43:00.0000000Z 14   const saved: string = sessionStorage.getItem(KEY)
+build	Run npm run build	2026-10-24T08:44:00.0000000Z Found 1 error in src/cart/store.ts:14
+build	Run npm run build	2026-10-24T08:45:00.0000000Z ##[error]Process completed with exit code 2.

@@ -15,6 +15,19 @@
 //! │ status ───────────────│ │ status ────────────│  │ status ──────│
 //! └ hints ────────────────┘ └ hints ─────────────┘  └ hints ───────┘
 //! ```
+//!
+//! The full view ([`full_panes`]) puts one PR in the body: its title and tabs over the tab's
+//! body, and at full width its card beside them.
+//!
+//! ```text
+//! Three (>= 100)            Strip and side
+//! ┌ header ───────────────┐ ┌ header ────────────┐
+//! │ title          │      │ │ title              │
+//! │ tabs           │detail│ │ tabs               │
+//! │ body           │      │ │ body               │
+//! │ status ───────────────│ │ status ────────────│
+//! └ hints ────────────────┘ └ hints ─────────────┘
+//! ```
 
 use crate::layout::Layout;
 
@@ -65,6 +78,12 @@ pub enum Pane {
     Hints,
     /// The whole screen, saying it is too narrow.
     Narrow,
+    /// The full view's PR: back, its title, its pill and branch (two rows).
+    Title,
+    /// The full view's tabs, over a line marking the one showing (two rows).
+    Tabs,
+    /// What the full view's tab shows.
+    Body,
 }
 
 /// The widest the lists pane gets.
@@ -106,9 +125,7 @@ pub fn panes(layout: Layout, width: u16, height: u16) -> Vec<(Pane, Area)> {
     match layout {
         Layout::Three => {
             let lists = LISTS_WIDTH.min(width);
-            let detail = (width / 120 * 38 + width % 120 * 38 / 120)
-                .clamp(34, 56)
-                .min(width - lists);
+            let detail = detail_width(width).min(width - lists);
             let table = width - lists - detail;
             out.push((Pane::Lists, Area::new(0, body_y, lists, body)));
             out.push((Pane::Table, Area::new(lists, body_y, table, body)));
@@ -135,6 +152,62 @@ pub fn panes(layout: Layout, width: u16, height: u16) -> Vec<(Pane, Area)> {
     out.push((Pane::Status, row(body_y + body, status)));
     out.push((Pane::Hints, row(body_y + body + status, hints)));
 
+    out
+}
+
+/// The selected PR's card at full width: 38 of 120 columns, scaled, within 34 to 56.
+const fn detail_width(width: u16) -> u16 {
+    let scaled = width / 120 * 38 + width % 120 * 38 / 120;
+    if scaled < 34 {
+        34
+    } else if scaled > 56 {
+        56
+    } else {
+        scaled
+    }
+}
+
+/// The full view's panes of `layout` on a `width` × `height` screen, in drawing order: tiling
+/// the screen as [`panes`] do, the header, status and hints rows where they are there.
+#[must_use]
+pub fn full_panes(layout: Layout, width: u16, height: u16) -> Vec<(Pane, Area)> {
+    if layout == Layout::TooNarrow {
+        return vec![(Pane::Narrow, Area::new(0, 0, width, height))];
+    }
+    let mut left = height;
+    let mut take = |want: u16| {
+        let got = want.min(left);
+        left -= got;
+        got
+    };
+    let header = take(1);
+    let hints = take(1);
+    let status = take(u16::from(height >= STATUS_MIN_HEIGHT));
+    let title = take(2);
+    let tabs = take(2);
+    let body = left;
+    let side = if layout == Layout::Three {
+        detail_width(width).min(width)
+    } else {
+        0
+    };
+    let main = width - side;
+    let col = |y: u16, h: u16| Area::new(0, y, main, h);
+    let mut out = vec![
+        (Pane::Header, Area::new(0, 0, width, header)),
+        (Pane::Title, col(header, title)),
+        (Pane::Tabs, col(header + title, tabs)),
+        (Pane::Body, col(header + title + tabs, body)),
+    ];
+    if side > 0 {
+        out.push((
+            Pane::Detail,
+            Area::new(main, header, side, title + tabs + body),
+        ));
+    }
+    let below = header + title + tabs + body;
+    out.push((Pane::Status, Area::new(0, below, width, status)));
+    out.push((Pane::Hints, Area::new(0, below + status, width, hints)));
     out
 }
 
@@ -178,10 +251,20 @@ mod tests {
         );
     }
 
-    /// How many panes cover each cell.
-    fn coverage(width: u16, height: u16) -> Vec<u8> {
+    #[test]
+    fn the_full_view_keeps_the_card_beside_it_only_at_full_width() {
+        let full = full_panes(Layout::Three, 120, 36);
+        assert_eq!(area_of(&full, Pane::Detail), Some(Area::new(82, 1, 38, 33)));
+        assert_eq!(area_of(&full, Pane::Body), Some(Area::new(0, 5, 82, 29)));
+        let half = full_panes(Layout::Strip, 84, 36);
+        assert_eq!(area_of(&half, Pane::Detail), None);
+        assert_eq!(area_of(&half, Pane::Body), Some(Area::new(0, 5, 84, 29)));
+    }
+
+    /// How many panes of `of` cover each cell.
+    fn coverage(of: fn(Layout, u16, u16) -> Vec<(Pane, Area)>, width: u16, height: u16) -> Vec<u8> {
         let mut seen = vec![0_u8; usize::from(width) * usize::from(height)];
-        for (_, a) in panes(layout(width), width, height) {
+        for (_, a) in of(layout(width), width, height) {
             assert!(
                 u32::from(a.x) + u32::from(a.width) <= u32::from(width),
                 "{a:?}"
@@ -202,7 +285,13 @@ mod tests {
     proptest! {
         #[test]
         fn panes_tile_the_screen_exactly(width in 40_u16..=300, height in 0_u16..=80) {
-            let seen = coverage(width, height);
+            let seen = coverage(panes, width, height);
+            prop_assert!(seen.iter().all(|&n| n == 1), "{width}x{height}");
+        }
+
+        #[test]
+        fn the_full_views_panes_tile_the_screen_exactly(width in 0_u16..=300, height in 0_u16..=80) {
+            let seen = coverage(full_panes, width, height);
             prop_assert!(seen.iter().all(|&n| n == 1), "{width}x{height}");
         }
 

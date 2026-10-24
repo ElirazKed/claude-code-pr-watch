@@ -6,7 +6,7 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 8 of the plan: saved searches.** `prw` shows the PRs your sessions watch, from the mod's shared
+**Status: step 9 of the plan: the full PR view (reading; acting from it comes next).** `prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
@@ -41,6 +41,24 @@ once, so its card is current before the next round.
   review threads, each comment cleaned of markup). With more than one, `f` asks which. The toast says
   how it was copied: `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, OSC 52 over SSH or where
   none works. OSC 52 can't confirm the copy, so `v` shows the prompt last copied, to select by hand.
+
+### The full PR view
+
+Enter (or a click on the selected row) opens the PR full size: its title, pill and branch on top,
+three tabs below, and at full width its card beside them. Esc goes back to the lists.
+
+- **1 Conversation:** the description, then every comment, review and review thread in the order
+  they were left. A thread shows the code it is on and its comments; a resolved one folds to a line
+  until it is selected. It opens on the first open thread.
+- **2 Checks:** the latest run of each check, failed first, with how long it took. Under each failed
+  GitHub Actions job, the end of its log (the first three jobs' logs are read, as Fix reads them).
+  A PR whose CI failed opens here.
+- **3 Files:** each changed file with its counts, and under the selected one the threads left on it.
+
+The PR is read in one GraphQL call when it opens and every 30 s while it shows (not while GitHub
+has said to wait), and again at once after a merge, a comment or a login switch from it; each failed
+job's log is read once. The poll never reads any of it. The action keys (`m`, `c`, `f`, `o`, `a`) act
+on the open PR. In the demo, `demo/full/` holds what three of its PRs read as.
 
 Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
 `prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
@@ -163,6 +181,7 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 |----------------------|--------------------------------------------------------------|
 | `j` `k`, `↓` `↑`     | the next or previous PR (or list, in the lists pane)         |
 | `g` `G`, Home End    | the first or last                                            |
+| Enter                | open the PR full size                                        |
 | Tab, Shift-Tab       | the next or previous list                                    |
 | `h` `l`, `←` `→`     | three panes: the lists pane or the PRs; narrower: the previous or next list |
 | `m`                  | merge the PR, after a `y` (`m` again: the next method)       |
@@ -174,9 +193,12 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `?`                  | the key help                                                 |
 | `q`, Esc, Ctrl-C     | quit (Esc closes the help, a question or the field first)    |
 
-Enter (the full PR view) comes in a later step.
+In the full view, `j` `k` (and `g` `G`) move through the tab's items, `1` `2` `3` pick a tab, Tab
+and Shift-Tab (or `h` `l`) the next or previous one, and Esc or Backspace go back; the action keys
+are as above.
 
-The mouse works too. A click picks a list or a PR, or presses the key it shows: a hint on the
+The mouse works too. A click picks a list or a PR (a second click opens it), a tab or an item of
+the full view, or presses the key it shows: a hint on the
 bottom row, an action on the card, an answer to the question on the status line (while a question
 is open, only its answers take clicks). The wheel moves in the pane under it. While `v` shows the
 prompt, prw lets go of the mouse, so a plain drag selects the prompt's text; elsewhere most
@@ -193,6 +215,9 @@ pane goes):
 | 60 to 99        | strip         | the lists as a strip on top; the table and the card below, side by side |
 | 40 to 59        | side          | one list (Tab for the next), the table, and a short card under it (beside an agent) |
 | under 40        | too narrow    | "prw needs 40 columns"                                        |
+
+The full view keeps the header, the status line and the hints, and puts the PR in between: at full
+width with its card beside it, narrower alone.
 
 The cut-offs sit between the design's reference widths (120, 84 and 49 columns), so each lands well
 inside its own band. A wider terminal never gets a smaller layout.
@@ -211,10 +236,11 @@ when something changes.
   the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), the saved searches (`config`),
   other agents' watches (`watch`),
   the MCP messages (`mcp`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
-  and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), tested with properties and against the mod's fixtures
+  and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), the full view (`full`: one
+  PR read whole; `opened`: its tabs, selection and reads), tested with properties and against the mod's fixtures
   (`tests/fixtures.rs`).
 - `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), drawing the model
-  (`view.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
+  (`view.rs`, the full view in `view/full.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
   running `gh` and the clock, behind traits the tests fake), the actions (`actions.rs`: running each one as its own thread; `desktop.rs`: the clipboard and the
   browser), and the other commands (`cli.rs`: `watch`
   and `unwatch`; `mcp.rs`: the tool server; `watches.rs`: the watch files and their sessions).
