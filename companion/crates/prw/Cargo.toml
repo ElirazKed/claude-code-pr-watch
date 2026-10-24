@@ -21,6 +21,7 @@ prw-core.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true
 unicode-width.workspace = true
+tui-markdown.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

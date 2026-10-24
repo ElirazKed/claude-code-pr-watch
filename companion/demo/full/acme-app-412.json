@@ -2,7 +2,7 @@
  "data": {
   "p0": {
    "pullRequest": {
-    "body": "An upload failed for good on the first 5xx. This retries up to 5 times with exponential backoff and jitter, and stops at once on a 4xx.\n\n- [x] backoff capped at 8 s\n- [x] tests for the 4xx stop",
+    "body": "## Why\n\nAn upload failed for good on the first **5xx**. This retries up to 5 times with exponential backoff and jitter, and stops at once on a 4xx. Follows [the retry guide](https://docs.acme.dev/retries); closes #398.\n\n## What changed\n\n| Area | Change |\n|---|---|\n| `upload/retry.ts` | backoff with jitter, capped |\n| `upload/client.ts` | stops on a 4xx |\n\n```ts\nconst delay = Math.min(2 ** attempt * 250, 8000);\n```\n\n> [!NOTE]\n> The cap is 8 s, so a user waits at most about 15 s in all.\n\n- [x] backoff capped at 8 s\n- [x] tests for the 4xx stop\n- [ ] a metric for retries\n\ncc @alice\n\n<details>\n<summary>How it was tested</summary>\n\nRan the suite against a fake server that fails the first 3 calls.\n\n</details>",
     "createdAt": "2026-10-21T09:00:00Z",
     "author": {
      "login": "octocat"

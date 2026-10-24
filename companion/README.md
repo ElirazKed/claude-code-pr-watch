@@ -55,6 +55,11 @@ three tabs below, and at full width its card beside them. Esc goes back to the l
   A PR whose CI failed opens here.
 - **3 Files:** each changed file with its counts, and under the selected one the threads left on it.
 
+What people write (the description, comments, reviews, thread comments) shows as GitHub shows
+markdown, by [tui-markdown](https://github.com/joshka/tui-markdown) in prw's colours: headings bold,
+links underlined (their address left out), tables boxed to the width, code on its own ground, tasks
+ticked, `@someone` and `#123` in the accent, HTML tags left out (a `<details>` summary shows as `▸`).
+
 The PR is read in one GraphQL call when it opens and every 30 s while it shows (not while GitHub
 has said to wait), and again at once after a merge, a comment or a login switch from it; each failed
 job's log is read once. The poll never reads any of it. The action keys (`m`, `c`, `f`, `o`, `a`) act
