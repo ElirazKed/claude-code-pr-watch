@@ -1,0 +1,7 @@
+e2e	Run npx playwright test	2026-10-24T08:40:00.0000000Z Running 12 tests using 2 workers
+e2e	Run npx playwright test	2026-10-24T08:41:00.0000000Z   ✘ cart.spec.ts:21:5 › keeps the cart after a refresh (4.1s)
+e2e	Run npx playwright test	2026-10-24T08:42:00.0000000Z     Error: expect(locator).toHaveCount(expected)
+e2e	Run npx playwright test	2026-10-24T08:43:00.0000000Z     Expected: 2
+e2e	Run npx playwright test	2026-10-24T08:44:00.0000000Z     Received: 0
+e2e	Run npx playwright test	2026-10-24T08:45:00.0000000Z   1 failed, 11 passed (38.2s)
+e2e	Run npx playwright test	2026-10-24T08:46:00.0000000Z ##[error]Process completed with exit code 1.

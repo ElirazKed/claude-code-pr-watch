@@ -116,39 +116,64 @@ pub struct Checks {
     pub queued: usize,
 }
 
+/// Where one check is, as a list of them shows it, worst first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Progress {
+    Failed,
+    /// Started on a runner, or a status its CI has picked up.
+    Running,
+    /// Still waiting for one.
+    Queued,
+    Passed,
+}
+
+/// A check's [`Progress`]: its verdict, a pending one split by whether CI has picked it up.
+#[must_use]
+pub fn progress_of(item: &CheckItem) -> Progress {
+    match verdict_of(item) {
+        CheckVerdict::Passed => Progress::Passed,
+        CheckVerdict::Failed => Progress::Failed,
+        // A status only says PENDING once its CI has picked it up; EXPECTED still waits.
+        CheckVerdict::Pending if is_status_context(item) => {
+            if item.state == Some(Some(StatusState::Pending)) {
+                Progress::Running
+            } else {
+                Progress::Queued
+            }
+        }
+        CheckVerdict::Pending if item.status == Some(CheckStatus::InProgress) => Progress::Running,
+        CheckVerdict::Pending => Progress::Queued,
+    }
+}
+
+/// A check's name: a run's, else a status's context, else "check".
+#[must_use]
+pub fn check_name(item: &CheckItem) -> String {
+    item.name
+        .clone()
+        .or_else(|| item.context.clone())
+        .unwrap_or_else(|| "check".to_owned())
+}
+
 /// The rollup counted (`summarizeChecks`), the latest run of each check only.
 #[must_use]
 pub fn summarize_checks(items: &[CheckItem]) -> Checks {
     let mut checks = Checks::default();
     for item in latest_runs(items) {
         checks.total += 1;
-        let is_context = is_status_context(item);
-        let verdict = verdict_of(item);
-        let name = || {
-            item.name
-                .clone()
-                .or_else(|| item.context.clone())
-                .unwrap_or_else(|| "check".to_owned())
-        };
-        match verdict {
-            CheckVerdict::Passed => checks.passed += 1,
-            CheckVerdict::Failed => {
+        match progress_of(item) {
+            Progress::Passed => checks.passed += 1,
+            Progress::Failed => {
                 checks.failed += 1;
-                checks.failing.push(name());
+                checks.failing.push(check_name(item));
             }
-            CheckVerdict::Pending => {
+            Progress::Running => {
                 checks.pending += 1;
-                // A status only says PENDING once its CI has picked it up; EXPECTED still waits.
-                let is_started = if is_context {
-                    item.state == Some(Some(StatusState::Pending))
-                } else {
-                    item.status == Some(CheckStatus::InProgress)
-                };
-                if is_started {
-                    checks.running.push(name());
-                } else {
-                    checks.queued += 1;
-                }
+                checks.running.push(check_name(item));
+            }
+            Progress::Queued => {
+                checks.pending += 1;
+                checks.queued += 1;
             }
         }
     }

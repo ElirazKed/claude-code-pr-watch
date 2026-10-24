@@ -6,9 +6,12 @@
 //!
 //! After a merge or a comment the PR is asked again at once (the mod's `fetchNow`), so the
 //! card shows what happened before the next round; with `--no-poll` nothing is written.
+//!
+//! The full view's reads (`prw_core::opened::Read`) run the same way: the PR whole, and its
+//! failed jobs' logs.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -22,13 +25,15 @@ use prw_core::fix::{
     Failure, Handoff, LOG_MS, failing_checks, fix_prompt, log_argv, log_error, log_problems,
     to_fetch,
 };
+use prw_core::full::{Full, full_query, parse_full};
 use prw_core::handoff::{Kind, PrFacts};
 use prw_core::merge::{
     After, MergeError, MergeRun, RETRY_MS, after_server_error, is_server_error, merge_argv,
     merge_error, merge_read_argv, merge_read_of,
 };
+use prw_core::opened::{Got, Read, ReadDone};
 use prw_core::parse_shared;
-use prw_core::ui::repo_of;
+use prw_core::ui::{Msg, repo_of};
 
 use crate::gh::{Clock, Gh, Ran, ms};
 use crate::poller::{Files, refresh};
@@ -217,6 +222,40 @@ impl<G: Gh, C: Clock> Runner<G, C> {
         }
     }
 
+    /// A GraphQL query, as `token`'s login.
+    fn graphql(&self, query: &str, token: &str) -> Result<Ran, String> {
+        let argv = ["api", "graphql", "-f", &format!("query={query}")].map(str::to_owned);
+        self.gh
+            .run(&argv, Some(token), ms(GH_MS))
+            .map_err(|_| "gh api graphql did not finish".to_owned())
+    }
+
+    /// Runs a read for the full view to its end, as the repo's login.
+    pub fn read(&self, read: Read) -> ReadDone {
+        let url = read.url().to_owned();
+        let got = match read {
+            Read::Pr { url, repo, number } => Got::Pr(self.read_pr(&PrRef { url, repo, number })),
+            Read::Logs { repo, jobs, .. } => Got::Logs(self.read_logs(&repo, &jobs)),
+        };
+        ReadDone { url, got }
+    }
+
+    fn read_pr(&self, pr: &PrRef) -> Result<Full, String> {
+        let token = self.token_for(&pr.repo).1?;
+        let ran = self.graphql(&full_query(pr), &token)?;
+        parse_full(&ran.stdout, &ran.stderr, pr)
+    }
+
+    fn read_logs(&self, repo: &str, jobs: &[i64]) -> Vec<(i64, Result<String, String>)> {
+        match self.token_for(repo).1 {
+            Ok(token) => jobs
+                .iter()
+                .map(|&job| (job, self.log_text(job, repo, &token)))
+                .collect(),
+            Err(why) => jobs.iter().map(|&job| (job, Err(why.clone()))).collect(),
+        }
+    }
+
     /// What a Fix or Address prompt needs, read as the repo's login, and the prompt.
     fn collect(&self, kind: Kind, facts: &PrFacts, failing: &[String]) -> Outcome {
         let failed = |error: String| Outcome::PromptFailed { kind, error };
@@ -230,12 +269,7 @@ impl<G: Gh, C: Clock> Runner<G, C> {
             repo: facts.repo.clone(),
             number: facts.number,
         };
-        let graphql = |query: String| {
-            let argv = ["api", "graphql", "-f", &format!("query={query}")].map(str::to_owned);
-            self.gh
-                .run(&argv, Some(&token), ms(GH_MS))
-                .map_err(|_| "gh api graphql did not finish".to_owned())
-        };
+        let graphql = |query: String| self.graphql(&query, &token);
         match kind {
             Kind::Fix => {
                 let read = graphql(checks_query(&pr))
@@ -303,15 +337,23 @@ impl<G: Gh, C: Clock> Runner<G, C> {
 
     /// A failed job's log, or why it wouldn't come.
     fn log(&self, failure: Failure, job: i64, repo: &str, token: &str) -> Handoff {
-        let (log, error) = match self.gh.run(&log_argv(job, repo), Some(token), ms(LOG_MS)) {
-            Ok(ran) if ran.is_ok() => (Some(ran.stdout), None),
-            Ok(ran) => (None, Some(log_error(&said(&ran)))),
-            Err(_) => (None, Some("gh run view did not finish".to_owned())),
+        let (log, error) = match self.log_text(job, repo, token) {
+            Ok(log) => (Some(log), None),
+            Err(error) => (None, Some(error)),
         };
         Handoff {
             failure,
             log,
             error,
+        }
+    }
+
+    /// A job's failed steps' log as gh prints it, or why it wouldn't come.
+    fn log_text(&self, job: i64, repo: &str, token: &str) -> Result<String, String> {
+        match self.gh.run(&log_argv(job, repo), Some(token), ms(LOG_MS)) {
+            Ok(ran) if ran.is_ok() => Ok(ran.stdout),
+            Ok(ran) => Err(log_error(&said(&ran))),
+            Err(_) => Err("gh run view did not finish".to_owned()),
         }
     }
 }
@@ -326,15 +368,54 @@ fn said(ran: &Ran) -> String {
 }
 
 /// A job on a thread of its own; what came of it on `done`.
-pub fn start<G, C>(runner: &Arc<Runner<G, C>>, job: Job, done: Sender<Done>)
+pub fn start<G, C>(runner: &Arc<Runner<G, C>>, job: Job, done: Sender<Msg>)
 where
     G: Gh + Send + Sync + 'static,
     C: Clock + Send + Sync + 'static,
 {
     let runner = Arc::clone(runner);
     thread::spawn(move || {
-        let _ = done.send(runner.run(job));
+        let _ = done.send(Msg::Done(runner.run(job)));
     });
+}
+
+/// A read on a thread of its own; what came of it on `done`.
+pub fn start_read<G, C>(runner: &Arc<Runner<G, C>>, read: Read, done: Sender<Msg>)
+where
+    G: Gh + Send + Sync + 'static,
+    C: Clock + Send + Sync + 'static,
+{
+    let runner = Arc::clone(runner);
+    thread::spawn(move || {
+        let _ = done.send(Msg::Read(runner.read(read)));
+    });
+}
+
+/// What a demo reads for the full view: `full/<owner>-<repo>-<n>.json` beside its cache, a
+/// reply as gh prints it, and `full/<job>.log` for a job's log.
+pub fn demo_read(read: Read, dir: &Path) -> ReadDone {
+    let full = dir.join("full");
+    let url = read.url().to_owned();
+    let got = match read {
+        Read::Pr { url, repo, number } => {
+            let file = full.join(format!("{}-{number}.json", repo.replace('/', "-")));
+            let pr = PrRef { url, repo, number };
+            Got::Pr(match std::fs::read_to_string(file) {
+                Ok(reply) => parse_full(&reply, "", &pr),
+                Err(_) => Err(format!("The demo has nothing more on #{number}")),
+            })
+        }
+        Read::Logs { jobs, .. } => Got::Logs(
+            jobs.into_iter()
+                .map(|job| {
+                    let log = std::fs::read_to_string(full.join(format!("{job}.log")))
+                        .map_err(|_| "the demo has no log for it".to_owned());
+                    (job, log)
+                })
+                .collect(),
+        ),
+    };
+    ReadDone { url, got }
 }
 
 /// What a demo says to a job: it sends nothing to GitHub. A Fix prompt is still written, from
@@ -662,6 +743,53 @@ mod tests {
             ]
         );
         assert_eq!(logs[0].token.as_deref(), Some("hubot"));
+    }
+
+    #[test]
+    fn a_read_goes_as_the_repos_login_for_the_pr_whole_and_each_jobs_log() {
+        let dir = Dir::new("read");
+        let gh = gh();
+        let reply = json!({"data": {"p0": {"pullRequest": {"body": "Retries uploads.",
+            "reviewThreads": {"totalCount": 1, "nodes": [{"id": "T1", "path": "a.ts"}]},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": []}}}}]}}}}});
+        gh.on(starts(&["api", "graphql"]), move |_| ok(reply.to_string()));
+        gh.on(starts(&["run", "view", "--job", "901"]), |_| {
+            ok("unit\tRun\tt Error: boom\n")
+        });
+        gh.on(starts(&["run", "view"]), |_| {
+            failed("", "HTTP 404: Not Found\n")
+        });
+        let runner = runner(gh, &dir);
+        let done = runner.read(Read::Pr {
+            url: URL.to_owned(),
+            repo: "acme/app".to_owned(),
+            number: 7,
+        });
+        let Got::Pr(Ok(full)) = done.got else {
+            panic!("the PR: {:?}", done.got);
+        };
+        assert_eq!(
+            (full.body.as_str(), full.threads[0].id.as_str()),
+            ("Retries uploads.", "T1")
+        );
+        let query = &calls(&runner, "api")[0];
+        assert!(query.argv[3].contains("pullRequest(number: 7)"));
+        assert_eq!(query.token.as_deref(), Some("hubot"));
+        let done = runner.read(Read::Logs {
+            url: URL.to_owned(),
+            repo: "acme/app".to_owned(),
+            jobs: vec![901, 902],
+        });
+        let Got::Logs(logs) = done.got else {
+            panic!("the logs: {:?}", done.got);
+        };
+        assert_eq!(logs[0], (901, Ok("unit\tRun\tt Error: boom\n".to_owned())));
+        assert!(logs[1].1.is_err());
+        assert!(
+            calls(&runner, "run")
+                .iter()
+                .all(|c| c.token.as_deref() == Some("hubot"))
+        );
     }
 
     #[test]

@@ -1,0 +1,148 @@
+{
+ "data": {
+  "p0": {
+   "pullRequest": {
+    "body": "The cart lived in memory only, so a refresh emptied it.\n\nThis keeps it in `sessionStorage` and reads it back on load. A cart older than a day is dropped.",
+    "createdAt": "2026-10-21T11:20:00Z",
+    "author": {
+     "login": "octocat"
+    },
+    "comments": {
+     "totalCount": 1,
+     "nodes": [
+      {
+       "author": {
+        "login": "preview-bot"
+       },
+       "body": "Preview deployed: https://web-88.preview.acme.dev",
+       "createdAt": "2026-10-21T11:35:00Z",
+       "url": ""
+      }
+     ]
+    },
+    "reviews": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviewThreads": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "files": {
+     "totalCount": 2,
+     "nodes": [
+      {
+       "path": "src/cart/store.ts",
+       "additions": 38,
+       "deletions": 10,
+       "changeType": "MODIFIED"
+      },
+      {
+       "path": "src/cart/cart.test.ts",
+       "additions": 26,
+       "deletions": 2,
+       "changeType": "MODIFIED"
+      }
+     ]
+    },
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "statusCheckRollup": {
+         "contexts": {
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "build",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-10-21T11:40:00Z",
+            "completedAt": "2026-10-21T11:42:00Z",
+            "databaseId": 9101,
+            "detailsUrl": "https://github.com/acme/web/actions/runs/1/job/9101",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "e2e",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-10-21T11:40:00Z",
+            "completedAt": "2026-10-21T11:46:00Z",
+            "databaseId": 9102,
+            "detailsUrl": "https://github.com/acme/web/actions/runs/1/job/9102",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "lint",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "startedAt": "2026-10-21T11:40:00Z",
+            "completedAt": "2026-10-21T11:41:00Z",
+            "databaseId": 9103,
+            "detailsUrl": "https://github.com/acme/web/actions/runs/1/job/9103",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           },
+           {
+            "__typename": "CheckRun",
+            "name": "types",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-10-21T11:40:00Z",
+            "completedAt": "2026-10-21T11:41:00Z",
+            "databaseId": 9104,
+            "detailsUrl": "https://github.com/acme/web/actions/runs/1/job/9104",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           }
+          ]
+         }
+        },
+        "checkSuites": {
+         "nodes": [
+          {
+           "checkRuns": {
+            "nodes": [
+             {
+              "databaseId": 9101,
+              "title": "build failed",
+              "summary": "Process completed with exit code 2."
+             }
+            ]
+           }
+          }
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

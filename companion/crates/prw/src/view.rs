@@ -1,16 +1,19 @@
 //! Drawing the model: one function per pane, into the areas `prw_core::panes` gives. Nothing
 //! here decides anything the model hasn't; it lays out words the core worked out, and notes
-//! where it put what a click can land on ([`Hits`]).
+//! where it put what a click can land on ([`Hits`]). One PR full size is drawn by [`full`].
+
+mod full;
 
 use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, prompt_body};
 use prw_core::gh::{GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
-use prw_core::panes::{Pane, panes};
+use prw_core::opened::Tab;
+use prw_core::panes::{Pane, full_panes, panes};
 use prw_core::review::{Verdict, reviews_of, threads_beside, verdict_line};
 use prw_core::status::{
-    CheckVerdict, Checks, Mergeable, PillKind, STEPS, Stage, activity, is_status_context,
-    latest_runs, mergeable_of, meta_of, step_index, verdict_of,
+    Checks, Mergeable, PillKind, Progress, STEPS, Stage, activity, check_name, latest_runs,
+    mergeable_of, meta_of, progress_of, step_index,
 };
 use prw_core::time::parse_iso;
 use prw_core::ui::{
@@ -79,13 +82,20 @@ pub fn is_animated(model: &Model, now: i64) -> bool {
     let is_fading =
         acts.ask().is_none() && toast.is_some_and(|t| t.until - now <= FADE_MS + LEAD_MS);
     let is_lit = |row: &Row| glow(model.lit(&row.pr.url), now) > 0.0;
-    is_busy_shown
-        || is_fading
-        || model
+    let is_moving = match model.opened() {
+        // The read's spinner, a log's, or the card's steps beside the view.
+        Some(opened) => {
+            opened.is_reading()
+                || (opened.tab() == Tab::Checks && opened.is_reading_logs())
+                || (model.layout() == Layout::Three && model.current_row().is_some_and(is_spinning))
+        }
+        None => model
             .list()
             .rows
             .iter()
-            .any(|r| is_spinning(r) || is_lit(r))
+            .any(|r| is_spinning(r) || is_lit(r)),
+    };
+    is_busy_shown || is_fading || is_moving
 }
 
 /// The toast, while it still shows at `now`.
@@ -259,7 +269,11 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
         .buffer_mut()
         .set_style(area, Style::new().bg(INK).fg(BODY));
     let chosen = layout(area.width);
-    for (pane, at) in panes(chosen, area.width, area.height) {
+    let laid = match model.opened() {
+        Some(_) => full_panes(chosen, area.width, area.height),
+        None => panes(chosen, area.width, area.height),
+    };
+    for (pane, at) in laid {
         let r = Rect::new(area.x + at.x, area.y + at.y, at.width, at.height);
         if r.is_empty() {
             continue;
@@ -273,8 +287,18 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
             Pane::Detail if chosen == Layout::Side => card(frame, r, model, ctx, h),
             Pane::Detail => detail(frame, r, model, ctx, h),
             Pane::Status => status(frame, r, model, ctx, h),
-            Pane::Hints => hints(frame, r, chosen, h),
+            Pane::Hints => hints(frame, r, model, chosen, h),
             Pane::Narrow => narrow(frame, r),
+            Pane::Title | Pane::Tabs | Pane::Body => {
+                let Some(opened) = model.opened() else {
+                    continue;
+                };
+                match pane {
+                    Pane::Title => full::title(frame, r, model, opened, ctx, h),
+                    Pane::Tabs => full::tabs(frame, r, opened, h),
+                    _ => full::body(frame, r, model, opened, ctx, h),
+                }
+            }
         }
     }
     if chosen == Layout::TooNarrow {
@@ -684,7 +708,7 @@ fn counted(n: usize, noun: &str) -> String {
     }
 }
 
-fn hints(frame: &mut Frame, r: Rect, chosen: Layout, hits: &mut Hits) {
+fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut Hits) {
     // Most needed first: a narrow screen drops the last.
     let h_l = if chosen == Layout::Three {
         "pane"
@@ -692,19 +716,35 @@ fn hints(frame: &mut Frame, r: Rect, chosen: Layout, hits: &mut Hits) {
         "list"
     };
     let char = |c| Key::Char(c);
-    let keys = [
-        ("j/k", "move", char('j')),
-        ("tab", "list", Key::Tab),
-        ("m", "merge", char('m')),
-        ("c", "comment", char('c')),
-        ("f", "hand off", char('f')),
-        ("o", "browser", char('o')),
-        ("?", "help", char('?')),
-        ("q", "quit", char('q')),
-        ("a", "account", char('a')),
-        ("h/l", h_l, char('l')),
-        ("g/G", "top/end", char('g')),
-    ];
+    let keys = if model.opened().is_some() {
+        [
+            ("esc", "back", Key::Esc),
+            ("1-3", "tab", Key::Tab),
+            ("j/k", "move", char('j')),
+            ("m", "merge", char('m')),
+            ("c", "comment", char('c')),
+            ("f", "hand off", char('f')),
+            ("o", "browser", char('o')),
+            ("?", "help", char('?')),
+            ("q", "quit", char('q')),
+            ("a", "account", char('a')),
+            ("g/G", "top/end", char('g')),
+        ]
+    } else {
+        [
+            ("j/k", "move", char('j')),
+            ("⏎", "open", Key::Enter),
+            ("tab", "list", Key::Tab),
+            ("m", "merge", char('m')),
+            ("c", "comment", char('c')),
+            ("f", "hand off", char('f')),
+            ("o", "browser", char('o')),
+            ("?", "help", char('?')),
+            ("q", "quit", char('q')),
+            ("a", "account", char('a')),
+            ("h/l", h_l, char('l')),
+        ]
+    };
     let width = usize_of(r.width);
     let mut line = Marked::default();
     line.push(span(" ", Style::new()));
@@ -746,11 +786,29 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
     } else {
         "previous, next list"
     };
-    let keys = [
-        ("j k  ↑ ↓", "move"),
-        ("g G", "first, last"),
-        ("tab ⇧tab", "next, previous list"),
-        ("h l  ← →", h_l),
+    let moves: &[(&str, &str)] = if model.opened().is_some() {
+        &[
+            ("esc ⌫", "back to the lists"),
+            ("1 2 3", "conversation, checks, files"),
+            ("tab ⇧tab", "next, previous tab (h l too)"),
+            ("j k  ↑ ↓", "move"),
+            ("g G", "first, last"),
+        ]
+    } else {
+        &[
+            ("j k  ↑ ↓", "move"),
+            ("g G", "first, last"),
+            ("⏎", "open the PR full size"),
+            ("tab ⇧tab", "next, previous list"),
+            ("h l  ← →", h_l),
+        ]
+    };
+    let quit = if model.opened().is_some() {
+        "q"
+    } else {
+        "q  esc"
+    };
+    let keys = moves.iter().copied().chain([
         ("m", "merge, after a y (m again: method)"),
         ("c", "comment: ⏎ posts, alt-⏎ a new line"),
         ("f", "fix, resolve or address: copy the prompt"),
@@ -758,8 +816,8 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
         ("a", "switch the gh login its owner goes as"),
         ("v", "show the prompt last copied"),
         ("?", "this help"),
-        ("q  esc", "quit"),
-    ];
+        (quit, "quit"),
+    ]);
     let width = 56.min(area.width.saturating_sub(2));
     let iw = usize_of(width).saturating_sub(4);
     let mut lines = vec![Line::raw("")];
@@ -774,10 +832,12 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
         clip("Actions go as the gh login that sees the repo.", iw),
         fg(DIM),
     )));
-    lines.push(Line::from(span(
-        clip("A click picks a list or a PR, or presses its key.", iw),
-        fg(DIM),
-    )));
+    let clicks = if model.opened().is_some() {
+        "An open PR is read again every 30 s."
+    } else {
+        "A click picks a list or a PR, or presses its key."
+    };
+    lines.push(Line::from(span(clip(clicks, iw), fg(DIM))));
     // The version is in the title, which a short terminal doesn't cut; a newer one below.
     if let Some(newer) = model.newer() {
         lines.push(Line::raw(""));
@@ -1372,38 +1432,39 @@ fn stepper(row: &Row, width: usize, beat: u64) -> Line<'static> {
     Line::from(spans)
 }
 
-/// One check as the card lists it: glyph, name, what it did.
-fn check_lines(pr: &GhPr, width: usize) -> Vec<(u8, Line<'static>)> {
-    let mut out: Vec<(u8, Line<'static>)> = latest_runs(pr.checks())
+/// How a check in each place looks: its glyph, its colour, and the word for it.
+pub(crate) const fn check_look(progress: Progress) -> (&'static str, Color, &'static str) {
+    match progress {
+        Progress::Failed => ("✗", RED, "failed"),
+        Progress::Running => ("◐", YELLOW, "running"),
+        Progress::Queued => ("·", DIM, "queued"),
+        Progress::Passed => ("✓", GREEN, "passed"),
+    }
+}
+
+/// One check as the card lists it, worst first: glyph, name, what it did.
+fn check_lines(pr: &GhPr, width: usize) -> Vec<Line<'static>> {
+    let mut checks: Vec<(Progress, String)> = latest_runs(pr.checks())
         .into_iter()
-        .map(|item| {
-            let name = item
-                .name
-                .clone()
-                .or_else(|| item.context.clone())
-                .unwrap_or_else(|| "check".to_owned());
-            let is_started = if is_status_context(item) {
-                matches!(item.state, Some(Some(prw_core::gh::StatusState::Pending)))
-            } else {
-                item.status == Some(prw_core::gh::CheckStatus::InProgress)
-            };
-            let (rank, glyph, colour, word) = match verdict_of(item) {
-                CheckVerdict::Failed => (0, "✗", RED, "failed"),
-                CheckVerdict::Pending if is_started => (1, "◐", YELLOW, "running"),
-                CheckVerdict::Pending => (2, "·", DIM, "queued"),
-                CheckVerdict::Passed => (3, "✓", GREEN, "passed"),
-            };
-            let name_style = if rank == 0 { fg(FG) } else { fg(BODY) };
-            let line = Line::from(vec![
-                span(format!("{glyph} "), fg(colour)),
-                span(fit(&name, width.saturating_sub(2 + 8)), name_style),
-                span(right(word, 8), fg(if rank == 3 { DIM } else { colour })),
-            ]);
-            (rank, line)
-        })
+        .map(|item| (progress_of(item), check_name(item)))
         .collect();
-    out.sort_by_key(|(rank, _)| *rank);
-    out
+    checks.sort_by_key(|(progress, _)| *progress);
+    checks
+        .into_iter()
+        .map(|(progress, name)| {
+            let (glyph, colour, word) = check_look(progress);
+            let is_failed = progress == Progress::Failed;
+            let is_passed = progress == Progress::Passed;
+            Line::from(vec![
+                span(format!("{glyph} "), fg(colour)),
+                span(
+                    fit(&name, width.saturating_sub(2 + 8)),
+                    fg(if is_failed { FG } else { BODY }),
+                ),
+                span(right(word, 8), fg(if is_passed { DIM } else { colour })),
+            ])
+        })
+        .collect()
 }
 
 /// What the card says of merging, where it is open, in the colour of where it stands.
@@ -1466,7 +1527,7 @@ fn by_line(row: &Row, author: &str, login: Option<&str>, width: usize) -> Line<'
 /// The selected PR's box, titled `owner/repo #12`, and the area inside it; a bare
 /// "Details" box where nothing is selected.
 fn selected_box<'m>(frame: &mut Frame, r: Rect, model: &'m Model) -> Option<(&'m Row, Rect)> {
-    let Some(row) = model.selected_row() else {
+    let Some(row) = model.current_row() else {
         frame.render_widget(boxed("Details", false), r);
         return None;
     };
@@ -1573,7 +1634,7 @@ fn detail_checks(
     if !doing.is_empty() && !row.pr.derived.headline.contains(&doing) {
         head.push(Line::from(span(clip(&doing, iw), fg(YELLOW))));
     }
-    let rows = check_lines(pr, iw).into_iter().map(|(_, l)| l).collect();
+    let rows = check_lines(pr, iw);
     (head, rows)
 }
 

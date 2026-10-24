@@ -1,0 +1,196 @@
+{
+ "data": {
+  "p0": {
+   "pullRequest": {
+    "body": "Totals on invoice PDFs were left-aligned and didn't line up with the amount column. This right-aligns them.",
+    "createdAt": "2026-10-21T08:00:00Z",
+    "author": {
+     "login": "octocat"
+    },
+    "comments": {
+     "totalCount": 0,
+     "nodes": []
+    },
+    "reviews": {
+     "totalCount": 3,
+     "nodes": [
+      {
+       "author": {
+        "login": "bob"
+       },
+       "state": "CHANGES_REQUESTED",
+       "body": "Two alignment nits, then good to go.",
+       "submittedAt": "2026-10-21T10:00:00Z"
+      },
+      {
+       "author": {
+        "login": "bob"
+       },
+       "state": "COMMENTED",
+       "body": "",
+       "submittedAt": "2026-10-21T09:59:00Z"
+      },
+      {
+       "author": {
+        "login": "alice"
+       },
+       "state": "APPROVED",
+       "body": "",
+       "submittedAt": "2026-10-21T11:00:00Z"
+      }
+     ]
+    },
+    "reviewThreads": {
+     "totalCount": 3,
+     "nodes": [
+      {
+       "id": "PRRT_1",
+       "isResolved": false,
+       "isOutdated": false,
+       "path": "pdf/layout.ts",
+       "line": 41,
+       "startLine": null,
+       "originalLine": 41,
+       "originalStartLine": null,
+       "comments": {
+        "totalCount": 2,
+        "nodes": [
+         {
+          "author": {
+           "login": "bob"
+          },
+          "body": "This should end where the amount column ends: 480, not 470.",
+          "createdAt": "2026-10-21T09:59:00Z",
+          "url": "",
+          "diffHunk": "@@ -38,6 +38,7 @@ export function totals(doc, invoice) {\n   const total = sum(invoice.lines)\n-  doc.text(String(total), 420, y)\n+  doc.text(String(total), 470, y, { align: \"right\" })"
+         },
+         {
+          "author": {
+           "login": "octocat"
+          },
+          "body": "Good catch, the column is 480 wide. Fixing.",
+          "createdAt": "2026-10-21T10:30:00Z",
+          "url": ""
+         }
+        ]
+       }
+      },
+      {
+       "id": "PRRT_2",
+       "isResolved": false,
+       "isOutdated": true,
+       "path": "pdf/layout.ts",
+       "line": null,
+       "startLine": null,
+       "originalLine": 88,
+       "originalStartLine": null,
+       "comments": {
+        "totalCount": 1,
+        "nodes": [
+         {
+          "author": {
+           "login": "bob"
+          },
+          "body": "Use the shared money() formatter, so EUR invoices get a decimal comma.",
+          "createdAt": "2026-10-21T09:59:00Z",
+          "url": "",
+          "diffHunk": "@@ -85,3 +85,4 @@\n+const show = (n) => n.toFixed(2)"
+         }
+        ]
+       }
+      },
+      {
+       "id": "PRRT_3",
+       "isResolved": true,
+       "isOutdated": false,
+       "path": "pdf/fonts.ts",
+       "line": 12,
+       "startLine": null,
+       "originalLine": 12,
+       "originalStartLine": null,
+       "comments": {
+        "totalCount": 2,
+        "nodes": [
+         {
+          "author": {
+           "login": "bob"
+          },
+          "body": "Do we embed only the subset?",
+          "createdAt": "2026-10-21T09:00:00Z",
+          "url": "",
+          "diffHunk": "@@ -10,2 +10,3 @@\n+doc.registerFont(\"Inter\", subset(INTER))"
+         },
+         {
+          "author": {
+           "login": "octocat"
+          },
+          "body": "Yes, only the glyphs used.",
+          "createdAt": "2026-10-21T09:10:00Z",
+          "url": ""
+         }
+        ]
+       }
+      }
+     ]
+    },
+    "files": {
+     "totalCount": 2,
+     "nodes": [
+      {
+       "path": "pdf/layout.ts",
+       "additions": 17,
+       "deletions": 7,
+       "changeType": "MODIFIED"
+      },
+      {
+       "path": "pdf/fonts.ts",
+       "additions": 5,
+       "deletions": 2,
+       "changeType": "MODIFIED"
+      }
+     ]
+    },
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "statusCheckRollup": {
+         "contexts": {
+          "nodes": [
+           {
+            "__typename": "CheckRun",
+            "name": "build",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-10-21T10:20:00Z",
+            "completedAt": "2026-10-21T10:23:00Z",
+            "databaseId": 9201,
+            "detailsUrl": "https://github.com/acme/billing/actions/runs/1/job/9201",
+            "checkSuite": {
+             "workflowRun": {
+              "workflow": {
+               "name": "CI"
+              }
+             }
+            }
+           }
+          ]
+         }
+        },
+        "checkSuites": {
+         "nodes": [
+          {
+           "checkRuns": {
+            "nodes": []
+           }
+          }
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

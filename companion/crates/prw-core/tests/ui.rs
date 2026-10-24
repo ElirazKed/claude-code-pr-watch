@@ -3,10 +3,15 @@
 //! when it is empty; and what the model shows is what its inputs give.
 
 use proptest::prelude::*;
+use prw_core::act::{Done, Outcome};
+use prw_core::full::Full;
 use prw_core::gh::{GhPr, PrState};
+use prw_core::merge::MergeRun;
+use prw_core::opened::{Got, Opened, Read, ReadDone, Tab};
 use prw_core::protocol::{FileKind, SessionFile, Writer};
+use prw_core::status::MergeMethod;
 use prw_core::ui::{
-    Key, ListId, Listed, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update,
+    Cmd, Key, ListId, Listed, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update,
 };
 use prw_core::{Entry, Shared};
 
@@ -110,7 +115,10 @@ fn key() -> impl Strategy<Value = Key> {
             Key::Esc,
             Key::CtrlC,
         ]),
-        prop::sample::select(vec!['j', 'k', 'h', 'l', 'g', 'G', '?', 'q', 'x']).prop_map(Key::Char),
+        prop::sample::select(vec![
+            'j', 'k', 'h', 'l', 'g', 'G', '?', 'q', 'x', '1', '2', '3'
+        ])
+        .prop_map(Key::Char),
     ]
 }
 
@@ -127,6 +135,10 @@ fn msg() -> impl Strategy<Value = Msg> {
             Msg::SessionsRead(sessions, at)
         }),
         6 => key().prop_map(Msg::Key),
+        1 => (prop::sample::select(&URLS[..]), any::<bool>()).prop_map(|(url, is_ok)| {
+            let got = if is_ok { Ok(Full::default()) } else { Err("HTTP 502".to_owned()) };
+            Msg::Read(ReadDone { url: url.to_owned(), got: Got::Pr(got) })
+        }),
         1 => (0_u16..=300, 0_u16..=80).prop_map(|(w, h)| Msg::Resize(w, h)),
         1 => at().prop_map(Msg::Tick),
         1 => (
@@ -168,6 +180,19 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
         let urls: std::collections::HashSet<_> = list.rows.iter().map(|r| &r.pr.url).collect();
         prop_assert_eq!(urls.len(), list.rows.len(), "a PR once per list");
     }
+    // An open PR's tabs each select one of their items.
+    if let Some(opened) = model.opened() {
+        for tab in Tab::ALL {
+            let (at, len) = (opened.selected(tab), opened.len(tab));
+            prop_assert!(
+                at < len || (len == 0 && at == 0),
+                "{:?}: {} of {}",
+                tab,
+                at,
+                len
+            );
+        }
+    }
     // What the model shows is what its inputs give now.
     prop_assert_eq!(
         lists,
@@ -198,4 +223,92 @@ proptest! {
             check(&model)?;
         }
     }
+}
+
+const URL: &str = "https://github.com/acme/app/pull/1";
+
+/// One open PR in `results.json`, read at 1000 ms, and no session: All lists it.
+fn one_pr() -> Model {
+    let shared = Shared {
+        fetched_at: 1_000,
+        next_at: 61_000,
+        prs: [(
+            URL.to_owned(),
+            Entry {
+                at: 1_000,
+                pr: Some(GhPr {
+                    number: 1,
+                    title: "Retry uploads".into(),
+                    state: PrState::Open,
+                    ..GhPr::default()
+                }),
+                error: None,
+                failed_since: None,
+                is_unreachable: false,
+            },
+        )]
+        .into(),
+        ..Shared::default()
+    };
+    update(Model::new(120, 36), Msg::SharedRead(Ok(shared), 1_000)).0
+}
+
+fn read_pr() -> Read {
+    Read::Pr {
+        url: URL.into(),
+        repo: "acme/app".into(),
+        number: 1,
+    }
+}
+
+fn got(full: Full) -> Msg {
+    Msg::Read(ReadDone {
+        url: URL.into(),
+        got: Got::Pr(Ok(full)),
+    })
+}
+
+#[test]
+fn enter_opens_the_selected_pr_and_reads_it_and_esc_goes_back() {
+    let (model, cmds) = update(one_pr(), Msg::Key(Key::Enter));
+    assert_eq!(cmds, [Cmd::Read(read_pr())]);
+    assert_eq!(model.opened().map(Opened::url), Some(URL));
+    assert_eq!(model.opened().map(Opened::tab), Some(Tab::Conversation));
+    // The tab keys, and the action keys act on the PR open.
+    let (model, _) = update(model, Msg::Key(Key::Char('2')));
+    assert_eq!(model.opened().map(Opened::tab), Some(Tab::Checks));
+    let (model, cmds) = update(model, Msg::Key(Key::Char('o')));
+    assert_eq!(cmds, [Cmd::Open(URL.into())]);
+    let (model, cmds) = update(model, Msg::Key(Key::Esc));
+    assert_eq!((model.opened(), cmds), (None, Vec::new()));
+    assert_eq!(model.selected(), Some(URL));
+    // Esc again quits, as before.
+    assert_eq!(update(model, Msg::Key(Key::Esc)).1, [Cmd::Quit]);
+}
+
+#[test]
+fn the_open_pr_is_read_again_every_thirty_seconds_and_after_a_merge() {
+    let (model, _) = update(one_pr(), Msg::Key(Key::Enter));
+    let (model, cmds) = update(model, got(Full::default()));
+    assert_eq!(cmds, []);
+    let (model, cmds) = update(model, Msg::Tick(30_999));
+    assert_eq!(cmds, []);
+    let (model, cmds) = update(model, Msg::Tick(31_000));
+    assert_eq!(cmds, [Cmd::Read(read_pr())]);
+    let (model, _) = update(model, got(Full::default()));
+    let merged = Done {
+        url: URL.into(),
+        number: 1,
+        outcome: Outcome::Merged(MergeRun::Merge(MergeMethod::Squash)),
+    };
+    let (_, cmds) = update(model, Msg::Done(merged));
+    assert!(cmds.contains(&Cmd::Read(read_pr())), "{cmds:?}");
+}
+
+#[test]
+fn a_read_for_a_pr_no_longer_open_changes_nothing() {
+    let (model, _) = update(one_pr(), Msg::Key(Key::Enter));
+    let (model, _) = update(model, Msg::Key(Key::Esc));
+    let (model, cmds) = update(model, got(Full::default()));
+    assert_eq!((model.opened(), cmds), (None, Vec::new()));
 }

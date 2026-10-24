@@ -30,9 +30,9 @@ pub struct Login {
     pub login: String,
 }
 
-/// A review comment (`GhComment`).
+/// A review comment (`GhComment`), or a comment on the PR itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct GhComment {
     /// `None` for a deleted account.
     #[serde(deserialize_with = "lenient")]
@@ -41,6 +41,12 @@ pub struct GhComment {
     pub body: String,
     #[serde(deserialize_with = "lenient")]
     pub url: String,
+    /// Asked by the full view only (`full::full_query`), as are `diff_hunk` and a thread's `id`.
+    #[serde(deserialize_with = "lenient")]
+    pub created_at: String,
+    /// The code it was left on, as a diff hunk ending at its line.
+    #[serde(deserialize_with = "lenient")]
+    pub diff_hunk: String,
 }
 
 /// A thread's comments, and how many it has in all.
@@ -58,6 +64,9 @@ pub struct Comments {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GhThread {
+    /// Its node id, what resolving it names.
+    #[serde(deserialize_with = "lenient")]
+    pub id: String,
     #[serde(deserialize_with = "lenient")]
     pub is_resolved: bool,
     #[serde(deserialize_with = "lenient")]
@@ -192,14 +201,19 @@ static BLANKS: LazyLock<Regex> =
 static LATER_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\n([^\n])").expect("a valid pattern"));
 
-/// A comment as the agent needs it: without the HTML comments review apps keep their
-/// bookkeeping in, or runs of blank lines, and clipped (`cleanBody`).
+/// A comment as written, without the HTML comments review apps keep their bookkeeping in, or
+/// runs of blank lines.
 #[must_use]
-pub fn clean_body(body: &str) -> String {
+pub fn tidy(body: &str) -> String {
     let text = body.replace('\r', "");
     let text = HTML_COMMENT.replace_all(&text, "");
-    let text = BLANKS.replace_all(&text, "\n\n");
-    let text = clip(text.trim(), COMMENT_CHARS);
+    BLANKS.replace_all(&text, "\n\n").trim().to_owned()
+}
+
+/// A comment as the agent needs it: [`tidy`], and clipped (`cleanBody`).
+#[must_use]
+pub fn clean_body(body: &str) -> String {
+    let text = clip(&tidy(body), COMMENT_CHARS);
     if text.is_empty() {
         "(no text)".to_owned()
     } else {
@@ -347,6 +361,7 @@ mod tests {
     /// single-line.
     fn thread(path: &str, line: Option<u64>, comments: &[(&str, &str)]) -> GhThread {
         GhThread {
+            id: String::new(),
             is_resolved: false,
             is_outdated: false,
             path: path.to_owned(),
@@ -369,6 +384,7 @@ mod tests {
                             }),
                             body: (*body).to_owned(),
                             url: format!("{}#discussion_r{id}", facts().url),
+                            ..GhComment::default()
                         }
                     })
                     .collect(),

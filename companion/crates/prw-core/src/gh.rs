@@ -276,6 +276,9 @@ pub struct CheckItem {
     pub started_at: Option<String>,
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// Asked by the full view only (`full::full_query`), never by the poll.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
     /// Asked only when a failure is handed off (`fix.ts`), never by the poll.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub database_id: Option<i64>,

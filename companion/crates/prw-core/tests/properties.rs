@@ -131,6 +131,7 @@ fn check_item() -> impl Strategy<Value = CheckItem> {
         stamp(),
     );
     let more = (
+        stamp(),
         opt(any::<i64>()),
         opt(text()),
         opt(text()),
@@ -141,7 +142,7 @@ fn check_item() -> impl Strategy<Value = CheckItem> {
     (core, more).prop_map(
         |(
             (typename, name, context, status, conclusion, state, workflow, started_at, created_at),
-            (database_id, details_url, title, summary, target_url, description),
+            (completed_at, database_id, details_url, title, summary, target_url, description),
         )| CheckItem {
             typename,
             name,
@@ -152,6 +153,7 @@ fn check_item() -> impl Strategy<Value = CheckItem> {
             workflow,
             started_at,
             created_at,
+            completed_at,
             database_id,
             details_url,
             title,

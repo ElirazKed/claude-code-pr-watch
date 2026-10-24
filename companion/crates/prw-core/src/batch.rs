@@ -131,22 +131,28 @@ pub fn checks_query(pr: &PrRef) -> String {
     let mut parts = pr.repo.split('/');
     let owner = parts.next().unwrap_or_default();
     let name = parts.next().unwrap_or_default();
+    format!(
+        "query {{\n  p0: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{\n    {}\n  }} }}\n}}",
+        json_string(owner),
+        json_string(name),
+        pr.number,
+        checks_asked("")
+    )
+}
+
+/// The checks as [`checks_query`] asks them, each run's `more` fields too; [`parse_checks`]
+/// reads them out of any reply with the PR under `p0`.
+pub(crate) fn checks_asked(more: &str) -> String {
     let failed_runs = format!(
         "
     checkSuites(last: 50) {{ nodes {{ checkRuns(first: 20, filterBy: {{ checkType: LATEST, conclusions: [{FAILED}] }}) {{
       nodes {{ databaseId title summary }}
     }} }} }}"
     );
-    format!(
-        "query {{\n  p0: repository(owner: {}, name: {}) {{ pullRequest(number: {}) {{\n    {}\n  }} }}\n}}",
-        json_string(owner),
-        json_string(name),
-        pr.number,
-        checks_of(
-            "databaseId detailsUrl ",
-            " description targetUrl",
-            &failed_runs
-        )
+    checks_of(
+        &format!("databaseId detailsUrl {more}"),
+        " description targetUrl",
+        &failed_runs,
     )
 }
 
@@ -176,7 +182,7 @@ pub fn parse_checks(stdout: &str, stderr: &str, pr: &PrRef) -> Result<Vec<CheckI
 }
 
 /// A string as `JSON.stringify` writes it.
-fn json_string(text: &str) -> String {
+pub(crate) fn json_string(text: &str) -> String {
     Value::String(text.to_owned()).to_string()
 }
 
