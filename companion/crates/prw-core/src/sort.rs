@@ -2,6 +2,9 @@
 //! repo, by when each PR was opened, or by when it last changed; `s` steps through them and
 //! `S` turns the one shown around.
 
+use std::cmp::Reverse;
+
+use crate::repos::name_of;
 use crate::ui::Row;
 
 /// What the rows go by.
@@ -10,7 +13,7 @@ pub enum SortKey {
     /// Most urgent first (`order`), as the mod's band and pane list them.
     #[default]
     Urgency,
-    /// Repo names A to Z, each repo's PRs most urgent first.
+    /// Repo names A to Z (namesakes together, by owner), each repo's PRs most urgent first.
     Repo,
     /// Oldest first.
     Opened,
@@ -82,13 +85,20 @@ pub fn sorted(mut rows: Vec<Row>, sort: Sort) -> Vec<Row> {
     match sort.key {
         SortKey::Urgency if sort.is_flipped => rows.reverse(),
         SortKey::Urgency => {}
-        SortKey::Repo => {
-            rows.sort_by(|a, b| flip(a.repo_name.to_lowercase().cmp(&b.repo_name.to_lowercase())));
-        }
+        // Each key worked out once, not on every comparison; both sorts are stable.
+        SortKey::Repo if sort.is_flipped => rows.sort_by_cached_key(|r| Reverse(repo_key(r))),
+        SortKey::Repo => rows.sort_by_cached_key(repo_key),
         SortKey::Opened => rows.sort_by(|a, b| by_time(a.opened_at, b.opened_at, flip)),
         SortKey::Updated => rows.sort_by(|a, b| by_time(a.updated_at, b.updated_at, flip)),
     }
     rows
+}
+
+/// What the repo order goes by: the repo's name, then its owner (ignoring case), so a repo
+/// shown with its owner (it has a namesake) sorts beside its namesakes, not under the owner.
+fn repo_key(row: &Row) -> (String, String) {
+    let repo = row.repo.to_lowercase();
+    (name_of(&repo).to_owned(), repo)
 }
 
 /// Earlier first (or, flipped, later first), and no time after any time either way.
@@ -162,6 +172,21 @@ mod tests {
     }
 
     #[test]
+    fn namesakes_sort_beside_each_other_by_their_name_not_their_owner() {
+        let mut rows = vec![
+            row(1, "web", None, None),
+            row(2, "api", None, None),
+            row(3, "web", None, None),
+        ];
+        // `zed/web` is shown with its owner (a namesake), and still sorts under `web`.
+        rows[2].repo = "zed/web".to_owned();
+        rows[2].repo_name = "zed/web".to_owned();
+        rows[0].repo_name = "acme/web".to_owned();
+        let by_repo = Sort::default().next();
+        assert_eq!(numbers(&sorted(rows, by_repo)), [2, 1, 3]);
+    }
+
+    #[test]
     fn a_pr_with_no_time_yet_goes_last_either_way_round() {
         let rows = vec![
             row(1, "web", None, None),
@@ -216,7 +241,7 @@ mod tests {
         fn rows_that_tie_stay_most_urgent_first(rows in rows(), sort in sorts()) {
             prop_assume!(sort.key != SortKey::Urgency);
             let key = |r: &Row| match sort.key {
-                SortKey::Repo => Some(r.repo_name.to_lowercase()),
+                SortKey::Repo => Some(format!("{:?}", repo_key(r))),
                 SortKey::Opened => Some(format!("{:?}", r.opened_at)),
                 _ => Some(format!("{:?}", r.updated_at)),
             };

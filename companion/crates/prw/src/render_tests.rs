@@ -678,8 +678,8 @@ fn saved_searches_are_lists_of_their_own() {
         &screen(&web, 120, 30),
         &[
             "Team web  ·  is:open repo:acme/web · 4 of 112",
-            // The agent, then the repo chip, then the title.
-            "◆  web  Keep the cart",
+            // The agent, then the repo chip (4 cells at least, as REPO is), then the title.
+            "◆  web   Keep the cart",
             "#97",
         ],
     );

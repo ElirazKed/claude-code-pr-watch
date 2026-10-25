@@ -724,6 +724,14 @@ impl Model {
             }
             list.rows = sorted(std::mem::take(&mut list.rows), sort);
         }
+        // Only the listed PRs' times are kept, so a search's churn doesn't pile them up.
+        let listed: HashSet<&str> = self
+            .lists
+            .iter()
+            .flat_map(|list| &list.rows)
+            .map(|row| row.pr.url.as_str())
+            .collect();
+        dates.retain(|url, _| listed.contains(url.as_str()));
         let now = self.now;
         if let Some(pills_were) = pills_were {
             let pills_are = pills(&self.lists);

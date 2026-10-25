@@ -1,6 +1,6 @@
 //! How a row names its repo, and which of the repo colours it wears.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What each of `repos` (`owner/name`) is shown as: its name alone, or `owner/name` where
 /// another of them has the same name under a different owner (names compared ignoring case,
@@ -10,15 +10,19 @@ pub fn short_names<'a>(repos: impl IntoIterator<Item = &'a str>) -> HashMap<&'a 
     let mut repos: Vec<&str> = repos.into_iter().collect();
     repos.sort_unstable();
     repos.dedup();
-    let mut owners: HashMap<String, usize> = HashMap::new();
+    // Each name's repos, ignoring case: `acme/web` and `Acme/Web` are one repo, not namesakes.
+    let mut owners: HashMap<String, HashSet<String>> = HashMap::new();
     for repo in &repos {
-        *owners.entry(name_of(repo).to_lowercase()).or_default() += 1;
+        owners
+            .entry(name_of(repo).to_lowercase())
+            .or_default()
+            .insert(repo.to_lowercase());
     }
     repos
         .into_iter()
         .map(|repo| {
             let name = name_of(repo);
-            let shown = if owners[&name.to_lowercase()] > 1 {
+            let shown = if owners[&name.to_lowercase()].len() > 1 {
                 repo
             } else {
                 name
@@ -29,7 +33,8 @@ pub fn short_names<'a>(repos: impl IntoIterator<Item = &'a str>) -> HashMap<&'a 
 }
 
 /// The part after the `/` (all of it where there is none).
-fn name_of(repo: &str) -> &str {
+#[must_use]
+pub fn name_of(repo: &str) -> &str {
     repo.split_once('/').map_or(repo, |(_, name)| name)
 }
 
@@ -58,6 +63,10 @@ mod tests {
         assert_eq!(names["acme/web"], "acme/web");
         assert_eq!(names["me/Web"], "me/Web");
         assert_eq!(names["acme/api"], "api");
+        // One repo in two cases is no namesake of itself.
+        let names = short_names(["acme/web", "Acme/web"]);
+        assert_eq!(names["acme/web"], "web");
+        assert_eq!(names["Acme/web"], "web");
     }
 
     #[test]

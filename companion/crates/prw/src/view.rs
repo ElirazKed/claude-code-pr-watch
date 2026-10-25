@@ -748,9 +748,9 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
-            ("s", "sort", char('s')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
+            ("s", "sort", char('s')),
             ("a", "account", char('a')),
             ("h/l", h_l, char('l')),
         ]
@@ -1305,21 +1305,33 @@ impl Columns {
             .map(|r| cells(&r.repo_name))
             .max()
             .unwrap_or(0);
-        let name = name.min(REPO_MAX);
+        // At least `REPO`'s width, so the heading never runs into TITLE's.
+        let name = if name == 0 {
+            0
+        } else {
+            name.clamp(4, REPO_MAX)
+        };
         let is_padded = rest >= name + 3 + TITLE_ROOMY;
         let repo = if is_padded {
             name
         } else {
             name.min(rest.saturating_sub(TITLE_MIN + 1))
         };
-        let repo = if repo < 3 { 0 } else { repo };
+        let repo = if repo < 4 { 0 } else { repo };
         let chip = match (repo, is_padded) {
             (0, _) => 0,
             (_, true) => repo + 3,
             (_, false) => repo + 1,
         };
         let left = rest.saturating_sub(chip);
-        let dates = if left >= 2 * DATE_W + 2 * TITLE_MIN {
+        // No columns for times no row knows (an older mod wrote every PR).
+        let is_dated = list
+            .rows
+            .iter()
+            .any(|r| r.opened_at.is_some() || r.updated_at.is_some());
+        let dates = if !is_dated {
+            Dates::None
+        } else if left >= 2 * DATE_W + 2 * TITLE_MIN {
             Dates::Both
         } else if left >= DATES_W + TITLE_MIN + 8 {
             Dates::Shared
@@ -1349,7 +1361,15 @@ impl Columns {
         // The usual order goes unmarked, as the title leaves it unsaid.
         let (text, style) = if self.sort.key == key && self.sort != Sort::default() {
             let arrow = if self.sort.is_flipped { "↑" } else { "↓" };
-            (format!("{text}{arrow}"), fg(ACCENT))
+            let marked = format!("{text}{arrow}");
+            // A left-aligned heading keeps a space before the next; where the arrow would
+            // take it, the accent alone says so.
+            let text = if is_right || cells(&marked) < n {
+                marked
+            } else {
+                text.to_owned()
+            };
+            (text, fg(ACCENT))
         } else {
             (text.to_owned(), label())
         };
@@ -1407,8 +1427,10 @@ impl Columns {
     fn times_at(row: &Row, now: i64) -> (Said, Said) {
         let since = |at: Option<i64>| at.map(|at| now.saturating_sub(at));
         let opened = since(row.opened_at).map(|ms| (age(ms), if ms < NEW_MS { FG } else { DIM }));
+        // A merged or closed PR isn't waiting on anyone: its quiet is no news.
+        let is_done = matches!(row.pr.state, Some(PrState::Merged | PrState::Closed));
         let updated = since(row.updated_at).map(|ms| {
-            let colour = if ms >= QUIET_MS {
+            let colour = if ms >= QUIET_MS && !is_done {
                 mix(DIM, YELLOW, 0.75)
             } else {
                 DIM
@@ -1432,13 +1454,15 @@ impl Columns {
                 })
                 .collect(),
             Dates::Shared => {
-                let (o, oc) = opened.unwrap_or_default();
-                let (u, uc) = updated.unwrap_or_default();
-                let slash = if o.is_empty() && u.is_empty() {
-                    ""
-                } else {
-                    "/"
+                // One time known: a dash stands for the other, so `3mo/–` can't read as both.
+                let is_known = opened.is_some() || updated.is_some();
+                let or_dash = |time: Said| match time {
+                    Some(time) => time,
+                    None if is_known => ("–".to_owned(), DIM),
+                    None => (String::new(), DIM),
                 };
+                let ((o, oc), (u, uc)) = (or_dash(opened), or_dash(updated));
+                let slash = if is_known { "/" } else { "" };
                 let pad = DATES_W.saturating_sub(cells(&o) + cells(slash) + cells(&u));
                 vec![
                     span(format!("{}{o}", " ".repeat(pad)), on(oc)),
