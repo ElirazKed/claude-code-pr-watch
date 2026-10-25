@@ -1,5 +1,5 @@
 {
-  description = "prw: a terminal companion for the pr-watch Claude Code mod";
+  description = "prw: a PR manager for the terminal (companion to the pr-watch Claude Code mod)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -38,7 +38,7 @@
           cargoLock.lockFile = ./companion/Cargo.lock;
           # checkPhase runs `cargo test` over the whole workspace.
           meta = {
-            description = "Every PR your agents touch, in one terminal (companion to the pr-watch mod)";
+            description = "All your PRs in one terminal: a PR manager (companion to the pr-watch mod)";
             homepage = "https://github.com/ElirazKed/claude-code-pr-watch";
             license = lib.licenses.mit;
             mainProgram = "prw";

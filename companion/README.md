@@ -1,14 +1,14 @@
 # prw
 
-`prw` is an optional terminal companion for the pr-watch mod. It watches every PR your agents touch
-(Claude through the mod; Codex and others through `prw mcp` or `prw watch`) beside your saved GitHub
-searches, in a responsive TUI with a full PR view (conversation, threads, checks, files), so GitHub can
-stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
-without Claude.
+`prw` is a full PR manager for the terminal: all your PRs in one place. Your own open PRs, your saved
+GitHub searches and every PR your agents touch (Claude through the pr-watch mod; Codex and others
+through `prw mcp` or `prw watch`), in a responsive TUI with a full PR view (conversation, threads,
+checks, files) to reply, resolve, approve and merge in, so GitHub can stay closed. It runs on its own,
+with or without Claude; the mod stays complete without it, and when both run they share one poll.
 
 ![prw on its demo cache](../docs/prw.png)
 
-`prw` shows the PRs your sessions watch, from the mod's shared
+Your sessions' PRs come from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your

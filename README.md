@@ -36,11 +36,11 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 /plugin install pr-watch@claude-code-pr-watch
 ```
 
-## prw, the terminal companion
+## prw, the PR manager
 
 ![prw on its demo cache: lists on the left, every watched PR in the middle, the selected PR's card on the right](docs/prw.png)
 
-`prw` is an optional terminal app for the big picture: every PR your agents touch (Claude through the mod; Codex and others through `prw mcp` or `prw watch`), your own open PRs and your saved GitHub searches, with a full PR view to read, reply, resolve, approve and merge in. The mod stays complete without it, and `prw` works without Claude. It needs the [GitHub CLI](https://cli.github.com) logged in, as the mod does.
+`prw` is a full PR manager for your terminal: all your PRs in one place. Your own open PRs, your saved GitHub searches (review requests, a team's repos) and every PR your agents touch (Claude through the mod; Codex and others through `prw mcp` or `prw watch`), sorted by what needs you, with a full PR view to read, reply, resolve, approve and merge in, so GitHub can stay closed. It runs on its own, with or without Claude, and shares the mod's poll when both run. It needs the [GitHub CLI](https://cli.github.com) logged in, as the mod does.
 
 Install the latest release (macOS and Linux, x86_64 and arm64) to `~/.local/bin`:
 

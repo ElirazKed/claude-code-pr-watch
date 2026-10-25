@@ -1,6 +1,6 @@
 [package]
 name = "prw"
-description = "A terminal companion for the pr-watch Claude Code mod: every PR your agents touch, in one TUI."
+description = "A PR manager for the terminal: your open PRs, saved searches and agents' PRs in one TUI (companion to the pr-watch Claude Code mod)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
