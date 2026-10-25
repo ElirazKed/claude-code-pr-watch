@@ -36,7 +36,7 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 /plugin install pr-watch@claude-code-pr-watch
 ```
 
-## prw, the terminal companion
+## prw, the PR manager
 
 ![prw on its demo cache: lists on the left, every watched PR in the middle, the selected PR's card on the right](docs/prw.png)
 

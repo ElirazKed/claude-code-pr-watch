@@ -1,4 +1,4 @@
-//! `prw`: the terminal companion for the pr-watch mod.
+//! `prw`: a PR manager for the terminal, and companion to the pr-watch mod.
 //!
 //! A TUI over the mod's shared cache. It reads `results.json` and the session files
 //! (`cache`), feeds what it read to the model (`prw_core::ui::update`) as messages, and
@@ -61,7 +61,7 @@ const TICK: Duration = Duration::from_millis(view::TICK_MS as u64);
 const SLICE: Duration = Duration::from_millis(100);
 
 const HELP: &str = "\
-prw: all your PRs in one terminal, a PR manager
+prw: a PR manager, all your PRs in one terminal
 
 Usage: prw [OPTIONS]
        prw watch [<PR URL>...] [--agent <NAME>] [--session <NAME>]
