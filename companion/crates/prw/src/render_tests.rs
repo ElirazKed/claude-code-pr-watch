@@ -305,6 +305,36 @@ fn waiting_for_pr_watch_before_any_results() {
 }
 
 #[test]
+fn a_first_run_says_how_a_pr_gets_here() {
+    let shared = parse_shared("{}").expect("an empty results.json reads");
+    let model = feed(Model::new(84, 30), [Msg::SharedRead(Ok(shared), 0)]);
+    assert_says(
+        &screen(&model, 84, 30),
+        &[
+            "Nothing watched yet",
+            "A PR shows up here when",
+            "· a Claude session with the pr-watch mod",
+            "· you run prw watch <url>",
+            "Your own open PRs are under My PRs",
+        ],
+    );
+    // The narrow layout wraps the ways under their dots, and still says them.
+    assert_says(
+        &screen(&model, 49, 30),
+        &["Nothing watched yet", "prw watch"],
+    );
+    // prw's own session file is live (written every tick) and lists nothing: still a first run.
+    let own = Session {
+        id: "prw-1a2b".to_owned(),
+        file: parse_session(r#"{"urls": [], "writer": "prw", "name": "My PRs"}"#)
+            .expect("prw's session file reads"),
+        mtime: 5_000,
+    };
+    let model = feed(model, [Msg::SessionsRead(vec![own], 10_000)]);
+    assert_says(&screen(&model, 84, 30), &["Nothing watched yet"]);
+}
+
+#[test]
 fn the_help_shows_and_hides() {
     let model = feed(demo(84, 30), [Msg::Key(Key::Char('?'))]);
     assert_says(

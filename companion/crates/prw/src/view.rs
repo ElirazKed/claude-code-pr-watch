@@ -1223,18 +1223,50 @@ fn table_empty(model: &Model, list: &List, iw: usize, ctx: Ctx) -> Option<Vec<Li
     if !list.rows.is_empty() {
         return None;
     }
+    // All lists every watched PR (every one in results.json when nobody is live), so empty
+    // means nothing is watched, whoever is live: prw's own session counts as live.
+    if list.search.is_none() && list.id == ListId::All {
+        return Some(first_run(iw));
+    }
     let say = match &list.search {
         Some(search) if !search.is_searched => " Searching GitHub…",
         Some(_) => " No open PR matches this search.",
-        None if list.id == ListId::All && model.header().live == 0 => {
-            " No PRs in results.json yet."
-        }
         None => " Nothing here yet.",
     };
     Some(vec![
         Line::raw(""),
         Line::from(span(clip(say, iw), fg(DIM))),
     ])
+}
+
+/// What the All list says before anything is watched: how a PR gets here.
+fn first_run(iw: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw(""),
+        Line::from(span(clip(" Nothing watched yet", iw), bold(FG))),
+        Line::raw(""),
+        Line::from(span(clip(" A PR shows up here when", iw), fg(BODY))),
+    ];
+    let ways = [
+        "a Claude session with the pr-watch mod opens or touches it",
+        "another agent calls the watch tool (prw mcp)",
+        "you run prw watch <url>",
+    ];
+    for way in ways {
+        for (i, l) in wrap(way, iw.saturating_sub(5), 3).into_iter().enumerate() {
+            let dot = if i == 0 { "  · " } else { "    " };
+            lines.push(Line::from(vec![span(dot, fg(DIM)), span(l, fg(BODY))]));
+        }
+    }
+    lines.push(Line::raw(""));
+    let mine = format!(
+        "Your own open PRs are under {}, once gh is logged in.",
+        crate::poller::MINE
+    );
+    for l in wrap(&mine, iw.saturating_sub(2), 2) {
+        lines.push(Line::from(span(format!(" {l}"), fg(DIM))));
+    }
+    lines
 }
 
 /// The table's columns: the title takes what the others leave, and the repo chip and the

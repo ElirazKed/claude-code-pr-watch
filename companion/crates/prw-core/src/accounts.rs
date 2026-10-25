@@ -194,9 +194,43 @@ pub fn best_login(answers: &[Answer], total: usize) -> String {
 #[must_use]
 pub fn token_error(login: &str) -> String {
     if login.is_empty() {
-        "Couldn't read gh's logins (gh auth status)".to_owned()
+        NoLogins::Unread.said().to_owned()
     } else {
         format!("Couldn't get {login}'s gh token")
+    }
+}
+
+/// Why gh gave no logins, so a first run says what to do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoLogins {
+    /// No `gh` to run.
+    NoGh,
+    /// gh ran and says nobody is logged in.
+    LoggedOut,
+    /// gh said something that lists no login (or didn't answer in time).
+    #[default]
+    Unread,
+}
+
+impl NoLogins {
+    /// Why, from what `gh auth status` printed.
+    #[must_use]
+    pub fn of(said: &str) -> Self {
+        if said.contains("not logged in") {
+            Self::LoggedOut
+        } else {
+            Self::Unread
+        }
+    }
+
+    /// As the status line and a card say it.
+    #[must_use]
+    pub const fn said(self) -> &'static str {
+        match self {
+            Self::NoGh => "gh isn't installed: see cli.github.com",
+            Self::LoggedOut => "gh isn't logged in: run gh auth login",
+            Self::Unread => "Couldn't read gh's logins (gh auth status)",
+        }
     }
 }
 
@@ -525,6 +559,16 @@ mod tests {
             "Not found as octocat, hubot or monalisa"
         );
         assert_eq!(of(&[]), "Not found");
+    }
+
+    #[test]
+    fn no_logins_says_what_to_do() {
+        // What gh 2.x prints with nobody logged in.
+        let out = "You are not logged into any GitHub hosts. To log in, run: gh auth login";
+        assert_eq!(NoLogins::of(out), NoLogins::LoggedOut);
+        assert_eq!(NoLogins::of("github.com\n  X Timeout"), NoLogins::Unread);
+        assert!(NoLogins::LoggedOut.said().contains("gh auth login"));
+        assert!(NoLogins::NoGh.said().contains("cli.github.com"));
     }
 
     #[test]

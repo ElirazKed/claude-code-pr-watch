@@ -25,7 +25,9 @@ impl Ran {
 /// Why `gh` gave no answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
-    /// It couldn't start: not installed, say.
+    /// There's no `gh` to start.
+    Missing,
+    /// It couldn't start for another reason.
     Spawn(String),
     /// It ran past its time and was killed.
     Timeout,
@@ -89,9 +91,10 @@ impl Gh for System {
         if let Some(token) = token {
             command.env("GH_TOKEN", token);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|err| RunError::Spawn(err.to_string()))?;
+        let mut child = command.spawn().map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => RunError::Missing,
+            _ => RunError::Spawn(err.to_string()),
+        })?;
         // Written on a thread of its own, then closed, so gh reads to the end while its
         // output is drained.
         if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
