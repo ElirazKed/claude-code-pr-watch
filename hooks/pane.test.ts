@@ -2880,7 +2880,7 @@ test('the band: a line per PR, most urgent first, then its buttons', IN_BAND, as
   await desk.unmount()
 })
 
-test('the band gives a row to the line telling of prw, and ✕ dismisses it', IN_BAND, async ($, on) => {
+test('the band gives a row to the line telling of prw, and ✕ (p) dismisses it', IN_BAND, async ($, on) => {
   const { files, clock } = await bandSession($, on, [RUNNING, FAILING, MERGED], { files: unseen() })
   await clock.advance(10_500)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal', requestId: 'band' })
@@ -2890,10 +2890,14 @@ test('the band gives a row to the line telling of prw, and ✕ dismisses it', IN
     '⠋ #12 Retry uploads with exponential backoff · CI running · 1/3',
     '✓ #7 Retry uploads with exponential backoff · merged',
     // (A Link draws no text here.)
-    '✦ New: prw, all your PRs in one terminal    ✕',
+    '✦ New: prw, all your PRs in one terminal    p: ✕',
     'o: Open pane  r: Refresh  f: Fix #13 with Claude',
   ])
   expect((await ui.findAll({ type: 'Link' })).find(link => link.props.label === 'Learn more ↗')?.props.href).toMatch(/prw\.html$/)
+  expect((await ui.find({ key: 'band-companion-dismiss' }))?.props).toMatchObject({ label: '✕', hotkey: 'p' })
+  // No two of the band's buttons share a key.
+  const keys = (await ui.findAll({ type: 'Button' })).map(button => button.props.hotkey).filter(key => key !== undefined)
+  expect(new Set(keys).size).toBe(keys.length)
   await ui.press({ key: 'band-companion-dismiss' })
   await ui.unmount()
   expect(JSON.parse(files.get(COMPANION)?.text ?? '{}')).toMatchObject({ state: 'dismissed' })

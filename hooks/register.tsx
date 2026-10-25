@@ -2600,7 +2600,7 @@ export const register: Register = (on, options) => {
               {PRW_LINE}
             </Text>
             <Link href={PRW_URL} label="Learn more ↗" />
-            <Button key="band-companion-dismiss" label="✕" plain dimColor onPress={() => dismissCompanion($)} />
+            <Button key="band-companion-dismiss" label="✕" hotkey="p" plain dimColor onPress={() => dismissCompanion($)} />
           </Box>
         )}
         {plan.hasActions && (
