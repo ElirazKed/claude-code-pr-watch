@@ -582,7 +582,7 @@ impl Model {
             .as_ref()?
             .latest
             .as_deref()
-            .filter(|latest| version::is_newer(latest, version::OWN))
+            .filter(|latest| version::is_update(latest, version::OWN))
     }
 
     /// A newer `prw` is said once, by a toast of its own: not over one already showing (an
