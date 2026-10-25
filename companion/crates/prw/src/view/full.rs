@@ -3,7 +3,7 @@
 //! left on them. Like the rest of the view, it lays out what the model holds and decides
 //! nothing.
 
-use prw_core::address::{GhComment, GhThread, tidy};
+use prw_core::address::{GhComment, GhThread, short_spot, tidy};
 use prw_core::full::{Change, ChangedFile, Full, Item, Review, window};
 use prw_core::gh::{CheckItem, ReviewState};
 use prw_core::opened::{Log, Opened, Tab};
@@ -105,14 +105,6 @@ fn hunk_lines(thread: &GhThread, by: usize, width: usize) -> Vec<Line<'static>> 
         .iter()
         .map(|l| code_line(l, by, width))
         .collect()
-}
-
-/// Where a thread is: `path:line`, at the line it is on now, else where it was left.
-fn spot(thread: &GhThread) -> String {
-    match thread.line.or(thread.original_line) {
-        Some(line) => format!("{}:{line}", thread.path),
-        None => thread.path.clone(),
-    }
 }
 
 // ---- The title and the tabs ----------------------------------------------------------
@@ -496,7 +488,7 @@ fn thread_lines(
     } else {
         ("●", YELLOW, "open")
     };
-    let place = clip(&spot(thread), width.saturating_sub(cells(tag) + 3));
+    let place = clip(&short_spot(thread), width.saturating_sub(cells(tag) + 3));
     let gap = width.saturating_sub(2 + cells(&place) + cells(tag));
     let style = if thread.is_resolved {
         fg(DIM)

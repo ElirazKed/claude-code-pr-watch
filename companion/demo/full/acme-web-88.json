@@ -2,6 +2,7 @@
  "data": {
   "p0": {
    "pullRequest": {
+    "id": "PR_demo88",
     "body": "The cart lived in memory only, so a refresh emptied it.\n\nThis keeps it in `sessionStorage` and reads it back on load. A cart older than a day is dropped.",
     "createdAt": "2026-10-21T11:20:00Z",
     "author": {

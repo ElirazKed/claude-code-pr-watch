@@ -48,6 +48,13 @@ pub fn comment_url(stdout: &str) -> Option<String> {
 /// is locked."
 #[must_use]
 pub fn comment_error(stderr: &str, login: &str) -> String {
+    refused(stderr, login, "comment")
+}
+
+/// What gh said when GitHub refused a write, in plain words, after "Couldn't `verb`:". A 404
+/// and a 401 say what they mean for `login`.
+#[must_use]
+pub fn refused(stderr: &str, login: &str, verb: &str) -> String {
     let line = first_line(stderr);
     let text = line.strip_prefix("gh:").map_or(line, str::trim_start);
     let who = if login.is_empty() {
@@ -56,14 +63,14 @@ pub fn comment_error(stderr: &str, login: &str) -> String {
         login
     };
     if text.contains("HTTP 404") {
-        return format!("Couldn't comment: GitHub has no such PR, or {who} can't see it");
+        return format!("Couldn't {verb}: GitHub has no such PR, or {who} can't see it");
     }
     if text.contains("HTTP 401") {
-        return format!("Couldn't comment: GitHub refused {who}'s token; gh auth login renews it");
+        return format!("Couldn't {verb}: GitHub refused {who}'s token; gh auth login renews it");
     }
     let said = strip_status(text);
     format!(
-        "Couldn't comment: {}",
+        "Couldn't {verb}: {}",
         if said.is_empty() {
             "gh api failed"
         } else {
@@ -174,6 +181,18 @@ mod tests {
             "Couldn't comment: error connecting to api.github.com"
         );
         assert_eq!(comment_error("", "me"), "Couldn't comment: gh api failed");
+    }
+
+    #[test]
+    fn any_writes_refusal_reads_as_githubs_words() {
+        assert_eq!(
+            refused(
+                "gh: Can not approve your own pull request\n",
+                "ada",
+                "approve"
+            ),
+            "Couldn't approve: Can not approve your own pull request"
+        );
     }
 
     #[test]

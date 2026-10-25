@@ -66,6 +66,8 @@ pub struct ChangedFile {
 /// The PR as [`full_query`] reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Full {
+    /// The PR's node id, which an approval names.
+    pub id: String,
     /// The description, as written.
     pub body: String,
     /// `None` for a deleted account.
@@ -88,6 +90,8 @@ pub struct Full {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Raw {
+    #[serde(deserialize_with = "lenient")]
+    id: String,
     #[serde(deserialize_with = "lenient")]
     body: String,
     #[serde(deserialize_with = "lenient")]
@@ -113,7 +117,7 @@ pub fn full_query(pr: &PrRef) -> String {
     format!(
         "query {{
   p0: repository(owner: {owner}, name: {name}) {{ pullRequest(number: {}) {{
-    body createdAt author {{ login }}
+    id body createdAt author {{ login }}
     comments(last: {COMMENTS}) {{ totalCount nodes {{ author {{ login }} body createdAt url }} }}
     reviews(last: {REVIEWS}) {{ totalCount nodes {{ author {{ login }} state body submittedAt }} }}
     reviewThreads(last: {THREADS}) {{ totalCount nodes {{
@@ -144,6 +148,7 @@ pub fn parse_full(stdout: &str, stderr: &str, pr: &PrRef) -> Result<Full, String
         .unwrap_or_default();
     let total = |count: Option<usize>, read: usize| count.unwrap_or(read).max(read);
     Ok(Full {
+        id: raw.id,
         body: raw.body,
         author: raw.author,
         created_at: raw.created_at,
@@ -257,7 +262,7 @@ mod tests {
     }
 
     const REPLY: &str = r#"{"data": {"p0": {"pullRequest": {
-        "body": "Retries uploads.", "createdAt": "2026-10-24T08:00:00Z", "author": {"login": "ada"},
+        "id": "PR_kw12", "body": "Retries uploads.", "createdAt": "2026-10-24T08:00:00Z", "author": {"login": "ada"},
         "comments": {"totalCount": 3, "nodes": [
             {"author": {"login": "preview-bot"}, "body": "Deployed", "createdAt": "2026-10-24T09:30:00Z", "url": "u1"}
         ]},
@@ -285,7 +290,10 @@ mod tests {
     #[test]
     fn a_reply_reads_whole() {
         let full = parse_full(REPLY, "", &pr()).expect("it reads");
-        assert_eq!(full.body, "Retries uploads.");
+        assert_eq!(
+            (full.id.as_str(), full.body.as_str()),
+            ("PR_kw12", "Retries uploads.")
+        );
         assert_eq!(full.author.map(|a| a.login).as_deref(), Some("ada"));
         assert_eq!((full.comments.len(), full.comment_total), (1, 3));
         assert_eq!(full.threads[0].id, "T1");

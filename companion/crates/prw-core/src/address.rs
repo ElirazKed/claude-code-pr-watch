@@ -194,6 +194,15 @@ pub fn spot(thread: &GhThread) -> String {
     }
 }
 
+/// Where a thread is, short: `path:line` at the line it is on now, else where it was left.
+#[must_use]
+pub fn short_spot(thread: &GhThread) -> String {
+    match thread.line.or(thread.original_line) {
+        Some(line) => format!("{}:{line}", thread.path),
+        None => thread.path.clone(),
+    }
+}
+
 static HTML_COMMENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").expect("a valid pattern"));
 static BLANKS: LazyLock<Regex> =

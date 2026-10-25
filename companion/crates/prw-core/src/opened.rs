@@ -102,6 +102,10 @@ pub struct ReadDone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one a read, moved once: boxing the PR buys nothing"
+)]
 pub enum Got {
     /// The PR, or why it didn't read.
     Pr(Result<Full, String>),
@@ -147,6 +151,9 @@ pub struct Opened {
     /// Whether the PR changed after the read out now was asked, so it is asked again once
     /// that one comes.
     is_stale: bool,
+    /// Threads resolved or reopened from here (by id), as GitHub said they now are: kept over
+    /// a read asked before the change, so it doesn't undo them on screen.
+    marked: BTreeMap<String, bool>,
     /// By job id.
     logs: BTreeMap<i64, Log>,
     /// Whether a read has put the selection where it starts (the first open thread).
@@ -173,6 +180,7 @@ impl Opened {
             asked_at: None,
             last_asked: now,
             is_stale: false,
+            marked: BTreeMap::new(),
             logs: BTreeMap::new(),
             is_placed: false,
         };
@@ -211,6 +219,28 @@ impl Opened {
     #[must_use]
     pub fn checks(&self) -> &[CheckItem] {
         &self.checks
+    }
+
+    /// The review thread selected, where the conversation shows and one is.
+    #[must_use]
+    pub fn thread(&self) -> Option<&GhThread> {
+        if self.tab != Tab::Conversation {
+            return None;
+        }
+        match self.items.get(self.selected(Tab::Conversation))? {
+            Item::Thread(i) => self.full.as_ref()?.threads.get(*i),
+            _ => None,
+        }
+    }
+
+    /// The thread `id` resolved (or reopened), as GitHub said it now is, before the read that
+    /// follows comes.
+    pub fn mark_resolved(&mut self, id: &str, resolved: bool) {
+        self.marked.insert(id.to_owned(), resolved);
+        let threads = self.full.iter_mut().flat_map(|f| &mut f.threads);
+        for thread in threads.filter(|t| t.id == id) {
+            thread.is_resolved = resolved;
+        }
     }
 
     /// The threads on a file, by their place in [`Full::threads`].
@@ -325,7 +355,17 @@ impl Opened {
     /// What a read came to, at `now`; the logs it calls for, each job's once.
     pub fn got(&mut self, got: Got, now: i64) -> Vec<Read> {
         match got {
-            Got::Pr(Ok(full)) => {
+            Got::Pr(Ok(mut full)) => {
+                if self.is_stale {
+                    // Asked before a change: what a resolve or reopen made of a thread holds.
+                    for thread in &mut full.threads {
+                        if let Some(&resolved) = self.marked.get(&thread.id) {
+                            thread.is_resolved = resolved;
+                        }
+                    }
+                } else {
+                    self.marked.clear();
+                }
                 // Each tab stays on the item it was on, wherever the read puts it.
                 let kept = Tab::ALL.map(|tab| self.key_of(tab));
                 self.asked_at = None;

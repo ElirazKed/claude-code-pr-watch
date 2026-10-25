@@ -6,7 +6,7 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 9 of the plan: the full PR view (reading; acting from it comes next).** `prw` shows the PRs your sessions watch, from the mod's shared
+**Status: step 9 of the plan: the full PR view, read and acted on.** `prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
@@ -60,10 +60,25 @@ markdown, by [tui-markdown](https://github.com/joshka/tui-markdown) in prw's col
 links underlined (their address left out), tables boxed to the width, code on its own ground, tasks
 ticked, `@someone` and `#123` in the accent, HTML tags left out (a `<details>` summary shows as `▸`).
 
+From it you can act on what you read, each as the gh login that sees the repo:
+
+- **`r` replies** to the review thread selected: the field on the bottom line says where it goes
+  ("reply on src/upload.ts:42"). Off a thread, `r` comments on the PR, as `c` does.
+- **`x` resolves** the thread selected, or reopens one already resolved. It asks nothing first:
+  `x` again undoes it.
+- **`a` approves** the PR, after a `y`, with no text. Your own PR, or one not read yet, says why
+  not instead. In the lists `a` still switches the login.
+- `m`, `c`, `f` and `o` act on the open PR as they do in the lists.
+
+The text of a reply goes to gh on stdin as a GraphQL variable, never in argv. A reply that didn't
+post comes back with `r` on its thread (a comment's with `c`), and what GitHub said shows on the
+status line.
+
 The PR is read in one GraphQL call when it opens and every 30 s while it shows (not while GitHub
-has said to wait), and again at once after a merge, a comment or a login switch from it; each failed
-job's log is read once. The poll never reads any of it. The action keys (`m`, `c`, `f`, `o`, `a`) act
-on the open PR. In the demo, `demo/full/` holds what three of its PRs read as.
+has said to wait), and again at once after anything done from it: a merge, a comment, a login
+switch, a reply, a resolve or an approval, refused or not, so a thread that moved on meanwhile shows
+as it is now. Each failed job's log is read once. The poll never reads any of it. In the demo,
+`demo/full/` holds what four of its PRs read as (#93 is someone else's, to approve).
 
 Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
 `prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
@@ -193,14 +208,15 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
 | `o`                  | open it in the browser                                       |
-| `a`                  | switch the gh login its owner's PRs go as (with two or more)  |
+| `a`                  | switch the gh login its owner's PRs go as (with two or more); in the full view, approve |
 | `v`                  | show the prompt last copied (`j` `k` scroll, Esc closes)     |
 | `?`                  | the key help                                                 |
 | `q`, Esc, Ctrl-C     | quit (Esc closes the help, a question or the field first)    |
 
 In the full view, `j` `k` (and `g` `G`) move through the tab's items, `1` `2` `3` pick a tab, Tab
-and Shift-Tab (or `h` `l`) the next or previous one, and Esc or Backspace go back; the action keys
-are as above.
+and Shift-Tab (or `h` `l`) the next or previous one, and Esc or Backspace go back. `r` replies to
+the thread selected (elsewhere it comments), `x` resolves or reopens it, and `a` approves after a
+`y`; the other action keys are as above.
 
 The mouse works too. A click picks a list or a PR (a second click opens it), a tab or an item of
 the full view, or presses the key it shows: a hint on the
