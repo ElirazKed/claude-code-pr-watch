@@ -1,6 +1,8 @@
 //! What the action keys do to the screen: `m` merges behind a question, `c` opens a comment
 //! field, `f` hands a PR on (copying the prompt), `o` opens it in the browser and `v` shows
-//! the last prompt copied. No I/O here: a key gives [`Cmd`]s (a [`Job`] for the binary's
+//! the last prompt copied. With the PR open full size, `r` replies to the review thread
+//! selected (elsewhere it comments), `x` resolves or reopens it and `a` approves behind a
+//! question, where in the lists `a` switches the login. No I/O here: a key gives [`Cmd`]s (a [`Job`] for the binary's
 //! worker, a copy, a browser to open), and what came of each comes back as a message.
 //!
 //! One question at a time, on the bottom line ([`Ask`]); what ran says so in a [`Toast`]. A
@@ -11,9 +13,11 @@ use std::collections::BTreeMap;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::address::short_spot;
 use crate::gh::{GhPr, PrState};
 use crate::handoff::{Kind, PrFacts, kinds_of};
 use crate::merge::{MergeError, MergeRun, done_words, label, next_method, run_for, standing};
+use crate::opened::Opened;
 use crate::resolve::resolve_prompt;
 use crate::status::{MergeMethod, mergeable_of, summarize_checks};
 use crate::ui::{Cmd, Key, Row};
@@ -45,6 +49,26 @@ pub enum Job {
         owner: String,
         login: String,
     },
+    /// A reply to a review thread; the text goes to gh on stdin, never in argv.
+    Reply {
+        url: String,
+        number: u64,
+        thread: OnThread,
+        text: String,
+    },
+    /// The thread resolved, or reopened where `resolve` is false.
+    Resolve {
+        url: String,
+        number: u64,
+        thread: OnThread,
+        resolve: bool,
+    },
+    /// An approval with no text, of the PR whose node id is `pr`.
+    Approve {
+        url: String,
+        number: u64,
+        pr: String,
+    },
     /// Read what a Fix or Address prompt needs (the checks and logs, or the threads) and write
     /// the prompt. `failing` are the card's failing checks, for when the checks won't read.
     Collect {
@@ -59,19 +83,35 @@ impl Job {
     #[must_use]
     pub fn url(&self) -> &str {
         match self {
-            Self::Merge { url, .. } | Self::Comment { url, .. } | Self::Switch { url, .. } => url,
+            Self::Merge { url, .. }
+            | Self::Comment { url, .. }
+            | Self::Switch { url, .. }
+            | Self::Reply { url, .. }
+            | Self::Resolve { url, .. }
+            | Self::Approve { url, .. } => url,
             Self::Collect { facts, .. } => &facts.url,
         }
     }
 
-    const fn slot(&self) -> Slot {
+    fn slot(&self) -> Slot {
         match self {
             Self::Merge { .. } => Slot::Merge,
             Self::Comment { .. } => Slot::Comment,
             Self::Switch { .. } => Slot::Switch,
+            Self::Reply { thread, .. } => Slot::Reply(thread.id.clone()),
+            Self::Resolve { thread, .. } => Slot::Resolve(thread.id.clone()),
+            Self::Approve { .. } => Slot::Approve,
             Self::Collect { kind, .. } => Slot::Handoff(*kind),
         }
     }
+}
+
+/// A review thread, as a reply or a resolve names it: its node id, and where it is
+/// ("src/upload.ts:42").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnThread {
+    pub id: String,
+    pub spot: String,
 }
 
 /// What came of a [`Job`].
@@ -107,6 +147,30 @@ pub enum Outcome {
         kept: String,
     },
     SwitchFailed(String),
+    /// Posted, as this login.
+    Replied {
+        thread: OnThread,
+        login: String,
+    },
+    /// Not posted (or not known to be): what the toast says.
+    ReplyFailed {
+        thread: OnThread,
+        error: String,
+    },
+    /// Resolved, or reopened where `resolve` is false.
+    Resolved {
+        thread: OnThread,
+        resolve: bool,
+    },
+    ResolveFailed {
+        thread: OnThread,
+        error: String,
+    },
+    /// Approved, as this login.
+    Approved {
+        login: String,
+    },
+    ApproveFailed(String),
     /// The prompt, and what didn't come for it ("No log for build: …").
     Prompt {
         kind: Kind,
@@ -120,22 +184,57 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    const fn slot(&self) -> Slot {
+    fn slot(&self) -> Slot {
         match self {
             Self::Merged(_) | Self::MergeFailed { .. } => Slot::Merge,
             Self::Commented { .. } | Self::CommentFailed(_) => Slot::Comment,
             Self::Switched { .. } | Self::PutBack { .. } | Self::SwitchFailed(_) => Slot::Switch,
+            Self::Replied { thread, .. } | Self::ReplyFailed { thread, .. } => {
+                Slot::Reply(thread.id.clone())
+            }
+            Self::Resolved { thread, .. } | Self::ResolveFailed { thread, .. } => {
+                Slot::Resolve(thread.id.clone())
+            }
+            Self::Approved { .. } | Self::ApproveFailed(_) => Slot::Approve,
             Self::Prompt { kind, .. } | Self::PromptFailed { kind, .. } => Slot::Handoff(*kind),
+        }
+    }
+
+    /// Whether it may have changed what the full view shows, so the PR open there is read
+    /// again: what a refused reply, resolve or approval found counts too, as the thread may
+    /// have moved on.
+    #[must_use]
+    pub const fn is_change(&self) -> bool {
+        match self {
+            Self::Merged(_)
+            | Self::Commented { .. }
+            | Self::Switched { .. }
+            | Self::Replied { .. }
+            | Self::ReplyFailed { .. }
+            | Self::Resolved { .. }
+            | Self::ResolveFailed { .. }
+            | Self::Approved { .. }
+            | Self::ApproveFailed(_) => true,
+            Self::MergeFailed { .. }
+            | Self::CommentFailed(_)
+            | Self::PutBack { .. }
+            | Self::SwitchFailed(_)
+            | Self::Prompt { .. }
+            | Self::PromptFailed { .. } => false,
         }
     }
 }
 
-/// Which of a PR's runs: they run apart, each at most once at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Which of a PR's runs: they run apart, each at most once at a time. A reply or a resolve
+/// is a thread's (by its id), so one on a thread holds up none on another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
     Merge,
     Comment,
     Switch,
+    Reply(String),
+    Resolve(String),
+    Approve,
     Handoff(Kind),
 }
 
@@ -175,6 +274,17 @@ pub enum Ask {
         text: String,
         /// Who it posts as, where `results.json` says ("" where it doesn't).
         login: String,
+        /// The review thread it replies on, where it is a reply (`r`).
+        thread: Option<OnThread>,
+    },
+    /// `y` approves it, `n` doesn't.
+    Approve {
+        url: String,
+        number: u64,
+        /// The PR's node id.
+        pr: String,
+        /// Who it approves as ("" where nothing says).
+        login: String,
     },
     /// A PR with more than one hand-off: each one's key runs it.
     Pick {
@@ -189,7 +299,10 @@ impl Ask {
     #[must_use]
     pub fn url(&self) -> &str {
         match self {
-            Self::Merge { url, .. } | Self::Comment { url, .. } | Self::Pick { url, .. } => url,
+            Self::Merge { url, .. }
+            | Self::Comment { url, .. }
+            | Self::Approve { url, .. }
+            | Self::Pick { url, .. } => url,
         }
     }
 }
@@ -239,6 +352,8 @@ pub struct Target<'a> {
     pub login: String,
     /// The login a switch moves its owner to, where gh has another.
     pub next: Option<String>,
+    /// The PR as the full view has it, while it is open there: what `r`, `x` and `a` act on.
+    pub opened: Option<&'a Opened>,
 }
 
 impl Target<'_> {
@@ -276,7 +391,8 @@ pub struct Acts {
     /// What runs now, by PR and slot: the status line's words for it.
     busy: BTreeMap<(String, Slot), String>,
     toast: Option<Toast>,
-    /// A comment that didn't post (or wasn't known to), by PR: `c` brings it back.
+    /// A comment that didn't post (or wasn't known to), by PR (a reply by its thread's id):
+    /// `c` (or `r`) brings it back.
     drafts: BTreeMap<String, String>,
     /// Methods GitHub refused for a repo: not offered again this run.
     refused: BTreeMap<String, Vec<MergeMethod>>,
@@ -416,6 +532,32 @@ impl Acts {
                 offers.push(offer("f", words, &short, Look::Handoff));
             }
         }
+        if let Some(opened) = target.opened {
+            if let Some(thread) = opened.thread() {
+                let spot = short_spot(thread);
+                offers.push(match is_busy(Slot::Reply(thread.id.clone())) {
+                    Some(words) => busy("r", words),
+                    None => offer("r", format!("Reply on {spot}"), "reply", Look::Plain),
+                });
+                offers.push(match is_busy(Slot::Resolve(thread.id.clone())) {
+                    Some(words) => busy("x", words),
+                    None if thread.is_resolved => {
+                        offer("x", format!("Reopen {spot}"), "reopen", Look::Plain)
+                    }
+                    None => offer("x", format!("Resolve {spot}"), "resolve", Look::Plain),
+                });
+            }
+            if let Some(words) = is_busy(Slot::Approve) {
+                offers.push(busy("a", words));
+            } else if approvable(target).is_ok() {
+                let words = if target.login.is_empty() {
+                    "Approve".to_owned()
+                } else {
+                    format!("Approve as {}", target.login)
+                };
+                offers.push(offer("a", words, "approve", Look::Merge));
+            }
+        }
         offers.push(match is_busy(Slot::Comment) {
             Some(words) => busy("c", words),
             None if target.login.is_empty() => {
@@ -428,11 +570,14 @@ impl Acts {
                 Look::Plain,
             ),
         });
-        if let Some(words) = is_busy(Slot::Switch) {
-            offers.push(busy("a", words));
-        } else if let Some(next) = &target.next {
-            let words = format!("As {} → switch to {next}", target.login);
-            offers.push(offer("a", words, "account", Look::Plain));
+        // In the full view `a` approves: the switch is the lists'.
+        if target.opened.is_none() {
+            if let Some(words) = is_busy(Slot::Switch) {
+                offers.push(busy("a", words));
+            } else if let Some(next) = &target.next {
+                let words = format!("As {} → switch to {next}", target.login);
+                offers.push(offer("a", words, "account", Look::Plain));
+            }
         }
         offers.push(offer(
             "o",
@@ -476,7 +621,34 @@ impl Acts {
             Key::Char('c') => self.comment(target?),
             Key::Char('f') => self.hand_off(&target?, now),
             Key::Char('o') => vec![Cmd::Open(target?.url().to_owned())],
-            Key::Char('a') => self.switch(&target?, now),
+            Key::Char('r') => {
+                let target = target?;
+                match target.opened.and_then(Opened::thread) {
+                    Some(thread) => {
+                        let on = on_thread(thread);
+                        self.ask = Some(Ask::Comment {
+                            text: self.draft(target.url(), &on.id, Slot::Reply(on.id.clone())),
+                            url: target.url().to_owned(),
+                            number: target.number(),
+                            login: target.login,
+                            thread: Some(on),
+                        });
+                        Vec::new()
+                    }
+                    // Not on a thread, or in the lists: a reply to the PR is a comment.
+                    None if target.opened.is_some() => self.comment(target),
+                    None => return None,
+                }
+            }
+            Key::Char('x') => self.resolve(&target?, now)?,
+            Key::Char('a') => {
+                let target = target?;
+                if target.opened.is_some() {
+                    self.approve(&target, now)
+                } else {
+                    self.switch(&target, now)
+                }
+            }
             Key::Char('v') => {
                 if self.copied.is_some() {
                     self.view = Some(0);
@@ -535,37 +707,25 @@ impl Acts {
                     Vec::new()
                 }
             },
-            Ask::Comment {
+            ask @ Ask::Comment { .. } => self.write(ask, key, now),
+            Ask::Approve {
                 url,
                 number,
-                mut text,
+                pr,
                 login,
-            } => {
-                match key {
-                    Key::Esc => {
-                        self.drafts.remove(&url);
-                        return Vec::new();
-                    }
-                    Key::Enter if crate::comment::is_postable(&text) => {
-                        // Kept until it posts: a refusal brings it back.
-                        self.drafts.insert(url.clone(), text.clone());
-                        return self.start(Job::Comment { url, number, text }, now);
-                    }
-                    Key::Newline => text.push('\n'),
-                    Key::Backspace => {
-                        text.pop();
-                    }
-                    Key::Char(c) => text.push(c),
-                    _ => {}
+            } => match key {
+                Key::Char('y') | Key::Enter => self.start(Job::Approve { url, number, pr }, now),
+                Key::Char('n') | Key::Esc => Vec::new(),
+                _ => {
+                    self.ask = Some(Ask::Approve {
+                        url,
+                        number,
+                        pr,
+                        login,
+                    });
+                    Vec::new()
                 }
-                self.ask = Some(Ask::Comment {
-                    url,
-                    number,
-                    text,
-                    login,
-                });
-                Vec::new()
-            }
+            },
             Ask::Pick { url, number, kinds } => {
                 if matches!(key, Key::Esc | Key::Char('n')) {
                     return Vec::new();
@@ -586,6 +746,72 @@ impl Acts {
         }
     }
 
+    /// A key in the comment (or reply) field: it types, Enter posts, Esc drops it.
+    fn write(&mut self, ask: Ask, key: Key, now: i64) -> Vec<Cmd> {
+        let Ask::Comment {
+            url,
+            number,
+            mut text,
+            login,
+            thread,
+        } = ask
+        else {
+            return Vec::new();
+        };
+        let draft = thread.as_ref().map_or(&url, |t| &t.id).clone();
+        match key {
+            Key::Esc => {
+                self.drafts.remove(&draft);
+                return Vec::new();
+            }
+            Key::Enter if crate::comment::is_postable(&text) => {
+                let slot = thread
+                    .as_ref()
+                    .map_or(Slot::Comment, |t| Slot::Reply(t.id.clone()));
+                if let Some(words) = self.busy.get(&(url.clone(), slot)) {
+                    // The field stays open: the one posting now clears the draft once it
+                    // posts, so this text would be lost with it.
+                    let words = format!("Still {}…", lower_first(words));
+                    self.say(words, Tone::Info, now);
+                    self.ask = Some(Ask::Comment {
+                        url,
+                        number,
+                        text,
+                        login,
+                        thread,
+                    });
+                    return Vec::new();
+                }
+                // Kept until it posts: a refusal brings it back.
+                self.drafts.insert(draft, text.clone());
+                let job = match thread {
+                    Some(thread) => Job::Reply {
+                        url,
+                        number,
+                        thread,
+                        text,
+                    },
+                    None => Job::Comment { url, number, text },
+                };
+                return self.start(job, now);
+            }
+            Key::Newline => text.push('\n'),
+            Key::Backspace => {
+                text.pop();
+            }
+            Key::Char(c) => text.push(c),
+            _ => {}
+        }
+        self.ask = Some(Ask::Comment {
+            url,
+            number,
+            text,
+            login,
+            thread,
+        });
+        Vec::new()
+    }
+
     /// Marks a job's slot busy and hands it to the worker; a slot already running starts
     /// nothing.
     fn start(&mut self, job: Job, now: i64) -> Vec<Cmd> {
@@ -599,6 +825,14 @@ impl Acts {
             Job::Merge { number, run, .. } => format!("{} #{number}", run.busy()),
             Job::Comment { number, .. } => format!("Posting the comment on #{number}"),
             Job::Switch { owner, login, .. } => format!("Moving {owner} to {login}"),
+            Job::Reply { thread, .. } => format!("Posting the reply on {}", thread.spot),
+            Job::Resolve {
+                thread,
+                resolve: true,
+                ..
+            } => format!("Resolving {}", thread.spot),
+            Job::Resolve { thread, .. } => format!("Reopening {}", thread.spot),
+            Job::Approve { number, .. } => format!("Approving #{number}"),
             Job::Collect {
                 kind: Kind::Fix,
                 facts,
@@ -646,14 +880,61 @@ impl Acts {
         Vec::new()
     }
 
+    /// The text a field opens with: what didn't post (by `key`), but not while it posts now
+    /// (`url`'s `slot`), so it is never sent twice.
+    fn draft(&self, url: &str, key: &str, slot: Slot) -> String {
+        if self.busy.contains_key(&(url.to_owned(), slot)) {
+            return String::new();
+        }
+        self.drafts.get(key).cloned().unwrap_or_default()
+    }
+
     fn comment(&mut self, target: Target<'_>) -> Vec<Cmd> {
         let url = target.url().to_owned();
         self.ask = Some(Ask::Comment {
-            text: self.drafts.get(&url).cloned().unwrap_or_default(),
+            text: self.draft(&url, &url, Slot::Comment),
             url,
             number: target.number(),
             login: target.login,
+            thread: None,
         });
+        Vec::new()
+    }
+
+    /// The thread selected in the full view resolved, or reopened where it is resolved;
+    /// `None` in the lists, where `x` is no key.
+    fn resolve(&mut self, target: &Target<'_>, now: i64) -> Option<Vec<Cmd>> {
+        let opened = target.opened?;
+        let Some(thread) = opened.thread() else {
+            self.say(
+                "Pick a review thread with j/k first: x resolves it",
+                Tone::Info,
+                now,
+            );
+            return Some(Vec::new());
+        };
+        let job = Job::Resolve {
+            url: target.url().to_owned(),
+            number: target.number(),
+            thread: on_thread(thread),
+            resolve: !thread.is_resolved,
+        };
+        Some(self.start(job, now))
+    }
+
+    /// The question before an approval, or why there is none to give.
+    fn approve(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
+        match approvable(target) {
+            Ok(pr) => {
+                self.ask = Some(Ask::Approve {
+                    url: target.url().to_owned(),
+                    number: target.number(),
+                    pr: pr.to_owned(),
+                    login: target.login.clone(),
+                });
+            }
+            Err(why) => self.say(why, Tone::Info, now),
+        }
         Vec::new()
     }
 
@@ -768,12 +1049,11 @@ impl Acts {
             }
             Outcome::Commented { login } => {
                 self.drafts.remove(&url);
-                let by = if login.is_empty() {
-                    String::new()
-                } else {
-                    format!(" as {login}")
-                };
-                self.say(format!("✓ Commented on #{number}{by}"), Tone::Good, now);
+                self.say(
+                    format!("✓ Commented on #{number}{}", as_login(&login)),
+                    Tone::Good,
+                    now,
+                );
             }
             Outcome::Switched { owner, login } => {
                 self.tried.remove(&owner);
@@ -784,7 +1064,38 @@ impl Acts {
                 self.tried.insert(owner, login);
                 self.say(text, Tone::Bad, now);
             }
-            Outcome::SwitchFailed(error) => {
+            Outcome::Replied { thread, login } => {
+                self.drafts.remove(&thread.id);
+                self.say(
+                    format!("✓ Replied on {}{}", thread.spot, as_login(&login)),
+                    Tone::Good,
+                    now,
+                );
+            }
+            Outcome::ReplyFailed { error, .. } => {
+                self.say(
+                    format!("✗ {error} · r brings your text back"),
+                    Tone::Bad,
+                    now,
+                );
+            }
+            Outcome::Resolved {
+                thread,
+                resolve: true,
+            } => self.say(format!("✓ Resolved {}", thread.spot), Tone::Good, now),
+            Outcome::Resolved { thread, .. } => {
+                self.say(format!("● Reopened {}", thread.spot), Tone::Good, now);
+            }
+            Outcome::Approved { login } => {
+                self.say(
+                    format!("✓ Approved #{number}{}", as_login(&login)),
+                    Tone::Good,
+                    now,
+                );
+            }
+            Outcome::SwitchFailed(error)
+            | Outcome::ResolveFailed { error, .. }
+            | Outcome::ApproveFailed(error) => {
                 self.say(format!("✗ #{number}: {error}"), Tone::Bad, now);
             }
             Outcome::CommentFailed(error) => {
@@ -890,6 +1201,50 @@ fn hard_wrap(line: &str, width: usize) -> Vec<String> {
         used += w;
     }
     out
+}
+
+/// The PR's node id, where `a` can approve it, else why not: it must be read, open, and not
+/// the login's own.
+fn approvable<'a>(target: &Target<'a>) -> Result<&'a str, String> {
+    let number = target.number();
+    let full = target
+        .opened
+        .and_then(Opened::full)
+        .filter(|f| !f.id.is_empty());
+    let Some(full) = full else {
+        return Err(format!("#{number} hasn't been read yet"));
+    };
+    match target.pr.map(|pr| &pr.state) {
+        Some(PrState::Merged) => return Err(format!("#{number} is merged")),
+        Some(PrState::Closed) => return Err(format!("#{number} is closed")),
+        _ => {}
+    }
+    let author = full.author.as_ref().map(|a| a.login.as_str());
+    // GitHub logins are case-insensitive.
+    if !target.login.is_empty() && author.is_some_and(|a| a.eq_ignore_ascii_case(&target.login)) {
+        return Err(format!(
+            "#{number} is {}'s own: GitHub doesn't let its author approve it",
+            target.login
+        ));
+    }
+    Ok(&full.id)
+}
+
+fn on_thread(thread: &crate::address::GhThread) -> OnThread {
+    OnThread {
+        id: thread.id.clone(),
+        spot: short_spot(thread),
+    }
+}
+
+/// " as hubot", or nothing where no login is known.
+#[must_use]
+pub fn as_login(login: &str) -> String {
+    if login.is_empty() {
+        String::new()
+    } else {
+        format!(" as {login}")
+    }
 }
 
 fn lower_first(text: &str) -> String {

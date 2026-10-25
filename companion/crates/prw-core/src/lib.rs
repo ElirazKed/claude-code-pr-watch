@@ -25,7 +25,8 @@
 //!   [`fix`] (failing checks and their logs), [`resolve`] (conflicts) and [`address`] (open
 //!   review threads).
 //! - One PR full size (Enter): [`full`] (the whole PR read in one call: its conversation,
-//!   checks and files) and [`opened`] (the view's tabs, selection and reads).
+//!   checks and files), [`opened`] (the view's tabs, selection and reads) and [`mutate`]
+//!   (what it changes: a reply, a thread resolved, an approval).
 //! - Watches from other agents: [`watch`] (`prw watch` and the MCP `watch` tool: one file per
 //!   watch, announced as one session file per agent's session) and [`mcp`] (`prw mcp`'s
 //!   JSON-RPC).
@@ -49,6 +50,7 @@ pub mod layout;
 mod lenient;
 pub mod mcp;
 pub mod merge;
+pub mod mutate;
 pub mod opened;
 pub mod order;
 pub mod panes;

@@ -1,10 +1,11 @@
 //! Running what the action keys asked (`prw_core::act::Job`), each on a thread of its own so a
 //! log that takes a minute holds nothing else up: a merge (`runMerge` in the mod's
-//! `hooks/register.tsx`), a comment (`postComment`), and the reads a Fix or Address prompt
-//! needs (`collectFailure`, `collectThreads`). Every call goes as the login `results.json`
+//! `hooks/register.tsx`), a comment (`postComment`), the full view's changes (a reply, a
+//! thread resolved or reopened, an approval: `prw_core::mutate`), and the reads a Fix or
+//! Address prompt needs (`collectFailure`, `collectThreads`). Every call goes as the login `results.json`
 //! maps the repo's owner to, by that login's own token, and never as another.
 //!
-//! After a merge or a comment the PR is asked again at once (the mod's `fetchNow`), so the
+//! After a merge, a comment or a change the PR is asked again at once (the mod's `fetchNow`), so the
 //! card shows what happened before the next round; with `--no-poll` nothing is written.
 //!
 //! The full view's reads (`prw_core::opened::Read`) run the same way: the PR whole, and its
@@ -17,10 +18,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use prw_core::accounts::login_for;
-use prw_core::act::{Done, Job, Outcome};
+use prw_core::act::{Done, Job, OnThread, Outcome};
 use prw_core::address::{address_prompt, open_threads, parse_threads, threads_query};
 use prw_core::batch::{PrRef, checks_query, parse_checks, ref_from_url};
-use prw_core::comment::{comment_argv, comment_error, comment_input};
+use prw_core::comment::{comment_argv, comment_input, refused};
 use prw_core::fix::{
     Failure, Handoff, LOG_MS, failing_checks, fix_prompt, log_argv, log_error, log_problems,
     to_fetch,
@@ -31,6 +32,7 @@ use prw_core::merge::{
     After, MergeError, MergeRun, RETRY_MS, after_server_error, is_server_error, merge_argv,
     merge_error, merge_read_argv, merge_read_of,
 };
+use prw_core::mutate::{MUTATE_ARGV, approve_input, reply_input, resolve_input};
 use prw_core::opened::{Got, Read, ReadDone};
 use prw_core::parse_shared;
 use prw_core::ui::{Msg, repo_of};
@@ -43,6 +45,9 @@ use crate::round::{Auth, Ctx, GH_MS};
 /// again could post it twice.
 const UNSURE: &str =
     "Couldn't tell whether it posted: gh api did not finish. Check the PR before trying again";
+
+/// What it says where a resolve's or an approval's call was cut off.
+const UNSURE_CHANGE: &str = "gh api did not finish: the PR is read again to show whether it took";
 
 /// What runs the jobs: `gh`, the clock, gh's logins and tokens (shared by every job), and the
 /// cache.
@@ -121,6 +126,31 @@ impl<G: Gh, C: Clock> Runner<G, C> {
                 login,
                 ..
             } => (number, self.switch(&url, owner, login)),
+            Job::Reply {
+                number,
+                thread,
+                text,
+                ..
+            } => (number, self.reply(&url, thread, &text)),
+            Job::Resolve {
+                number,
+                thread,
+                resolve,
+                ..
+            } => (number, self.resolve(&url, thread, resolve)),
+            Job::Approve { number, pr, .. } => {
+                let outcome = match self.change(
+                    &url,
+                    &mutate_argv(),
+                    &approve_input(&pr),
+                    "approve",
+                    UNSURE_CHANGE,
+                ) {
+                    Ok(login) => Outcome::Approved { login },
+                    Err(error) => Outcome::ApproveFailed(error),
+                };
+                (number, outcome)
+            }
             Job::Collect {
                 kind,
                 facts,
@@ -200,25 +230,66 @@ impl<G: Gh, C: Clock> Runner<G, C> {
 
     /// A comment on the PR's conversation, its text on stdin (`comment_input`).
     fn comment(&self, url: &str, number: u64, text: &str) -> Outcome {
-        let repo = repo_of(url);
-        let (login, token) = self.token_for(&repo);
-        let token = match token {
-            Ok(token) => token,
-            Err(error) => return Outcome::CommentFailed(error),
-        };
-        let ran = self.gh.run_input(
-            &comment_argv(&repo, number),
-            Some(&token),
-            Some(&comment_input(text)),
-            ms(GH_MS),
-        );
-        match ran {
+        let argv = comment_argv(&repo_of(url), number);
+        match self.change(url, &argv, &comment_input(text), "comment", UNSURE) {
+            Ok(login) => Outcome::Commented { login },
+            Err(error) => Outcome::CommentFailed(error),
+        }
+    }
+
+    fn reply(&self, url: &str, thread: OnThread, text: &str) -> Outcome {
+        match self.change(
+            url,
+            &mutate_argv(),
+            &reply_input(&thread.id, text),
+            "reply",
+            UNSURE,
+        ) {
+            Ok(login) => Outcome::Replied { thread, login },
+            Err(error) => Outcome::ReplyFailed { thread, error },
+        }
+    }
+
+    fn resolve(&self, url: &str, thread: OnThread, resolve: bool) -> Outcome {
+        let verb = if resolve { "resolve" } else { "reopen" };
+        match self.change(
+            url,
+            &mutate_argv(),
+            &resolve_input(&thread.id, resolve),
+            verb,
+            UNSURE_CHANGE,
+        ) {
+            Ok(_) => Outcome::Resolved { thread, resolve },
+            Err(error) => Outcome::ResolveFailed { thread, error },
+        }
+    }
+
+    /// A write (`argv`, its body `input` on stdin), as the repo's login: the login, or why
+    /// GitHub refused it ("Couldn't `verb`: …"), or `unsure` where the call was cut off.
+    fn change(
+        &self,
+        url: &str,
+        argv: &[String],
+        input: &str,
+        verb: &str,
+        unsure: &str,
+    ) -> Result<String, String> {
+        let (login, token) = self.token_for(&repo_of(url));
+        let token = token?;
+        match self
+            .gh
+            .run_input(argv, Some(&token), Some(input), ms(GH_MS))
+        {
             Ok(ran) if ran.is_ok() => {
                 self.refresh(url);
-                Outcome::Commented { login }
+                Ok(login)
             }
-            Ok(ran) => Outcome::CommentFailed(comment_error(&said(&ran), &login)),
-            Err(_) => Outcome::CommentFailed(UNSURE.to_owned()),
+            Ok(ran) => Err(refused(&said(&ran), &login, verb)),
+            Err(_) => {
+                // It may have taken: the card is asked again too.
+                self.refresh(url);
+                Err(unsure.to_owned())
+            }
         }
     }
 
@@ -358,6 +429,11 @@ impl<G: Gh, C: Clock> Runner<G, C> {
     }
 }
 
+/// `gh api graphql`, its body on stdin: what the full view's changes run.
+fn mutate_argv() -> [String; 4] {
+    MUTATE_ARGV.map(str::to_owned)
+}
+
 /// What gh said: its stderr, else its stdout.
 fn said(ran: &Ran) -> String {
     if ran.stderr.trim().is_empty() {
@@ -441,6 +517,32 @@ pub fn demo(job: Job) -> Done {
         Job::Switch { number, .. } => (
             number,
             Outcome::SwitchFailed("Not switched: the demo writes nothing".to_owned()),
+        ),
+        Job::Reply { number, thread, .. } => (
+            number,
+            Outcome::ReplyFailed {
+                thread,
+                error: format!("Not posted: {NOTHING}"),
+            },
+        ),
+        Job::Resolve {
+            number,
+            thread,
+            resolve,
+            ..
+        } => {
+            let done = if resolve { "resolved" } else { "reopened" };
+            (
+                number,
+                Outcome::ResolveFailed {
+                    thread,
+                    error: format!("Not {done}: {NOTHING}"),
+                },
+            )
+        }
+        Job::Approve { number, .. } => (
+            number,
+            Outcome::ApproveFailed(format!("Not approved: {NOTHING}")),
         ),
         Job::Collect {
             kind: Kind::Fix,
@@ -689,6 +791,80 @@ mod tests {
             text: "hi".to_owned(),
         });
         assert_eq!(done.outcome, Outcome::CommentFailed(UNSURE.to_owned()));
+    }
+
+    fn thread() -> OnThread {
+        OnThread {
+            id: "PRRT_1".to_owned(),
+            spot: "src/a.ts:4".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_reply_goes_on_stdin_as_the_repos_login() {
+        let dir = Dir::new("reply");
+        let gh = gh();
+        gh.on(starts(&MUTATE_ARGV), |_| ok(r#"{"data": {}}"#));
+        let runner = runner(gh, &dir);
+        let text = "-F body=x\nthanks";
+        let done = runner.run(Job::Reply {
+            url: URL.to_owned(),
+            number: 7,
+            thread: thread(),
+            text: text.to_owned(),
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::Replied {
+                thread: thread(),
+                login: "hubot".to_owned()
+            }
+        );
+        let posts = calls(&runner, "api");
+        assert_eq!(posts[0].argv, MUTATE_ARGV);
+        assert_eq!(posts[0].token.as_deref(), Some("hubot"));
+        let input: Value = serde_json::from_str(posts[0].input.as_deref().unwrap_or_default())
+            .expect("a JSON body");
+        assert_eq!(
+            input["variables"],
+            json!({"thread": "PRRT_1", "body": text})
+        );
+    }
+
+    #[test]
+    fn a_refused_change_says_githubs_words_and_a_cut_off_one_says_it_may_have_taken() {
+        let dir = Dir::new("refused-change");
+        let gh = gh();
+        gh.on(starts(&MUTATE_ARGV), |call| {
+            if call.input.as_deref().is_some_and(|i| i.contains("APPROVE")) {
+                Err(RunError::Timeout)
+            } else {
+                failed("", "gh: Resource not accessible by integration\n")
+            }
+        });
+        let runner = runner(gh, &dir);
+        let done = runner.run(Job::Resolve {
+            url: URL.to_owned(),
+            number: 7,
+            thread: thread(),
+            resolve: false,
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::ResolveFailed {
+                thread: thread(),
+                error: "Couldn't reopen: Resource not accessible by integration".into()
+            }
+        );
+        let done = runner.run(Job::Approve {
+            url: URL.to_owned(),
+            number: 7,
+            pr: "PR_7".to_owned(),
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::ApproveFailed(UNSURE_CHANGE.to_owned())
+        );
     }
 
     fn facts() -> PrFacts {

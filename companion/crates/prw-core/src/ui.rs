@@ -634,6 +634,7 @@ impl Model {
             pr: self.entry(&row.pr.url).and_then(|e| e.pr.as_ref()),
             next: logins.and_then(|l| switch_to(l, &login, acts.tried(owner))),
             login,
+            opened: self.opened.as_ref().filter(|o| o.url() == row.pr.url),
         }
     }
 
@@ -898,16 +899,19 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             Vec::new()
         }
         Msg::Done(done) => {
-            // What a merge, comment or switch did shows in the full view at once.
-            let is_change = matches!(
-                done.outcome,
-                Outcome::Merged(_) | Outcome::Commented { .. } | Outcome::Switched { .. }
-            );
+            // What an action did shows in the full view at once.
+            let is_change = done.outcome.is_change();
             let again = model
                 .opened
                 .as_mut()
                 .filter(|o| is_change && o.url() == done.url)
-                .and_then(|o| o.again(model.now));
+                .and_then(|o| {
+                    // Marked at once, so `x` again before the read comes undoes it.
+                    if let Outcome::Resolved { thread, resolve } = &done.outcome {
+                        o.mark_resolved(&thread.id, *resolve);
+                    }
+                    o.again(model.now)
+                });
             let mut cmds = model.acts.done(done, model.now);
             cmds.extend(again.map(Cmd::Read));
             cmds

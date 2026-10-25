@@ -2,9 +2,12 @@
 //! hands the worker, and what the screen says once the worker answers.
 
 use proptest::prelude::*;
-use prw_core::act::{Ask, Done, Job, Look, Outcome, Tone};
+use prw_core::act::{Ask, Done, Job, Look, OnThread, Outcome, Tone};
+use prw_core::address::{GhThread, Login};
+use prw_core::full::Full;
 use prw_core::handoff::Kind;
 use prw_core::merge::{MergeError, MergeRun};
+use prw_core::opened::{Got, Read, ReadDone};
 use prw_core::protocol::{SessionFile, Writer};
 use prw_core::status::MergeMethod::{Rebase, Squash};
 use prw_core::ui::{Cmd, Key, Model, Msg, Session, update};
@@ -450,8 +453,12 @@ proptest! {
     /// Whatever is pressed, a job only ever acts on the PR on screen, a question is about a
     /// listed PR, and no slot runs twice at once.
     #[test]
-    fn every_job_is_for_the_pr_and_no_slot_runs_twice(presses in prop::collection::vec(key(), 0..40), status in prop::sample::select(vec!["CLEAN", "DIRTY", "BLOCKED"])) {
+    fn every_job_is_for_the_pr_and_no_slot_runs_twice(presses in prop::collection::vec(key(), 0..40), status in prop::sample::select(vec!["CLEAN", "DIRTY", "BLOCKED"]), is_full in any::<bool>()) {
         let mut model = model_of(pr(json!({"mergeStateStatus": status, "viewerCanEnableAutoMerge": true})));
+        if is_full {
+            // Open full size, on its thread: r, x and a act there.
+            model = opened_from(model, full("kai", false));
+        }
         let mut running = 0;
         for key in presses {
             let (next, cmds) = update(model, Msg::Key(key));
@@ -598,5 +605,357 @@ fn with_three_logins_a_login_put_back_is_passed_over() {
             .offers()
             .iter()
             .any(|o| o.words == "As ada → switch to bob")
+    );
+}
+
+// ---- The full view: r, x and a ------------------------------------------------------
+
+/// #88 as the full view reads it: kai's PR, with one review thread on `src/cart.ts:14`.
+fn full(author: &str, is_resolved: bool) -> Full {
+    Full {
+        id: "PR_88".to_owned(),
+        author: Some(Login {
+            login: author.to_owned(),
+        }),
+        threads: vec![GhThread {
+            id: "T1".to_owned(),
+            is_resolved,
+            path: "src/cart.ts".to_owned(),
+            line: Some(14),
+            ..GhThread::default()
+        }],
+        ..Full::default()
+    }
+}
+
+/// #88 open full size and read, the selection on its thread (where a read puts it, or `j`
+/// from the description where the thread is resolved).
+fn opened(full: Full) -> Model {
+    opened_from(model_of(pr(json!({}))), full)
+}
+
+fn opened_from(model: Model, full: Full) -> Model {
+    let (model, _) = feed(model, [Msg::Key(Key::Enter)]);
+    let got = Msg::Read(ReadDone {
+        url: URL.to_owned(),
+        got: Got::Pr(Ok(full)),
+    });
+    let (model, _) = feed(model, [got]);
+    let on_thread = model.opened().and_then(|o| o.thread()).is_some();
+    if on_thread {
+        model
+    } else {
+        feed(model, keys("j")).0
+    }
+}
+
+fn on_thread() -> OnThread {
+    OnThread {
+        id: "T1".to_owned(),
+        spot: "src/cart.ts:14".to_owned(),
+    }
+}
+
+fn read_again() -> Cmd {
+    Cmd::Read(Read::Pr {
+        url: URL.to_owned(),
+        repo: "acme/web".to_owned(),
+        number: 88,
+    })
+}
+
+fn done(outcome: Outcome) -> Msg {
+    Msg::Done(Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome,
+    })
+}
+
+#[test]
+fn r_replies_on_the_thread_and_a_refused_reply_comes_back_and_reads_the_pr_again() {
+    let (model, _) = feed(opened(full("kai", false)), keys("r"));
+    assert_eq!(
+        model.acts().ask(),
+        Some(&Ask::Comment {
+            url: URL.to_owned(),
+            number: 88,
+            text: String::new(),
+            login: "ada".to_owned(),
+            thread: Some(on_thread()),
+        })
+    );
+    let (model, cmds) = feed(
+        model,
+        keys("on it").into_iter().chain([Msg::Key(Key::Enter)]),
+    );
+    let reply = Job::Reply {
+        url: URL.to_owned(),
+        number: 88,
+        thread: on_thread(),
+        text: "on it".to_owned(),
+    };
+    assert_eq!(cmds, [Cmd::Run(reply)]);
+    assert_eq!(
+        model.acts().busy().collect::<Vec<_>>(),
+        ["Posting the reply on src/cart.ts:14"]
+    );
+    let (model, cmds) = feed(
+        model,
+        [done(Outcome::ReplyFailed {
+            thread: on_thread(),
+            error: "Couldn't reply: locked".into(),
+        })],
+    );
+    assert_eq!(cmds, [read_again()]);
+    assert_eq!(
+        toast(&model),
+        (
+            "✗ Couldn't reply: locked · r brings your text back",
+            Tone::Bad
+        )
+    );
+    // The text comes back on its thread, not in the PR's comment field.
+    let (model, _) = feed(model, keys("r"));
+    assert!(matches!(model.acts().ask(), Some(Ask::Comment { text, .. }) if text == "on it"));
+    let (model, _) = feed(model, [Msg::Key(Key::Esc), Msg::Key(Key::Char('c'))]);
+    assert!(
+        matches!(model.acts().ask(), Some(Ask::Comment { text, thread: None, .. }) if text.is_empty())
+    );
+    let (model, _) = feed(model, [Msg::Key(Key::Esc)]);
+    let replied = Outcome::Replied {
+        thread: on_thread(),
+        login: "ada".to_owned(),
+    };
+    let (model, _) = feed(model, [done(replied)]);
+    assert_eq!(
+        toast(&model),
+        ("✓ Replied on src/cart.ts:14 as ada", Tone::Good)
+    );
+}
+
+#[test]
+fn r_off_a_thread_comments_on_the_pr_and_in_the_lists_is_no_key() {
+    let (model, _) = feed(opened(full("kai", false)), keys("kr"));
+    assert!(matches!(
+        model.acts().ask(),
+        Some(Ask::Comment { thread: None, .. })
+    ));
+    let (model, cmds) = feed(model_of(pr(json!({}))), keys("r"));
+    assert_eq!((model.acts().ask(), cmds), (None, Vec::new()));
+}
+
+#[test]
+fn x_resolves_the_thread_or_reopens_a_resolved_one() {
+    let resolve = |is_resolved| {
+        let (_, cmds) = feed(opened(full("kai", is_resolved)), keys("x"));
+        cmds
+    };
+    let job = |resolve| {
+        Cmd::Run(Job::Resolve {
+            url: URL.to_owned(),
+            number: 88,
+            thread: on_thread(),
+            resolve,
+        })
+    };
+    assert_eq!(resolve(false), [job(true)]);
+    assert_eq!(resolve(true), [job(false)]);
+    let (model, cmds) = feed(opened(full("kai", false)), keys("kx"));
+    assert_eq!(cmds, []);
+    assert_eq!(
+        toast(&model),
+        (
+            "Pick a review thread with j/k first: x resolves it",
+            Tone::Info
+        )
+    );
+    let reopened = Outcome::Resolved {
+        thread: on_thread(),
+        resolve: false,
+    };
+    let (model, cmds) = feed(opened(full("kai", true)), [done(reopened)]);
+    assert_eq!(cmds, [read_again()]);
+    assert_eq!(toast(&model), ("● Reopened src/cart.ts:14", Tone::Good));
+}
+
+#[test]
+fn a_in_the_full_view_approves_after_a_y_and_in_the_lists_still_switches() {
+    let (model, cmds) = feed(opened(full("kai", false)), keys("a"));
+    assert_eq!(cmds, []);
+    assert_eq!(
+        model.acts().ask(),
+        Some(&Ask::Approve {
+            url: URL.to_owned(),
+            number: 88,
+            pr: "PR_88".to_owned(),
+            login: "ada".to_owned(),
+        })
+    );
+    let (model, cmds) = feed(model, keys("y"));
+    let approve = Job::Approve {
+        url: URL.to_owned(),
+        number: 88,
+        pr: "PR_88".to_owned(),
+    };
+    assert_eq!(cmds, [Cmd::Run(approve)]);
+    let approved = Outcome::Approved {
+        login: "ada".to_owned(),
+    };
+    let (model, cmds) = feed(model, [done(approved)]);
+    assert_eq!(cmds, [read_again()]);
+    assert_eq!(toast(&model), ("✓ Approved #88 as ada", Tone::Good));
+    // n answers no.
+    let (model, cmds) = feed(opened(full("kai", false)), keys("an"));
+    assert_eq!((model.acts().ask(), cmds), (None, Vec::new()));
+    // In the lists, a is the switch, as before.
+    let (model, _) = feed(model_of(pr(json!({}))), keys("a"));
+    assert_eq!(model.acts().ask(), None);
+    assert_eq!(toast(&model).0, "One gh login: nothing to switch to");
+}
+
+#[test]
+fn a_on_your_own_pr_or_one_not_read_yet_says_why_and_asks_nothing() {
+    let (model, _) = feed(opened(full("ada", false)), keys("a"));
+    assert_eq!(model.acts().ask(), None);
+    assert_eq!(
+        toast(&model),
+        (
+            "#88 is ada's own: GitHub doesn't let its author approve it",
+            Tone::Info
+        )
+    );
+    let (model, _) = feed(
+        model_of(pr(json!({}))),
+        [Msg::Key(Key::Enter), Msg::Key(Key::Char('a'))],
+    );
+    assert_eq!(toast(&model).0, "#88 hasn't been read yet");
+}
+
+#[test]
+fn the_full_views_actions_list_offers_the_thread_and_approval_not_the_switch() {
+    let model = with_logins(opened(full("kai", false)), "ada", &["hubot"]);
+    let said: Vec<(&str, String)> = model
+        .offers()
+        .into_iter()
+        .map(|o| (o.key, o.words))
+        .collect();
+    let keys: Vec<&str> = said.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, ["m", "r", "x", "a", "c", "o"]);
+    assert_eq!(said[1].1, "Reply on src/cart.ts:14");
+    assert_eq!(said[2].1, "Resolve src/cart.ts:14");
+    assert_eq!(said[3].1, "Approve as ada");
+    // Back in the lists the switch is offered again.
+    let (model, _) = feed(model, [Msg::Key(Key::Esc)]);
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.key == "a" && o.words.contains("switch"))
+    );
+}
+
+#[test]
+fn a_resolve_on_one_thread_holds_up_none_on_another_and_x_again_undoes_it() {
+    let mut two = full("kai", false);
+    let mut second = two.threads[0].clone();
+    second.id = "T2".to_owned();
+    second.line = Some(30);
+    two.threads.push(second);
+    // On T1, x; then on T2, x: both run.
+    let (model, cmds) = feed(opened(two), keys("xjx"));
+    let threads: Vec<String> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::Run(Job::Resolve { thread, .. }) => Some(thread.id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(threads, ["T1", "T2"]);
+    assert_eq!(model.acts().busy().count(), 2);
+    // T1 resolved: before the read comes, x on it again reopens it.
+    let resolved = Outcome::Resolved {
+        thread: on_thread(),
+        resolve: true,
+    };
+    let (model, _) = feed(model, [done(resolved)].into_iter().chain(keys("k")));
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "Reopen src/cart.ts:14")
+    );
+    let (_, cmds) = feed(model, keys("x"));
+    assert!(cmds.contains(&Cmd::Run(Job::Resolve {
+        url: URL.to_owned(),
+        number: 88,
+        thread: on_thread(),
+        resolve: false,
+    })));
+}
+
+#[test]
+fn a_read_asked_before_a_resolve_does_not_undo_it_on_screen() {
+    let read = |is_resolved| {
+        Msg::Read(ReadDone {
+            url: URL.to_owned(),
+            got: Got::Pr(Ok(full("kai", is_resolved))),
+        })
+    };
+    let commented = Outcome::Commented {
+        login: "ada".to_owned(),
+    };
+    let resolved = Outcome::Resolved {
+        thread: on_thread(),
+        resolve: true,
+    };
+    // A comment asks a read; the resolve comes while it is out.
+    let (model, cmds) = feed(
+        opened(full("kai", false)),
+        [done(commented), done(resolved)],
+    );
+    assert_eq!(cmds, [read_again()]);
+    // That read, asked before the resolve, still says open: the thread stays resolved, and
+    // the read after it is asked.
+    let (model, cmds) = feed(model, [read(false)]);
+    assert_eq!(cmds, [read_again()]);
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "Reopen src/cart.ts:14")
+    );
+    // The read asked after it says what GitHub has.
+    let (model, _) = feed(model, [read(false)]);
+    assert!(
+        model
+            .offers()
+            .iter()
+            .any(|o| o.words == "Resolve src/cart.ts:14")
+    );
+}
+
+#[test]
+fn a_reply_sent_while_one_on_its_thread_posts_stays_in_the_field() {
+    let (model, _) = feed(
+        opened(full("kai", false)),
+        keys("r")
+            .into_iter()
+            .chain(keys("one"))
+            .chain([Msg::Key(Key::Enter)]),
+    );
+    let (model, cmds) = feed(
+        model,
+        keys("r")
+            .into_iter()
+            .chain(keys("two"))
+            .chain([Msg::Key(Key::Enter)]),
+    );
+    assert_eq!(cmds, []);
+    // The field opened empty, not with the reply on its way, so nothing goes twice.
+    assert!(matches!(model.acts().ask(), Some(Ask::Comment { text, .. }) if text == "two"));
+    assert_eq!(
+        toast(&model).0,
+        "Still posting the reply on src/cart.ts:14…"
     );
 }

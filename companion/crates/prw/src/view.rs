@@ -4,7 +4,7 @@
 
 mod full;
 
-use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, prompt_body};
+use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, as_login, prompt_body};
 use prw_core::gh::{GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
@@ -17,7 +17,7 @@ use prw_core::status::{
 };
 use prw_core::time::parse_iso;
 use prw_core::ui::{
-    Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, agents_live, ago,
+    Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, agents_live, ago, repo_of,
 };
 use prw_core::version::OWN;
 use ratatui::Frame;
@@ -716,22 +716,29 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
         "list"
     };
     let char = |c| Key::Char(c);
+    // On a resolved thread `x` reopens it.
+    let x = match model.opened().and_then(|o| o.thread()) {
+        Some(thread) if thread.is_resolved => "reopen",
+        _ => "resolve",
+    };
     let keys = if model.opened().is_some() {
-        [
+        vec![
             ("esc", "back", Key::Esc),
             ("1-3", "tab", Key::Tab),
             ("j/k", "move", char('j')),
+            ("r", "reply", char('r')),
+            ("x", x, char('x')),
+            ("a", "approve", char('a')),
             ("m", "merge", char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
-            ("a", "account", char('a')),
             ("g/G", "top/end", char('g')),
         ]
     } else {
-        [
+        vec![
             ("j/k", "move", char('j')),
             ("⏎", "open", Key::Enter),
             ("tab", "list", Key::Tab),
@@ -808,16 +815,30 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
     } else {
         "q  esc"
     };
-    let keys = moves.iter().copied().chain([
-        ("m", "merge, after a y (m again: method)"),
-        ("c", "comment: ⏎ posts, alt-⏎ a new line"),
-        ("f", "fix, resolve or address: copy the prompt"),
-        ("o", "open in the browser"),
-        ("a", "switch the gh login its owner goes as"),
-        ("v", "show the prompt last copied"),
-        ("?", "this help"),
-        (quit, "quit"),
-    ]);
+    let acts: &[(&str, &str)] = if model.opened().is_some() {
+        &[
+            ("r", "reply to the thread (elsewhere: comment)"),
+            ("x", "resolve or reopen the thread"),
+            ("a", "approve, after a y"),
+        ]
+    } else {
+        &[("a", "switch the gh login its owner goes as")]
+    };
+    let keys = moves
+        .iter()
+        .copied()
+        .chain([
+            ("m", "merge, after a y (m again: method)"),
+            ("c", "comment: ⏎ posts, alt-⏎ a new line"),
+            ("f", "fix, resolve or address: copy the prompt"),
+            ("o", "open in the browser"),
+        ])
+        .chain(acts.iter().copied())
+        .chain([
+            ("v", "show the prompt last copied"),
+            ("?", "this help"),
+            (quit, "quit"),
+        ]);
     let width = 56.min(area.width.saturating_sub(2));
     let iw = usize_of(width).saturating_sub(4);
     let mut lines = vec![Line::raw("")];
@@ -1917,9 +1938,14 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
             number,
             text,
             login,
+            thread,
             ..
         } => {
-            let lead = format!(" comment on #{number} › ");
+            let lead = match thread {
+                // A long path is clipped, so the text typed keeps room on the line.
+                Some(thread) => format!(" reply on {} › ", clip(&thread.spot, width / 3)),
+                None => format!(" comment on #{number} › "),
+            };
             // "  ⏎ post · alt-⏎ new line · esc cancel", where there is room: the post and the
             // cancel take clicks.
             let parts = ["  ", "⏎ post", " · alt-⏎ new line · ", "esc cancel"];
@@ -1948,6 +1974,18 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
                 line.hit([span(post, fg(DIM))], Hit::Key(Key::Enter));
                 line.push(span(alt, fg(DIM)));
                 line.hit([span(cancel, fg(DIM))], Hit::Key(Key::Esc));
+            }
+        }
+        Ask::Approve {
+            url, number, login, ..
+        } => {
+            let answers = [('y', "yes"), ('n', "no")];
+            let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
+            let question = format!("Approve {} #{number}{}?", repo_of(url), as_login(login));
+            line.push(Span::raw(" "));
+            line.push(span(clip(&question, width.saturating_sub(tail)), bold(FG)));
+            for (k, w) in answers {
+                line.hit([key(&k.to_string()), what(w)], Hit::Key(Key::Char(k)));
             }
         }
         Ask::Pick { number, kinds, .. } => {

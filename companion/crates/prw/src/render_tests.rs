@@ -690,6 +690,7 @@ fn read_of(url: &str) -> Msg {
     let reply = match pr.number {
         59 => include_str!("../../../demo/full/acme-billing-59.json"),
         88 => include_str!("../../../demo/full/acme-web-88.json"),
+        93 => include_str!("../../../demo/full/acme-web-93.json"),
         _ => include_str!("../../../demo/full/acme-app-412.json"),
     };
     Msg::Read(ReadDone {
@@ -864,4 +865,53 @@ fn what_people_write_shows_as_markdown() {
     for raw in ["## ", "](", "(https://docs", "```", "<details>", "- [x]"] {
         assert!(!text.contains(raw), "{raw:?} in\n{text}");
     }
+}
+
+/// The demo's row for PR `number` in All.
+fn row_of_pr(number: u64) -> usize {
+    let model = demo(120, 36);
+    (0..model.list().rows.len())
+        .find(|&n| model.list().rows[n].pr.number == number)
+        .expect("the demo lists it")
+}
+
+#[test]
+fn in_the_full_view_r_replies_on_the_thread_and_a_approves_another_s_pr() {
+    // #59: the selection on its open thread.
+    let model = opened(120, 36, 2);
+    let text = screen(&model, 120, 36);
+    assert_says(
+        &text,
+        &[
+            "r reply",
+            "x resolve",
+            "a approve",
+            "[r] Reply on pdf/layout.ts:41",
+        ],
+    );
+    // On the resolved thread above, x reopens it.
+    let text = screen(&feed(model.clone(), [Msg::Key(Key::Char('k'))]), 120, 36);
+    assert_says(&text, &["x reopen", "[x] Reopen pdf/fonts.ts:12"]);
+    let typed = "480 it is".chars().map(|c| Msg::Key(Key::Char(c)));
+    let model = feed(
+        model,
+        std::iter::once(Msg::Key(Key::Char('r'))).chain(typed),
+    );
+    assert_says(
+        &screen(&model, 120, 36),
+        &["reply on pdf/layout.ts:41 › 480 it is", "⏎ post"],
+    );
+    // #59 is octocat's own: no approval to give, and none offered.
+    let model = feed(model, [Msg::Key(Key::Esc), Msg::Key(Key::Char('a'))]);
+    let text = screen(&model, 120, 36);
+    assert_says(&text, &["#59 is octocat's own"]);
+    assert!(!text.contains("[a] Approve"), "{text}");
+    // #93 is alice's: a asks first.
+    let model = opened(120, 36, row_of_pr(93));
+    assert_says(&screen(&model, 120, 36), &["[a] Approve as octocat"]);
+    let model = feed(model, [Msg::Key(Key::Char('a'))]);
+    assert_says(
+        &screen(&model, 120, 36),
+        &["Approve acme/web #93 as octocat?", "y yes", "n no"],
+    );
 }
