@@ -61,7 +61,7 @@ const TICK: Duration = Duration::from_millis(view::TICK_MS as u64);
 const SLICE: Duration = Duration::from_millis(100);
 
 const HELP: &str = "\
-prw: every PR your agents touch, in one terminal
+prw: all your PRs in one terminal, a PR manager
 
 Usage: prw [OPTIONS]
        prw watch [<PR URL>...] [--agent <NAME>] [--session <NAME>]
