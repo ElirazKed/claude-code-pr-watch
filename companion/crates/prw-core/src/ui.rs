@@ -18,9 +18,12 @@ use crate::accounts::{Logins, login_for, switch_to};
 use crate::act::{Acts, Done, Job, Offer, Outcome, Target, Tone};
 use crate::layout::{Layout, layout};
 use crate::opened::{Opened, Read, ReadDone, Tab};
-use crate::order::{Tracked, order};
+use crate::order::{Tracked, order, rank};
 use crate::protocol::{Entry, SessionFile, Shared, Writer};
+use crate::repos::short_names;
+use crate::sort::{Sort, sorted};
 use crate::status::{PillKind, derive};
+use crate::time::parse_iso;
 use crate::version;
 
 /// A session file is live while its mtime is less than this old (the mod's `ALIVE_MS`).
@@ -73,6 +76,29 @@ pub fn ago(ms: i64) -> String {
         format!("{}h ago", s / 3600)
     } else {
         format!("{}d ago", s / 86_400)
+    }
+}
+
+/// How long ago, as a date column says it in 4 cells at most: `now`, `45m`, `5h`, `3d` (up
+/// to 13 days), `6w` (up to 8), `4mo`, `2y`.
+#[must_use]
+pub fn age(ms: i64) -> String {
+    let minutes = ms.max(0) / 60_000;
+    let days = minutes / 1440;
+    if minutes < 1 {
+        "now".to_owned()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if days < 1 {
+        format!("{}h", minutes / 60)
+    } else if days < 14 {
+        format!("{days}d")
+    } else if days < 60 {
+        format!("{}w", days / 7)
+    } else if days < 365 {
+        format!("{}mo", days / 30)
+    } else {
+        format!("{}y", days / 365)
     }
 }
 
@@ -273,12 +299,18 @@ pub struct Row {
     pub pr: Tracked,
     /// `owner/repo`, from the URL.
     pub repo: String,
+    /// How the row names it: the name alone, unless another listed repo shares it
+    /// (`repos::short_names`).
+    pub repo_name: String,
     /// The agent of the first live session that watches it, if any does.
     pub agent: Option<String>,
     /// The live sessions that watch it, by label.
     pub watchers: Vec<String>,
     /// When its data was fetched (ms), where it has any.
     pub checked_at: Option<i64>,
+    /// When it was opened, and when anything last changed on it (ms), where known.
+    pub opened_at: Option<i64>,
+    pub updated_at: Option<i64>,
 }
 
 /// A list of PRs, as the lists pane or strip names it.
@@ -292,15 +324,18 @@ pub struct List {
     pub cwd: Option<String>,
     /// The saved search it lists (search lists only).
     pub search: Option<Listed>,
-    /// Most urgent first.
+    /// Most urgent first, or in the order the model's `Sort` asks.
     pub rows: Vec<Row>,
 }
 
 impl List {
-    /// The most urgent row's pill, for the list's mark: the first row, as rows are ordered.
+    /// The most urgent row's pill, for the list's mark (whatever order the rows are shown in).
     #[must_use]
     pub fn worst(&self) -> Option<PillKind> {
-        self.rows.first().map(|row| row.pr.derived.pill)
+        self.rows
+            .iter()
+            .min_by_key(|row| rank(&row.pr))
+            .map(|row| row.pr.derived.pill)
     }
 }
 
@@ -385,6 +420,11 @@ pub struct Model {
     told_newer: Option<String>,
     /// The PR open full size, while one is.
     opened: Option<Opened>,
+    /// The order every list's rows are shown in (`s`, `S`).
+    sort: Sort,
+    /// Each PR's opened and updated times as last known, by URL: an older mod's round writes
+    /// a PR without them, and the row keeps them rather than lose them until the next round.
+    dates: HashMap<String, (Option<i64>, Option<i64>)>,
 }
 
 impl Model {
@@ -411,9 +451,17 @@ impl Model {
             is_settled: false,
             told_newer: None,
             opened: None,
+            sort: Sort::default(),
+            dates: HashMap::new(),
         };
         model.rebuild();
         model
+    }
+
+    /// The order the lists' rows are shown in.
+    #[must_use]
+    pub const fn sort(&self) -> Sort {
+        self.sort
     }
 
     /// The last good `results.json`, if any read.
@@ -669,6 +717,13 @@ impl Model {
             own,
             searches,
         );
+        let (sort, dates) = (self.sort, &mut self.dates);
+        for list in &mut self.lists {
+            for row in &mut list.rows {
+                remember_dates(dates, row);
+            }
+            list.rows = sorted(std::mem::take(&mut list.rows), sort);
+        }
         let now = self.now;
         if let Some(pills_were) = pills_were {
             let pills_are = pills(&self.lists);
@@ -693,6 +748,12 @@ impl Model {
                 Some(rows[was.unwrap_or(0).min(rows.len() - 1)].pr.url.clone())
             };
         }
+    }
+
+    /// Shows every list in `sort`'s order; the selected PR stays selected.
+    fn sort_by(&mut self, sort: Sort) {
+        self.sort = sort;
+        self.rebuild();
     }
 
     /// Selects list `index` (clamped) and its first PR; the list already selected keeps its PR.
@@ -847,6 +908,8 @@ impl Model {
             Key::Char('l') | Key::Right if is_three => self.focus = Focus::Prs,
             Key::Tab | Key::Char('l') | Key::Right => self.cycle(1),
             Key::BackTab | Key::Char('h') | Key::Left => self.cycle(-1),
+            Key::Char('s') => self.sort_by(self.sort.next()),
+            Key::Char('S') => self.sort_by(self.sort.flipped()),
             Key::Enter => return self.open(),
             Key::Newline | Key::Backspace | Key::Char(_) => {}
         }
@@ -1070,12 +1133,16 @@ pub fn lists_of(
     let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
     let watchers = watchers_of(&live);
+    let (all_urls, every_url) = urls_of(&live, prs, searches);
     let row = |url: &str| {
         let entry = prs.and_then(|prs| prs.get(url));
+        let pr = entry.and_then(|e| e.pr.as_ref());
+        let at = |stamp: Option<&String>| stamp.and_then(|s| parse_iso(s));
         let by = watchers.get(url).map(Vec::as_slice).unwrap_or_default();
         Row {
             pr: tracked_of(url, entry),
             repo: repo_of(url),
+            repo_name: String::new(),
             agent: by.iter().find_map(|s| s.agent()).map(str::to_owned),
             watchers: by
                 .iter()
@@ -1087,25 +1154,13 @@ pub fn lists_of(
                 })
                 .collect(),
             checked_at: entry.filter(|e| e.pr.is_some()).map(|e| e.at),
+            opened_at: at(pr.and_then(|pr| pr.created_at.as_ref())),
+            updated_at: at(pr.and_then(|pr| pr.updated_at.as_ref())),
         }
     };
-    let all_urls: Vec<&str> = if live.is_empty() {
-        prs.map(|prs| prs.keys().map(String::as_str).collect())
-            .unwrap_or_default()
-    } else {
-        unique(live.iter().flat_map(|s| &s.file.urls))
-    };
     // Each card derived once.
-    let by_url: HashMap<&str, Row> = all_urls
-        .iter()
-        .copied()
-        .chain(
-            searches
-                .iter()
-                .flat_map(|s| s.urls.iter().map(String::as_str)),
-        )
-        .map(|url| (url, row(url)))
-        .collect();
+    let mut by_url: HashMap<&str, Row> = every_url.iter().map(|&url| (url, row(url))).collect();
+    name_repos(by_url.values_mut());
     let rows_of = |urls: Vec<&str>| -> Vec<Row> {
         in_order(urls.into_iter().map(|url| by_url[url].clone()).collect())
     };
@@ -1153,6 +1208,45 @@ pub fn lists_of(
     }
 
     lists
+}
+
+/// The URLs All lists (every live session's, or with none live every PR in `results.json`),
+/// and those with the saved searches' after them.
+fn urls_of<'a>(
+    live: &[&'a Session],
+    prs: Option<&'a BTreeMap<String, Entry>>,
+    searches: &'a [Listed],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let all: Vec<&str> = if live.is_empty() {
+        prs.map(|prs| prs.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    } else {
+        unique(live.iter().flat_map(|s| &s.file.urls))
+    };
+    let found = searches
+        .iter()
+        .flat_map(|s| s.urls.iter().map(String::as_str));
+    let every = all.iter().copied().chain(found).collect();
+    (all, every)
+}
+
+/// Gives each row its repo's name, one name for a repo in every list: the owner too
+/// wherever any list has a namesake.
+fn name_repos<'a>(rows: impl Iterator<Item = &'a mut Row>) {
+    let mut rows: Vec<&mut Row> = rows.collect();
+    let repos: Vec<String> = rows.iter().map(|r| r.repo.clone()).collect();
+    let names = short_names(repos.iter().map(String::as_str));
+    for row in &mut rows {
+        row.repo_name.clone_from(&names[row.repo.as_str()]);
+    }
+}
+
+/// Fills in a row's times from what was known of its PR, and keeps what it has: the opened
+/// time as first known (it never changes), the updated time as the latest known.
+fn remember_dates(dates: &mut HashMap<String, (Option<i64>, Option<i64>)>, row: &mut Row) {
+    let known = dates.entry(row.pr.url.clone()).or_default();
+    *known = (row.opened_at.or(known.0), row.updated_at.max(known.1));
+    (row.opened_at, row.updated_at) = *known;
 }
 
 /// Who watches each URL, in list order.
@@ -1877,5 +1971,138 @@ mod tests {
         let model = read(model, [Msg::Tick(60_000)]);
         assert_eq!(model.list_id(), &ListId::All);
         assert_eq!(model.selected(), None);
+    }
+
+    fn dated(number: u64, opened: &str, updated: &str) -> Entry {
+        let mut entry = open(number);
+        if let Some(pr) = &mut entry.pr {
+            pr.created_at = Some(opened.to_owned());
+            pr.updated_at = Some(updated.to_owned());
+        }
+        entry
+    }
+
+    fn shared_of(prs: Vec<(&str, Entry)>) -> Shared {
+        Shared {
+            fetched_at: 1,
+            next_at: 1,
+            prs: prs.into_iter().map(|(u, e)| (u.to_owned(), e)).collect(),
+            ..Shared::default()
+        }
+    }
+
+    fn numbers(model: &Model) -> Vec<u64> {
+        model.list().rows.iter().map(|r| r.pr.number).collect()
+    }
+
+    #[test]
+    fn s_orders_every_list_and_the_selected_pr_stays_selected() {
+        let merged = Entry {
+            pr: Some(GhPr {
+                state: PrState::Merged,
+                ..open(3).pr.expect("a PR")
+            }),
+            ..open(3)
+        };
+        let shared = shared_of(vec![
+            (A, dated(1, "2026-10-01T00:00:00Z", "2026-10-20T00:00:00Z")),
+            (B, dated(2, "2026-09-01T00:00:00Z", "2026-10-21T00:00:00Z")),
+            (C, merged),
+        ]);
+        let model = read(
+            Model::new(120, 30),
+            [Msg::SharedRead(Ok(shared), 0), Msg::Key(Key::Char('j'))],
+        );
+        assert_eq!(numbers(&model), [1, 2, 3]);
+        let worst = model.list().worst();
+        let selected = |m: &Model| m.current_row().map(|r| r.pr.number);
+        assert_eq!(selected(&model), Some(2));
+        let s = |m: Model, key: char| read(m, [Msg::Key(Key::Char(key))]);
+        // Least urgent first: the list's mark still shows its most urgent PR.
+        let model = s(model, 'S');
+        assert_eq!(numbers(&model), [3, 2, 1]);
+        assert_eq!(model.list().worst(), worst);
+        // By repo (app, then web), oldest first, quietest first, the latest activity first;
+        // a PR with no times goes last.
+        let model = s(model, 's');
+        assert_eq!(model.sort().words(), Some("by repo"));
+        assert_eq!(numbers(&model), [1, 2, 3]);
+        let model = s(model, 's');
+        assert_eq!(numbers(&model), [2, 1, 3]);
+        let model = s(model, 's');
+        assert_eq!(numbers(&model), [1, 2, 3]);
+        let model = s(model, 'S');
+        assert_eq!(model.sort().words(), Some("latest activity first"));
+        assert_eq!(numbers(&model), [2, 1, 3]);
+        assert_eq!(selected(&model), Some(2));
+        // And round to the usual order.
+        let model = s(model, 's');
+        assert_eq!(model.sort(), Sort::default());
+    }
+
+    #[test]
+    fn a_round_that_wrote_no_times_keeps_the_ones_known() {
+        let at = |text: &str| parse_iso(text);
+        let model = read(
+            Model::new(120, 30),
+            [Msg::SharedRead(
+                Ok(shared_of(vec![(
+                    A,
+                    dated(1, "2026-10-01T00:00:00Z", "2026-10-20T00:00:00Z"),
+                )])),
+                0,
+            )],
+        );
+        // An older mod's round: no times at all. Then a newer one, updated since.
+        let model = read(
+            model,
+            [Msg::SharedRead(Ok(shared_of(vec![(A, open(1))])), 1_000)],
+        );
+        let row = model.current_row().expect("a row");
+        assert_eq!(row.opened_at, at("2026-10-01T00:00:00Z"));
+        assert_eq!(row.updated_at, at("2026-10-20T00:00:00Z"));
+        let model = read(
+            model,
+            [Msg::SharedRead(
+                Ok(shared_of(vec![(
+                    A,
+                    dated(1, "2026-10-01T00:00:00Z", "2026-10-22T00:00:00Z"),
+                )])),
+                2_000,
+            )],
+        );
+        let row = model.current_row().expect("a row");
+        assert_eq!(row.updated_at, at("2026-10-22T00:00:00Z"));
+    }
+
+    #[test]
+    fn an_age_fits_four_cells_and_rounds_down() {
+        let (minute, hour, day) = (60_000, 3_600_000, 86_400_000);
+        let said: Vec<String> = [
+            -5,
+            59_999,
+            minute,
+            59 * minute,
+            hour,
+            day - 1,
+            day,
+            13 * day,
+            14 * day,
+            59 * day,
+            60 * day,
+            364 * day,
+            365 * day,
+            9_000 * day,
+        ]
+        .into_iter()
+        .map(age)
+        .collect();
+        assert_eq!(
+            said,
+            [
+                "now", "now", "1m", "59m", "1h", "23h", "1d", "13d", "2w", "8w", "2mo", "12mo",
+                "1y", "24y"
+            ]
+        );
     }
 }

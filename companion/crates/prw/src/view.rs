@@ -10,14 +10,16 @@ use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
 use prw_core::opened::Tab;
 use prw_core::panes::{Pane, full_panes, panes};
+use prw_core::repos::hue_of;
 use prw_core::review::{Verdict, reviews_of, threads_beside, verdict_line};
+use prw_core::sort::{Sort, SortKey};
 use prw_core::status::{
     Checks, Mergeable, PillKind, Progress, STEPS, Stage, activity, check_name, latest_runs,
     mergeable_of, meta_of, progress_of, step_index,
 };
 use prw_core::time::parse_iso;
 use prw_core::ui::{
-    Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, agents_live, ago, repo_of,
+    Focus, Hit, Key, LIT_MS, List, ListId, Lit, Model, Poll, Row, age, agents_live, ago, repo_of,
 };
 use prw_core::version::OWN;
 use ratatui::Frame;
@@ -28,7 +30,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::{
-    ACCENT, BLUE, BODY, DIM, FG, GREEN, INK, LINE, PANEL, PEACH, RED, SEL, TEAL, YELLOW,
+    ACCENT, BLUE, BODY, DIM, FG, GREEN, INK, LINE, PANEL, PEACH, RED, REPO_HUES, SEL, TEAL, YELLOW,
     agent_look, bold, fg, label, pill_color, tone_color,
 };
 
@@ -283,7 +285,7 @@ pub fn render(frame: &mut Frame, model: &Model, ctx: Ctx) -> Hits {
             Pane::Header => header(frame, r, model, chosen),
             Pane::Lists => lists_pane(frame, r, model, h),
             Pane::Strip => strip(frame, r, model, chosen, h),
-            Pane::Table => table(frame, r, model, chosen, ctx, h),
+            Pane::Table => table(frame, r, model, ctx, h),
             Pane::Detail if chosen == Layout::Side => card(frame, r, model, ctx, h),
             Pane::Detail => detail(frame, r, model, ctx, h),
             Pane::Status => status(frame, r, model, ctx, h),
@@ -746,6 +748,7 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
+            ("s", "sort", char('s')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
             ("a", "account", char('a')),
@@ -808,6 +811,7 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
             ("⏎", "open the PR full size"),
             ("tab ⇧tab", "next, previous list"),
             ("h l  ← →", h_l),
+            ("s S", "order: urgency, repo, opened, updated; S flips"),
         ]
     };
     let quit = if model.opened().is_some() {
@@ -1233,22 +1237,59 @@ fn table_empty(model: &Model, list: &List, iw: usize, ctx: Ctx) -> Option<Vec<Li
     ])
 }
 
-/// The table's columns: the title takes what the others leave.
+/// The table's columns: the title takes what the others leave, and the repo chip and the
+/// dates go first where there's too little room for a title beside them.
 #[derive(Debug, Clone, Copy)]
 struct Columns {
     /// The All list says whose each PR is (an agent glyph).
     agent: usize,
-    title: usize,
-    /// 0: no repo column.
+    /// The repo chip's name, in cells: 0 for no chip. A space follows the chip.
     repo: usize,
+    /// Whether the chip has a cell of its tint each side of the name (where there's room).
+    is_padded: bool,
+    title: usize,
+    dates: Dates,
     /// `#412 `: the longest number and a space, 6 at least.
     number: usize,
     width: usize,
+    sort: Sort,
+    now: i64,
 }
 
+/// How a row says when its PR was opened and last updated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dates {
+    None,
+    /// One cell, `3mo/2d`.
+    Shared,
+    /// A cell each.
+    Both,
+}
+
+/// A time as a date cell or the card says it: how long ago, and in what colour; `None` where
+/// it isn't known.
+type Said = Option<(String, Color)>;
+
+/// A date cell's width: a space, then the text on the right.
+const DATE_W: usize = 9;
+/// A shared date cell's width (`OPEN/UPD↓`, `11mo/11mo`).
+const DATES_W: usize = 10;
+/// The longest a repo chip's name gets.
+const REPO_MAX: usize = 16;
+/// The title keeps at least this much: the chip loses its padding, then shrinks, and the
+/// dates go, first.
+const TITLE_MIN: usize = 14;
+/// A title this wide or wider, and the chip can have its padding.
+const TITLE_ROOMY: usize = 24;
+/// An update this long ago (ms) and the PR has gone quiet: its time turns yellow.
+const QUIET_MS: i64 = 14 * 86_400_000;
+/// A PR opened less than this long ago (ms) is new: its time is bright.
+const NEW_MS: i64 = 86_400_000;
+
 impl Columns {
-    /// `▌`, the mark, a space, the number, then the title, the repo and the status.
-    fn new(iw: usize, list: &List, chosen: Layout) -> Self {
+    /// `▌`, the mark, a space, the number, the agent, the repo chip, the title, the dates,
+    /// then the status.
+    fn new(iw: usize, list: &List, sort: Sort, now: i64) -> Self {
         // A session's PRs are all its agent's; All's and a search's are anyone's.
         let agent = if matches!(list.id, ListId::All | ListId::Search(_)) {
             2
@@ -1258,29 +1299,154 @@ impl Columns {
         let longest = list.rows.iter().map(|r| r.pr.number).max().unwrap_or(0);
         let number = (format!("#{longest}").len() + 1).max(6);
         let rest = iw.saturating_sub(3 + number + agent + STATUS_W + 1);
-        let repo = if chosen == Layout::Three && rest >= 16 + 11 {
-            11
+        let name = list
+            .rows
+            .iter()
+            .map(|r| cells(&r.repo_name))
+            .max()
+            .unwrap_or(0);
+        let name = name.min(REPO_MAX);
+        let is_padded = rest >= name + 3 + TITLE_ROOMY;
+        let repo = if is_padded {
+            name
         } else {
-            0
+            name.min(rest.saturating_sub(TITLE_MIN + 1))
+        };
+        let repo = if repo < 3 { 0 } else { repo };
+        let chip = match (repo, is_padded) {
+            (0, _) => 0,
+            (_, true) => repo + 3,
+            (_, false) => repo + 1,
+        };
+        let left = rest.saturating_sub(chip);
+        let dates = if left >= 2 * DATE_W + 2 * TITLE_MIN {
+            Dates::Both
+        } else if left >= DATES_W + TITLE_MIN + 8 {
+            Dates::Shared
+        } else {
+            Dates::None
+        };
+        let taken = match dates {
+            Dates::None => 0,
+            Dates::Shared => DATES_W,
+            Dates::Both => 2 * DATE_W,
         };
         Self {
             agent,
-            title: rest - repo,
             repo,
+            is_padded,
+            title: left - taken,
+            dates,
             number,
             width: iw,
+            sort,
+            now,
         }
     }
 
+    /// A heading, in the accent with an arrow where the rows go by it.
+    fn head(self, text: &str, key: SortKey, n: usize, is_right: bool) -> Span<'static> {
+        // The usual order goes unmarked, as the title leaves it unsaid.
+        let (text, style) = if self.sort.key == key && self.sort != Sort::default() {
+            let arrow = if self.sort.is_flipped { "↑" } else { "↓" };
+            (format!("{text}{arrow}"), fg(ACCENT))
+        } else {
+            (text.to_owned(), label())
+        };
+        span(
+            if is_right {
+                right(&text, n)
+            } else {
+                fit(&text, n)
+            },
+            style,
+        )
+    }
+
     fn heading(self) -> Line<'static> {
-        Line::from(vec![
+        let mut spans = vec![
             span("   ", label()),
-            span(fit("PR", self.number), label()),
-            span(fit("TITLE", self.agent + self.title), label()),
-            // The repo and status cells each start after a space, as the row's do.
-            span(fit(" REPO", self.repo), label()),
-            span(" STATUS", label()),
-        ])
+            span(fit("PR", self.number + self.agent), label()),
+        ];
+        if self.repo > 0 {
+            let (text, n) = if self.is_padded {
+                (" REPO", self.repo + 3)
+            } else {
+                ("REPO", self.repo + 1)
+            };
+            spans.push(self.head(text, SortKey::Repo, n, false));
+        }
+        spans.push(span(fit("TITLE", self.title), label()));
+        match self.dates {
+            Dates::None => {}
+            Dates::Shared => {
+                let key = if self.sort.key == SortKey::Updated {
+                    SortKey::Updated
+                } else {
+                    SortKey::Opened
+                };
+                spans.push(self.head("OPEN/UPD", key, DATES_W, true));
+            }
+            Dates::Both => {
+                spans.push(self.head("OPENED", SortKey::Opened, DATE_W, true));
+                spans.push(self.head("UPDATED", SortKey::Updated, DATE_W, true));
+            }
+        }
+        // The status cell starts after a space, as the row's does.
+        spans.push(self.head(" STATUS", SortKey::Urgency, STATUS_W + 1, false));
+        Line::from(spans)
+    }
+
+    /// When `row`'s PR was opened and updated, in their colours: a new PR's opened time
+    /// bright, a quiet one's updated time yellow, the rest dim; `None` for a time not known.
+    fn times(self, row: &Row) -> (Said, Said) {
+        Self::times_at(row, self.now)
+    }
+
+    /// [`Columns::times`] at `now`.
+    fn times_at(row: &Row, now: i64) -> (Said, Said) {
+        let since = |at: Option<i64>| at.map(|at| now.saturating_sub(at));
+        let opened = since(row.opened_at).map(|ms| (age(ms), if ms < NEW_MS { FG } else { DIM }));
+        let updated = since(row.updated_at).map(|ms| {
+            let colour = if ms >= QUIET_MS {
+                mix(DIM, YELLOW, 0.75)
+            } else {
+                DIM
+            };
+            (age(ms), colour)
+        });
+        (opened, updated)
+    }
+
+    /// The date cells of `row`, on `bg`.
+    fn date_cells(self, row: &Row, bg: Color) -> Vec<Span<'static>> {
+        let on = |colour: Color| Style::new().fg(colour).bg(bg);
+        let (opened, updated) = self.times(row);
+        match self.dates {
+            Dates::None => Vec::new(),
+            Dates::Both => [opened, updated]
+                .into_iter()
+                .map(|time| {
+                    let (text, colour) = time.unwrap_or_default();
+                    span(right(&text, DATE_W), on(colour))
+                })
+                .collect(),
+            Dates::Shared => {
+                let (o, oc) = opened.unwrap_or_default();
+                let (u, uc) = updated.unwrap_or_default();
+                let slash = if o.is_empty() && u.is_empty() {
+                    ""
+                } else {
+                    "/"
+                };
+                let pad = DATES_W.saturating_sub(cells(&o) + cells(slash) + cells(&u));
+                vec![
+                    span(format!("{}{o}", " ".repeat(pad)), on(oc)),
+                    span(slash, on(DIM)),
+                    span(u, on(uc)),
+                ]
+            }
+        }
     }
 
     /// A PR's row at `beat`; lit, at `now` it glows (a new one in the accent, a changed one
@@ -1329,10 +1495,19 @@ impl Columns {
         } else {
             style
         };
-        spans.push(span(fit(title, self.title), on(style)));
         if self.repo > 0 {
-            spans.push(span(fit(&format!(" {}", row.repo), self.repo), on(fg(DIM))));
+            let hue = REPO_HUES[hue_of(&row.repo, REPO_HUES.len())];
+            let name = fit(&row.repo_name, self.repo);
+            let chip = if self.is_padded {
+                format!(" {name} ")
+            } else {
+                name
+            };
+            spans.push(span(chip, Style::new().fg(hue).bg(mix(bg, hue, 0.2))));
+            spans.push(span(" ", on(Style::new())));
         }
+        spans.push(span(fit(title, self.title), on(style)));
+        spans.extend(self.date_cells(row, bg));
         spans.push(span(" ", on(Style::new())));
         spans.extend(status_cell(row, bg, beat));
         let wiping = lit
@@ -1347,13 +1522,21 @@ impl Columns {
     }
 }
 
-fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hits: &mut Hits) {
+fn table(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
     hits.add(r, Hit::Pane(Focus::Prs));
     let list = model.list();
+    let order = model.sort().words();
     let title = if r.width >= 56 {
-        format!("{}  ·  {}", list.label, about(model, list, ctx.home))
+        let about = about(model, list, ctx.home);
+        match order {
+            Some(order) => format!("{}  ·  {order}  ·  {about}", list.label),
+            None => format!("{}  ·  {about}", list.label),
+        }
     } else {
-        list.label.clone()
+        match order {
+            Some(order) => format!("{}  ·  {order}", list.label),
+            None => list.label.clone(),
+        }
     };
     let block = boxed(
         &clip(&title, usize_of(r.width).saturating_sub(6)),
@@ -1367,7 +1550,7 @@ fn table(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, ctx: Ctx, hi
         frame.render_widget(Paragraph::new(lines), inner);
         return;
     }
-    let columns = Columns::new(iw, list, chosen);
+    let columns = Columns::new(iw, list, model.sort(), model.now());
     let mut lines = vec![columns.heading()];
     if ih > 8 {
         lines.push(Line::raw(""));
@@ -1545,6 +1728,31 @@ fn by_line(row: &Row, author: &str, login: Option<&str>, width: usize) -> Line<'
     Line::from(spans)
 }
 
+/// "opened 2mo ago · updated 2d ago", in the table's colours for them; nothing where
+/// neither is known.
+fn dates_line(row: &Row, now: i64, width: usize) -> Option<Line<'static>> {
+    let (opened, updated) = Columns::times_at(row, now);
+    let said: Vec<(String, Color)> = [("opened", opened), ("updated", updated)]
+        .into_iter()
+        .filter_map(|(what, time)| time.map(|(age, colour)| (format!("{what} {age} ago"), colour)))
+        .collect();
+    if said.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (i, (text, colour)) in said.into_iter().enumerate() {
+        let gap = if i > 0 { " · " } else { "" };
+        if used + cells(gap) + cells(&text) > width {
+            break;
+        }
+        used += cells(gap) + cells(&text);
+        spans.push(span(gap, fg(DIM)));
+        spans.push(span(text, fg(colour)));
+    }
+    Some(Line::from(spans))
+}
+
 /// The selected PR's box, titled `owner/repo #12`, and the area inside it; a bare
 /// "Details" box where nothing is selected.
 fn selected_box<'m>(frame: &mut Frame, r: Rect, model: &'m Model) -> Option<(&'m Row, Rect)> {
@@ -1605,6 +1813,7 @@ fn detail_head(
     } else {
         head.push(by_line(row, "", model.login_of(row).as_deref(), iw));
     }
+    head.extend(dates_line(row, model.now(), iw));
     head.push(Line::raw(""));
     head.push(Line::from(pill(d.pill)));
     // Beside the headline, as the mod puts it: how long ago it merged, or the outdated threads.
@@ -1824,6 +2033,7 @@ fn card(frame: &mut Frame, r: Rect, model: &Model, ctx: Ctx, hits: &mut Hits) {
         model.login_of(row).as_deref(),
         iw,
     ));
+    lines.extend(dates_line(row, model.now(), iw));
     if let Some(error) = &row.pr.error {
         lines.push(Line::from(span(clip(&format!("⚠ {error}"), iw), fg(RED))));
     }

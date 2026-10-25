@@ -16,7 +16,7 @@ use ratatui::buffer::Buffer;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::theme::SEL;
+use crate::theme::{INK, REPO_HUES, SEL};
 use crate::view::{Ctx, Hits, is_animated, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
@@ -678,7 +678,8 @@ fn saved_searches_are_lists_of_their_own() {
         &screen(&web, 120, 30),
         &[
             "Team web  ·  is:open repo:acme/web · 4 of 112",
-            "◆ Keep the cart",
+            // The agent, then the repo chip, then the title.
+            "◆  web  Keep the cart",
             "#97",
         ],
     );
@@ -794,7 +795,11 @@ fn a_click_picks_a_tab_or_an_item_and_back_goes_back() {
     assert!(model.opened().is_none());
     // A click on the selected row opens it, as Enter does.
     let text = screen(&model, 120, 36);
-    let model = click(model, row_saying(&text, "◇ Right-align"), "#59");
+    let row = text
+        .lines()
+        .position(|l| l.contains("#59") && l.contains("Right-align"))
+        .expect("#59's row");
+    let model = click(model, row, "#59");
     assert_eq!(model.opened().map(Opened::number), Some(59));
 }
 
@@ -913,5 +918,41 @@ fn in_the_full_view_r_replies_on_the_thread_and_a_approves_another_s_pr() {
     assert_says(
         &screen(&model, 120, 36),
         &["Approve acme/web #93 as octocat?", "y yes", "n no"],
+    );
+}
+
+#[test]
+fn a_row_wears_its_repos_chip_and_its_dates_and_s_orders_the_rows() {
+    let model = demo(200, 30);
+    let text = screen(&model, 200, 30);
+    assert_says(
+        &text,
+        &[
+            "REPO",
+            "OPENED  UPDATED STATUS",
+            " billing  Prorate plan changes mid-cycle",
+            "opened 20h ago · updated 40m ago",
+        ],
+    );
+    // The chip is the repo's hue on a tint of it, not the row's ground.
+    let y = row_saying(&text, "Keep the cart");
+    let (x, y) = cell_of(&text, y, "web ");
+    let cell = &painted(&model, 200, 30, CTX)[(x, y)];
+    assert!(REPO_HUES.contains(&cell.fg), "{cell:?}");
+    assert!(cell.bg != INK && cell.bg != SEL, "{cell:?}");
+    // Quiet for 5 weeks: #140's updated time stands out; three days ago, #91's doesn't.
+    let fg_of = |number: &str, age: &str| {
+        let (x, y) = cell_of(&text, row_saying(&text, number), age);
+        painted(&model, 200, 30, CTX)[(x, y)].fg
+    };
+    assert_ne!(fg_of("#140", " 5w "), fg_of("#91", " 3d "));
+    let by_repo = feed(model, [Msg::Key(Key::Char('s'))]);
+    let text = screen(&by_repo, 200, 30);
+    assert_says(&text, &["All  ·  by repo  ·  every PR", "REPO↓"]);
+    assert!(row_saying(&text, "Release 4.12") < row_saying(&text, "Bump vite"));
+    // At 84 the two times share a cell; at 49 only the card says them.
+    assert_says(
+        &screen(&demo(84, 30), 84, 30),
+        &["billing", "opened 20h ago"],
     );
 }

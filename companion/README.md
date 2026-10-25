@@ -208,6 +208,7 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
 | `o`                  | open it in the browser                                       |
+| `s`, `S`             | order the lists: most urgent first, by repo, oldest first, quietest first; `S` turns the order around |
 | `a`                  | switch the gh login its owner's PRs go as (with two or more); in the full view, approve |
 | `v`                  | show the prompt last copied (`j` `k` scroll, Esc closes)     |
 | `?`                  | the key help                                                 |
@@ -242,6 +243,12 @@ width with its card beside it, narrower alone.
 
 The cut-offs sit between the design's reference widths (120, 84 and 49 columns), so each lands well
 inside its own band. A wider terminal never gets a smaller layout.
+
+Each row wears a chip in its repo's colour, with the repo's name (and its owner too, where two repos
+share a name); a repo keeps its colour across runs. Where the table has room, two columns say how
+long ago the PR was opened and last updated: a PR opened in the last day is bright, and one with
+nothing new for two weeks turns yellow. Narrower, the two share a cell (`3mo/2d`); narrower still,
+the card says them. The dates need pr-watch 0.14.2 or prw to have polled the PR.
 
 A PR with something under way (CI running, GitHub still computing, a first fetch) turns the mod's
 spinner in the table and on its card's step, and a glint runs along the checks bar's pending part;

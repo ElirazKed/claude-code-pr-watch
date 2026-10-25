@@ -30,7 +30,7 @@ const REVIEWS = `latestReviews(first: 10) { totalCount nodes { author { __typena
   reviewThreads(last: 50) { totalCount nodes { isResolved isOutdated } }`
 
 const FRAGMENT = `fragment pr on PullRequest {
-  number title url state isDraft reviewDecision mergeStateStatus mergeable mergedAt closedAt
+  number title url state isDraft reviewDecision mergeStateStatus mergeable createdAt updatedAt mergedAt closedAt
   additions deletions headRefName baseRefName author { login } autoMergeRequest { enabledAt mergeMethod }
   viewerCanEnableAutoMerge viewerCanDisableAutoMerge
   ${REVIEWS}
