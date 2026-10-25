@@ -40,7 +40,8 @@ import type { Failure, Handoff } from './fix'
 import { resolveHeading, resolvePrompt } from './resolve'
 import { commentArgv, commentError, commentInput, commentPlaceholder, commentUrl, isPostable } from './comment'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
-import { CHECK_MS, headOf, howToUpdate, isNewer, noticeLines, noticeToast, versionIn } from './update'
+import { CHECK_MS, PRW_LINE, PRW_PILL, PRW_TEXT, PRW_URL, companionIn, headOf, howToUpdate, isNewer, isPrwIn, noticeLines, noticeToast, versionIn } from './update'
+import type { CompanionState } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
 import type { Layout } from './band'
 import { failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
@@ -74,6 +75,8 @@ const commenting = atom({ plugin: 'pr-watch', key: 'commenting' } as const, {})
 const retrying = atom({ plugin: 'pr-watch', key: 'retrying' } as const, {})
 // A newer pr-watch than this one, for the footer.
 const newer = atom({ plugin: 'pr-watch', key: 'newer' } as const, null)
+// Whether the card telling of prw shows (sayCompanion).
+const companion = atom({ plugin: 'pr-watch', key: 'companion' } as const, false)
 // GitHub's budget per login and a hold, for the gh meter.
 const limits = atom({ plugin: 'pr-watch', key: 'limits' } as const, { logins: [], heldUntil: 0 })
 // Whether the gh meter's explanation is open (its `?`): shut until asked, per session.
@@ -838,6 +841,7 @@ async function apply($: EngineInterface, shared: Shared) {
   await syncAnimation($)
   // Last, and never thrown: the update notice must not cost a PR result.
   await sayNewer($, shared).catch(() => undefined)
+  await sayCompanion($).catch(() => undefined)
 }
 
 // What the gh meter shows: the logged-in logins' buckets, the active one first (every login the
@@ -897,6 +901,44 @@ async function sayNewer($: EngineInterface, shared: Shared) {
   await $.clock.sleep(150)
   const claim = await readJson<{ version?: string; owner?: string }>($, path)
   if (claim?.version === next.version && claim.owner === INSTANCE) $.ui.toast(noticeToast(next.version, next.how))
+}
+
+// Why the card telling of prw is gone for good, once known: read from companion.json, which
+// a dismissal in any session writes, or written here on finding prw has run.
+let companionState: CompanionState | null = null
+
+// The card telling of prw: shown until someone dismisses it (in any session) or prw is seen
+// running, and only while the update notice is on.
+async function sayCompanion($: EngineInterface) {
+  const isNews = isNoticeOn && companionState === null && (await isCompanionNews($))
+  await update($, companion, current => {
+    // Asked again after the reads: a Dismiss pressed, or the notice turned off, while they ran wins.
+    const isShown = isNews && isNoticeOn && companionState === null
+
+    return current === isShown ? current : isShown
+  })
+}
+
+async function isCompanionNews($: EngineInterface): Promise<boolean> {
+  const cache = await root($)
+  const said = companionIn(await readJson<unknown>($, `${cache}/companion.json`))
+  // Read first, then `??=`: a Dismiss pressed during the read isn't undone by the file it hasn't
+  // written yet.
+  companionState ??= said
+  if (companionState !== null) return false
+  const names = (await $.fs.list(`${cache}/sessions`).catch(() => [])).map(f => f.name)
+  if (!isPrwIn(names)) return true
+  if (companionState !== null) return false
+  companionState = 'seen'
+  await writeJson($, `${cache}/companion.json`, { state: companionState })
+
+  return false
+}
+
+async function dismissCompanion($: EngineInterface) {
+  companionState = 'dismissed'
+  await update($, companion, () => false)
+  await writeJson($, `${await root($)}/companion.json`, { state: companionState, at: await $.clock.now() })
 }
 
 // Fetches these PRs now (a new watch, the Refresh button) rather than waiting for the round.
@@ -1591,7 +1633,10 @@ export const register: Register = (on, options) => {
     } else {
       isNoticeOn = done.value !== false
       // Off: the footer's note goes now; on, it comes back with the next tick.
-      if (!isNoticeOn) await update($, newer, () => null)
+      if (!isNoticeOn) {
+        await update($, newer, () => null)
+        await update($, companion, () => false)
+      }
     }
 
     return done
@@ -1779,6 +1824,7 @@ export const register: Register = (on, options) => {
       for (const pr of fields) commentAs.set(pr.url, loginFor(accounts, ownerOf(pr), known))
     }
     const upgrade = isNoticeOn ? await read($, newer) : null
+    const isCompanionShown = isNoticeOn && (await read($, companion))
     const budget = await read($, limits)
     const isHelpOpen = await read($, ghHelp)
     const width = Math.max(24, e.props.bodyColumns)
@@ -1828,6 +1874,25 @@ export const register: Register = (on, options) => {
     // The frame's close mark sits on its top row, which some terminal overlays cover. Closing
     // hides the pane only: the PRs stay watched, and a new PR or /pr-watch brings it back.
     const closeButton = <Button key="close" label="Close" hotkey="x" plain dimColor onPress={() => $.ui.close({ id: PANE })} />
+
+    // prw, the companion app: a card of its own under the PRs, until it is dismissed.
+    const companionPill = pillOf(paint, 'merged', PRW_PILL)
+    const companionCard = (
+      <Box key="companion" flexDirection="column" {...cardBox(paint, 'merged')}>
+        <Text {...companionPill.props}>
+          {companionPill.open !== '' && companionPill.open}
+          {companionPill.text}
+          {companionPill.close !== '' && companionPill.close}
+        </Text>
+        <Text wrap="wrap">
+          <Text bold>prw</Text>: {PRW_TEXT}
+        </Text>
+        <Box gap={2} marginTop={1}>
+          <Link href={PRW_URL} label="Learn more ↗" />
+          <Button key="companion-dismiss" label="Dismiss" plain dimColor onPress={() => dismissCompanion($)} />
+        </Box>
+      </Box>
+    )
 
     // A newer pr-watch, under the footer's buttons: "↑ pr-watch 0.9.0 available · git pull in …".
     const notice = upgrade !== null && (
@@ -2418,6 +2483,7 @@ export const register: Register = (on, options) => {
               ]
             : [drawn]
         })}
+        {isCompanionShown && companionCard}
         <Box gap={2}>
           <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => fetchNow($, list.filter(isActive).map(refOf))} />
           {closeButton}
@@ -2447,13 +2513,16 @@ export const register: Register = (on, options) => {
     const list = (await read($, prs)).map(full)
     if (list.length === 0) return yieldBand()
     const theirs = await next(e)
-    const plan = planOf(list, e.props.maxRows, theirs.type === 'engine' ? BAND_ROWS : SHARED_ROWS)
+    const cap = theirs.type === 'engine' ? BAND_ROWS : SHARED_ROWS
+    // The line telling of prw takes a PR's row, where a PR and the actions still fit beside it.
+    const hasCompanion = isNoticeOn && (await read($, companion)) && Math.min(cap, Math.floor(e.props.maxRows)) >= 3
+    const plan = planOf(list, e.props.maxRows - (hasCompanion ? 1 : 0), cap - (hasCompanion ? 1 : 0))
     if (plan.shown.length === 0) {
       if (isTerminal) bandSpins.clear()
 
       return theirs
     }
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     // Narrowed by the surface, so the terminal's table (the one with a Raster) is resolved there.
     const Raster = e.surface === 'terminal' ? $.ui.resolve(e).Raster : null
     const [at, rows, upgrade, budget] = await Promise.all([
@@ -2522,6 +2591,18 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {plan.shown.map(line)}
+        {hasCompanion && (
+          <Box key="band:companion" gap={2}>
+            <Text wrap="truncate-end">
+              <Text color={inkOf(paint, 'merged')} bold>
+                ✦
+              </Text>{' '}
+              {PRW_LINE}
+            </Text>
+            <Link href={PRW_URL} label="Learn more ↗" />
+            <Button key="band-companion-dismiss" label="✕" plain dimColor onPress={() => dismissCompanion($)} />
+          </Box>
+        )}
         {plan.hasActions && (
           <Box key="band:actions" gap={2}>
             {actions.more !== null && <Text dimColor>{actions.more}</Text>}
