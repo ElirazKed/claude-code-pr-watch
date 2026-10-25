@@ -36,6 +36,27 @@ Answer `y` to add the marketplace and press Enter for user scope. It's active at
 /plugin install pr-watch@claude-code-pr-watch
 ```
 
+## prw, the terminal companion
+
+![prw on its demo cache: lists on the left, every watched PR in the middle, the selected PR's card on the right](docs/prw.png)
+
+`prw` is an optional terminal app for the big picture: every PR your agents touch (Claude through the mod; Codex and others through `prw mcp` or `prw watch`), your own open PRs and your saved GitHub searches, with a full PR view to read, reply, resolve, approve and merge in. The mod stays complete without it, and `prw` works without Claude. It needs the [GitHub CLI](https://cli.github.com) logged in, as the mod does.
+
+Install the latest release (macOS and Linux, x86_64 and arm64) to `~/.local/bin`:
+
+```sh
+curl -LsSf https://github.com/ElirazKed/claude-code-pr-watch/releases/latest/download/prw-installer.sh | sh
+```
+
+Or run it with nix, or build it with cargo (Rust 1.88 or newer):
+
+```sh
+nix run github:ElirazKed/claude-code-pr-watch#prw
+cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw
+```
+
+The [releases](https://github.com/ElirazKed/claude-code-pr-watch/releases) page has each build as an archive, with its checksum and a GitHub attestation (`gh attestation verify <file> --repo ElirazKed/claude-code-pr-watch`). `prw --cache companion/demo --demo`, from a clone, shows the demo above. Everything else is in [companion/README.md](companion/README.md).
+
 ## What it watches
 
 - **Automatically:** PRs Claude acts on: opens (`gh pr create`), pushes to (`git push` to a branch with a PR), comments on, reviews, merges or follows CI for (`gh pr checks`), through `gh` or GitHub MCP write tools. Only open PRs are picked up; a merged or closed one never gets a card, and one you stopped watching stays stopped.

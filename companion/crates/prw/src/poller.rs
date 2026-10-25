@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use prw_core::accounts::{every_login, learned};
+use prw_core::accounts::{NoLogins, every_login, learned};
 use prw_core::batch::{PrRef, ref_from_url};
 use prw_core::config::{Config, SEARCH_CAP, Search, parse_config, search_text};
 use prw_core::poll::{
@@ -503,7 +503,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         }
         let mut errors = Vec::new();
         if logins.is_empty() {
-            errors.push(prw_core::accounts::token_error(""));
+            errors.push(self.auth.why().said().to_owned());
         }
         // Each search's first failure this time, and whether any login's search came back.
         let mut failed: Vec<Option<String>> = vec![None; self.searches.len()];
@@ -645,6 +645,7 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         match self.gh.run(&args, Some(token), ms(GH_MS)) {
             Ok(ran) => parse_searches(&ran.stdout, &ran.stderr, &aliases),
             Err(RunError::Timeout) => Err("gh api graphql did not finish".to_owned()),
+            Err(RunError::Missing) => Err(NoLogins::NoGh.said().to_owned()),
             Err(RunError::Spawn(why)) => Err(format!("gh didn't start: {why}")),
         }
     }
@@ -1316,7 +1317,21 @@ login = "hubot"
         let said = poller.tick();
         assert_eq!(
             said.error.as_deref(),
-            Some("Couldn't read gh's logins (gh auth status)")
+            Some("gh isn't logged in: run gh auth login")
+        );
+    }
+
+    #[test]
+    fn no_gh_says_to_install_it() {
+        let dir = Dir::new("nogh");
+        let gh = FakeGh::default();
+        gh.on(|_| true, |_| Err(RunError::Missing));
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh, FakeClock::new(now(), 1));
+        let said = poller.tick();
+        assert_eq!(
+            said.error.as_deref(),
+            Some("gh isn't installed: see cli.github.com")
         );
     }
 }

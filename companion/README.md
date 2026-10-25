@@ -6,7 +6,9 @@ searches, in a responsive TUI with a full PR view (conversation, threads, checks
 stay closed. The mod stays complete on its own; `prw` is for when you want the big picture, with or
 without Claude.
 
-**Status: step 9 of the plan: the full PR view, read and acted on.** `prw` shows the PRs your sessions watch, from the mod's shared
+![prw on its demo cache](../docs/prw.png)
+
+`prw` shows the PRs your sessions watch, from the mod's shared
 cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
 others by the `agent` their session file names), each PR's card worked out as the mod does
 (`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
@@ -82,6 +84,28 @@ as it is now. Each failed job's log is read once. The poll never reads any of it
 
 Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
 `prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
+
+## Install
+
+The latest release (macOS and Linux, x86_64 and arm64; Linux builds are static) to `~/.local/bin`,
+or `$XDG_BIN_HOME` where that is set:
+
+```sh
+curl -LsSf https://github.com/ElirazKed/claude-code-pr-watch/releases/latest/download/prw-installer.sh | sh
+```
+
+Or with nix, or cargo (Rust 1.88 or newer):
+
+```sh
+nix run github:ElirazKed/claude-code-pr-watch#prw      # or nix profile install …#prw
+cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw
+```
+
+Each release's archives come with checksums and a GitHub attestation:
+`gh attestation verify prw-aarch64-apple-darwin.tar.xz --repo ElirazKed/claude-code-pr-watch`.
+`prw` needs the [GitHub CLI](https://cli.github.com) logged in (`gh auth login`); without it, the
+status line says which is missing. Releases are cut by pushing a `prw-v<version>` tag
+(`dist-workspace.toml`).
 
 ## Build and run
 

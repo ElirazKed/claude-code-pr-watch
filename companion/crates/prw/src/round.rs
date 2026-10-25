@@ -8,8 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use prw_core::accounts::{
-    Answer, Asked, Logins, best_login, every_login, is_due, login_for, logins_of, not_found_as,
-    owners_below_write, rank_of, token_error, untried_by,
+    Answer, Asked, Logins, NoLogins, best_login, every_login, is_due, login_for, logins_of,
+    not_found_as, owners_below_write, rank_of, token_error, untried_by,
 };
 use prw_core::batch::{
     BATCH_SIZE, CallFailure, CallLog, Http, LOG_LINES, PrRef, append_log, build_query, call_budget,
@@ -39,8 +39,17 @@ pub type Token = Result<String, String>;
 pub struct Auth {
     kept: Logins,
     asked: Option<Asked>,
+    /// Why the last reading gave no logins.
+    why: NoLogins,
     tokens: HashMap<String, (i64, String)>,
     misses: HashMap<String, (i64, String)>,
+}
+
+impl Auth {
+    /// Why gh gave no logins, the last time it gave none.
+    pub const fn why(&self) -> NoLogins {
+        self.why
+    }
 }
 
 /// What a round asks with: `gh`, the clock, what it knows of gh's logins, and where its
@@ -63,17 +72,24 @@ impl<G: Gh, C: Clock> Ctx<'_, G, C> {
         let at = self.clock.now();
         if is_fresh || is_due(self.auth.asked, at) {
             let args = argv(&["auth", "status", "--hostname", "github.com"]);
-            let read = self
+            let said = self
                 .gh
                 .run(&args, None, ms(timeout))
-                .ok()
-                .and_then(|r| logins_of(&format!("{}\n{}", r.stdout, r.stderr)));
+                .map(|r| format!("{}\n{}", r.stdout, r.stderr));
+            let read = said.as_deref().ok().and_then(logins_of);
             self.auth.asked = Some(Asked {
                 at: self.clock.now(),
                 is_ok: read.is_some(),
             });
-            if let Some(read) = read {
-                self.auth.kept = read;
+            match read {
+                Some(read) => self.auth.kept = read,
+                None => {
+                    self.auth.why = match &said {
+                        Ok(said) => NoLogins::of(said),
+                        Err(RunError::Missing) => NoLogins::NoGh,
+                        Err(_) => NoLogins::Unread,
+                    };
+                }
             }
         }
         self.auth.kept.clone()
@@ -83,7 +99,7 @@ impl<G: Gh, C: Clock> Ctx<'_, G, C> {
     /// give it then, the last one it gave stands, and where it never gave one, that is said.
     pub fn token(&mut self, login: &str, timeout: i64) -> Token {
         if login.is_empty() {
-            return Err(token_error(""));
+            return Err(self.auth.why.said().to_owned());
         }
         let at = self.clock.now();
         let good = self.auth.tokens.get(login).cloned();
@@ -128,6 +144,7 @@ impl<G: Gh, C: Clock> Ctx<'_, G, C> {
             .misses
             .insert(login.to_owned(), (done_at, error.clone()));
         let why = match &res {
+            Err(RunError::Missing) => NoLogins::NoGh.said().to_owned(),
             Err(_) => "gh auth token did not finish".to_owned(),
             Ok(ran) => ran
                 .stderr
@@ -174,6 +191,7 @@ impl<G: Gh, C: Clock> Ctx<'_, G, C> {
                     (timeout + 500) / 1_000
                 ),
             ),
+            Err(RunError::Missing) => (String::new(), NoLogins::NoGh.said().to_owned()),
             Err(RunError::Spawn(why)) => (String::new(), format!("gh didn't start: {why}")),
         };
         let http = parse_http(&stdout);
