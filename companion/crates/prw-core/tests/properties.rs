@@ -353,6 +353,8 @@ fn gh_pr() -> impl Strategy<Value = GhPr> {
             viewer_can_disable_auto_merge,
             repository,
             status_check_rollup,
+            created_at: None,
+            updated_at: None,
             merged_at,
             closed_at,
             additions,

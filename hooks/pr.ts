@@ -308,6 +308,10 @@ export type GhPr = ReviewFacts & {
   // Its repository's merge settings, asked for in the same query.
   repository?: RepoMerge
   statusCheckRollup: CheckItem[] | null
+  // When it was opened, and when anything on it last changed (prw's date columns); absent
+  // in an entry an older mod wrote.
+  createdAt?: string | null
+  updatedAt?: string | null
   mergedAt: string | null
   closedAt?: string | null
   additions: number

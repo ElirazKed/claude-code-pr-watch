@@ -176,6 +176,12 @@ pub struct GhPr {
     /// The head commit's checks, flattened; `null` where none has reported (as GitHub says).
     #[serde(deserialize_with = "lenient_vec_opt")]
     pub status_check_rollup: Option<Vec<CheckItem>>,
+    /// When it was opened, and when anything last changed on it; absent in an entry an
+    /// older mod wrote.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
     #[serde(deserialize_with = "lenient")]
     pub merged_at: Option<String>,
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]

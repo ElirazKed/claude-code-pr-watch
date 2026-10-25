@@ -1,6 +1,6 @@
 # The shared files
 
-Every pr-watch session on a machine shares one cache directory. Whoever holds the lease polls GitHub for every live session's PRs, and the rest read the results. This file describes that cache as pr-watch 0.14.1 writes and reads it, for any other program that takes part, such as the planned `prw` companion.
+Every pr-watch session on a machine shares one cache directory. Whoever holds the lease polls GitHub for every live session's PRs, and the rest read the results. This file describes that cache as pr-watch 0.14.2 writes and reads it, for any other program that takes part, such as the planned `prw` companion.
 
 In code: the mod's side lives in `hooks/register.tsx` (the "One poller for the whole machine" section), `hooks/protocol.ts` (session files, temp paths), `hooks/cache.ts` (entries) and `hooks/rate.ts` (rates). Symbols named below are from those files.
 
@@ -96,7 +96,7 @@ type Bucket = { limit: number; remaining: number; resetAt: number; seenAt: numbe
 type RateLimit = { remaining: number; resetAt: string /* ISO */; limit?: number }
 ```
 
-- **`pr` is raw:** the `GhPr` type (`hooks/pr.ts`) as `parseReply` (`hooks/batch.ts`) stores it. Checks are flattened into `statusCheckRollup` with each run's `workflow`, the repository's merge settings sit under `repository`, and the review connections come along. There is no derived card in the file. Each reader works out the status itself, and `companion/fixtures/` pins what it must work out.
+- **`pr` is raw:** the `GhPr` type (`hooks/pr.ts`) as `parseReply` (`hooks/batch.ts`) stores it. Checks are flattened into `statusCheckRollup` with each run's `workflow`, the repository's merge settings sit under `repository`, and the review connections come along. From 0.14.2 it also has `createdAt` and `updatedAt`, which `prw` shows as how long ago a PR was opened and last changed. There is no derived card in the file. Each reader works out the status itself, and `companion/fixtures/` pins what it must work out.
 - **Who writes it:** the lease holder at the end of a round (`publish` with `live`), and any session fetching PRs at once outside the lease (`fetchNow`: a new watch, Refresh, after a merge or a comment). Either way, the writer reads the file, asks GitHub, reads it again and merges. Each fetched PR replaces its entry, each failure goes through `failedEntry`, the rates fold in by the later sighting (`withSeen`), and `accounts` takes only what the fetch learned (the owners it set or changed, `learned`), so a login set meanwhile stands. `prw`'s `a` sets one owner's login the same way (read, set, write).
 - **The hold:** while `heldUntil` is in the future, nobody asks GitHub anything, rounds and at-once fetches alike. It is set from the `retry-after` of a secondary rate limit, or 60 s (`LIMIT_WAIT_MS`) where none is named, and only ever moved later.
 - **A round also:** drops entries no live session watches once they are `KEEP_MS` (1 h) old (`keptEntries`), and sets `fetchedAt`. It sets `nextAt` to `fetchedAt` plus the active interval (`poll_active_seconds`, default 20 s) while any PR moves (`derive(pr).isMoving`), else the idle one (`poll_idle_seconds`, default 60 s). `nextAt` is pushed later to a rate reset when every login the round needs is low (`roundWaitsUntil`), and never earlier than `heldUntil`.

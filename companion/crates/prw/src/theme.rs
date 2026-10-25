@@ -23,6 +23,20 @@ pub const BLUE: Color = Color::Rgb(0x89, 0xB4, 0xFA);
 pub const PEACH: Color = Color::Rgb(0xFA, 0xB3, 0x87);
 pub const TEAL: Color = Color::Rgb(0x94, 0xE2, 0xD5);
 
+/// The repo chips' hues (`repos::hue_of` picks one): sky, lavender, pink, teal, yellow, peach,
+/// green, maroon. Each chip sits on a tint of its own hue, so it reads as a label, not as a
+/// status's coloured words.
+pub const REPO_HUES: [Color; 8] = [
+    Color::Rgb(0x89, 0xDC, 0xEB),
+    Color::Rgb(0xB4, 0xBE, 0xFE),
+    Color::Rgb(0xF5, 0xC2, 0xE7),
+    TEAL,
+    YELLOW,
+    PEACH,
+    GREEN,
+    Color::Rgb(0xEB, 0xA0, 0xAC),
+];
+
 /// Text in a colour.
 #[must_use]
 pub fn fg(color: Color) -> Style {
