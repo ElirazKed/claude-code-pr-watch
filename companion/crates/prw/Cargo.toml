@@ -28,3 +28,7 @@ proptest.workspace = true
 
 [lints]
 workspace = true
+
+# Released by dist (dist-workspace.toml) though not on crates.io (yet).
+[package.metadata.dist]
+dist = true

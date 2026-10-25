@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # prw-release.yml runs it before building a release (plan-jobs in dist-workspace.toml).
+  workflow_call:
 
 permissions:
   contents: read
