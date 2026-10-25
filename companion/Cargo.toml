@@ -30,3 +30,7 @@ pedantic = { level = "warn", priority = -1 }
 [profile.release]
 lto = "thin"
 strip = true
+
+# What the release binaries are built with (dist-workspace.toml at the repo root).
+[profile.dist]
+inherits = "release"

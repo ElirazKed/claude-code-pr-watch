@@ -1,0 +1,23 @@
+[workspace]
+members = ["cargo:companion"]
+
+# Releases are built by 'dist' (https://opensource.axo.dev/cargo-dist/): pushing a
+# tag such as prw-v1.0.0 runs .github/workflows/release.yml (generated: change this
+# file, then run `dist generate`, never edit the workflow by hand).
+[dist]
+cargo-dist-version = "0.33.0"
+ci = "github"
+installers = ["shell"]
+# macOS on both chips; Linux static (musl), so one binary runs on any distro.
+# No Windows: copying and the cache paths are Unix only.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+]
+install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
+install-updater = false
+# The repo also holds the mod (its own version); only prw-v* tags release prw.
+tag-namespace = "prw"
+github-attestations = true
