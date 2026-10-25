@@ -55,7 +55,7 @@ nix run github:ElirazKed/claude-code-pr-watch#prw
 cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw
 ```
 
-The [releases](https://github.com/ElirazKed/claude-code-pr-watch/releases) page has each build as an archive, with its checksum and a GitHub attestation (`gh attestation verify <file> --repo ElirazKed/claude-code-pr-watch`). `prw --cache companion/demo --demo`, from a clone, shows the demo above. Everything else is in [companion/README.md](companion/README.md).
+The [releases](https://github.com/ElirazKed/claude-code-pr-watch/releases) page has each build as an archive, with its checksum and a GitHub attestation (`gh attestation verify <file> --repo ElirazKed/claude-code-pr-watch`). `prw --cache companion/demo --demo`, from a clone, shows the demo above. More on [prw's page](https://elirazked.github.io/claude-code-pr-watch/prw.html); everything else is in [companion/README.md](companion/README.md).
 
 ## What it watches
 

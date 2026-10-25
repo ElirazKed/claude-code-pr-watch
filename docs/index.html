@@ -32,6 +32,8 @@ a{color:#CBA6F7}a:hover{color:#E2CCFF}
 .g span{flex:none;white-space:pre}
 .g .c{display:inline-block;transform-origin:0 50%}
 @media (max-width: 640px){.wrap{padding-left:16px !important;padding-right:16px !important}}
+.intro{grid-template-columns:minmax(0,5fr) minmax(0,7fr)}
+@media (max-width: 960px){.intro{grid-template-columns:minmax(0,1fr)}}
 </style>
 </head>
 <body>
@@ -49,7 +51,7 @@ pr-watch
 <a href="#polling" style="color: #C9C7DA; text-decoration: none;">How it polls</a>
 <a href="#themes" style="color: #C9C7DA; text-decoration: none;">Themes</a>
 <a href="#install" style="color: #C9C7DA; text-decoration: none;">Install</a>
-<a href="#prw" style="color: #C9C7DA; text-decoration: none;">prw</a>
+<a href="prw.html" style="display: inline-flex; align-items: center; gap: 8px; color: #ECEAF4; text-decoration: none; font-weight: 500;">prw <span style="padding: 1px 8px; border-radius: 999px; background: linear-gradient(90deg, #94E2D5, #CBA6F7); color: #0F1A19; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;">NEW</span></a>
 <a href="https://github.com/ElirazKed/claude-code-pr-watch" style="display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid #34384F; border-radius: 8px; color: #ECEAF4; text-decoration: none;">
 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"></path></svg>
 GitHub
@@ -57,6 +59,22 @@ GitHub
 </div>
 </nav>
 </header>
+
+<!-- Introducing prw -->
+<section id="prw" aria-labelledby="prw-title" style="position: relative; overflow: hidden; border-bottom: 1px solid #22253A; background: radial-gradient(60% 90% at 78% 40%, rgba(148,226,213,0.13), transparent 70%), radial-gradient(50% 80% at 10% 0%, rgba(203,166,247,0.12), transparent 70%), #10121B;">
+<div class="wrap intro" style="max-width: 1200px; margin: 0 auto; padding: 64px 24px 72px; display: grid; gap: 40px; align-items: center;">
+<div style="min-width: 0; display: flex; flex-direction: column; gap: 22px;">
+<span style="align-self: flex-start; padding: 5px 12px; border-radius: 999px; background: linear-gradient(90deg, #94E2D5, #CBA6F7); color: #0F1A19; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 13px; font-weight: 700; letter-spacing: 0.08em;">✦ INTRODUCING · prw 1.0</span>
+<h2 id="prw-title" style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(40px, 5.6vw, 72px); line-height: 1; letter-spacing: -0.03em; text-wrap: balance;">All your PRs, in one terminal.</h2>
+<p style="margin: 0; font-size: 19px; color: #C9C7DA; max-width: 32em;"><strong style="color: #ECEAF4; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">prw</strong> is a PR manager for the terminal: your own open PRs, your saved GitHub searches and every PR your agents touch, sorted by what needs you. Open one full size to reply, resolve, approve and merge, without opening GitHub.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 12px;">
+<a href="prw.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 10px; background: #94E2D5; color: #0F1A19; font-weight: 600; text-decoration: none;">Meet prw →</a>
+<a href="prw.html#install" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 10px; border: 1px solid #34384F; color: #ECEAF4; font-weight: 500; text-decoration: none;">Install</a>
+</div>
+</div>
+<a href="prw.html" aria-label="Meet prw" style="display: block; min-width: 0;"><img src="prw.png" width="1428" height="778" alt="prw on its demo cache: lists and sessions on the left, every watched PR with tinted repo chips and opened and updated ages in the middle, the selected PR's card with its checks on the right" style="width: 100%; height: auto; display: block;"></a>
+</div>
+</section>
 
 <!-- Hero -->
 <section id="top" class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 72px 24px 88px; display: flex; flex-wrap: wrap; align-items: center; gap: 56px;">
@@ -328,31 +346,6 @@ GitHub
 <tr style="border-top: 1px solid #22253A;"><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #ECEAF4; white-space: nowrap;">update_notice</td><td style="padding: 12px 16px; color: #C9C7DA;">say when a new version is out</td><td style="padding: 12px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #A9A7BD; white-space: nowrap;">on</td></tr>
 </tbody>
 </table>
-</div>
-</div>
-</div>
-</section>
-
-<!-- prw -->
-<section id="prw" style="border-top: 1px solid #22253A; background: #10121B;">
-<div class="wrap" style="max-width: 1200px; margin: 0 auto; padding: 88px 24px; display: flex; flex-direction: column; gap: 40px;">
-<div style="display: flex; flex-direction: column; gap: 14px; max-width: 780px;">
-<p style="margin: 0; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; color: #94E2D5;">prw · the PR manager</p>
-<h2 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: clamp(32px, 4vw, 46px); line-height: 1.08; letter-spacing: -0.02em;">All your PRs, in one terminal.</h2>
-<p style="margin: 0; color: #C9C7DA;"><span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; color: #ECEAF4;">prw</span> is a full PR manager: your own open PRs, your saved GitHub searches and every PR your agents touch (Claude through the mod; Codex and others through <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">prw mcp</span> or <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">prw watch</span>), each repo in a colour of its own, sorted by what needs you or by repo, age or activity. Enter opens a PR full size: the conversation, review threads to reply to and resolve, checks with the failed jobs' logs, and the files, with approve and merge a key away. It runs on its own, with or without Claude, and shares the mod's poll, so no PR is polled twice.</p>
-</div>
-<img src="prw.png" width="1428" height="778" loading="lazy" alt="prw on its demo cache: lists and sessions on the left, every watched PR with tinted repo chips and opened and updated ages in the middle, the selected PR's card with its checks on the right" style="width: 100%; height: auto; display: block;">
-<div style="display: flex; flex-wrap: wrap; gap: 32px;">
-<div style="flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 14px;">
-<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 22px;">Install the latest release</h3>
-<p style="margin: 0; color: #C9C7DA;">macOS and Linux, Intel and ARM, into <span style="font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;">~/.local/bin</span>. Needs the <a href="https://cli.github.com">GitHub CLI</a> logged in, as the mod does.</p>
-<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; overflow-x: auto; white-space: nowrap;">curl -LsSf https://github.com/ElirazKed/claude-code-pr-watch/releases/latest/download/prw-installer.sh | sh</div>
-</div>
-<div style="flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 14px;">
-<h3 style="margin: 0; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 22px;">Or with nix or cargo</h3>
-<p style="margin: 0; color: #C9C7DA;">Every <a href="https://github.com/ElirazKed/claude-code-pr-watch/releases">release</a> also has its archives, with checksums and a GitHub attestation.</p>
-<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; overflow-x: auto; white-space: nowrap;">nix run github:ElirazKed/claude-code-pr-watch#prw</div>
-<div style="background: #141622; border: 1px solid #2A2E42; border-radius: 10px; padding: 14px 16px; font-family: 'JetBrains Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace; font-size: 14px; overflow-x: auto; white-space: nowrap;">cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw</div>
 </div>
 </div>
 </div>
