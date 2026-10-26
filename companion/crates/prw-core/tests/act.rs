@@ -413,6 +413,7 @@ fn the_actions_list_says_what_the_pr_offers() {
         [
             ("f", "Resolve → copy for Claude (web)", Look::Handoff),
             ("c", "Comment as ada", Look::Plain),
+            ("X", "Close the PR", Look::Plain),
             ("o", "Open on GitHub ↗", Look::Plain),
         ]
     );
@@ -841,7 +842,7 @@ fn the_full_views_actions_list_offers_the_thread_and_approval_not_the_switch() {
         .map(|o| (o.key, o.words))
         .collect();
     let keys: Vec<&str> = said.iter().map(|(k, _)| *k).collect();
-    assert_eq!(keys, ["m", "r", "x", "a", "c", "o"]);
+    assert_eq!(keys, ["m", "r", "x", "a", "c", "X", "o"]);
     assert_eq!(said[1].1, "Reply on src/cart.ts:14");
     assert_eq!(said[2].1, "Resolve src/cart.ts:14");
     assert_eq!(said[3].1, "Approve as ada");
@@ -958,4 +959,129 @@ fn a_reply_sent_while_one_on_its_thread_posts_stays_in_the_field() {
         toast(&model).0,
         "Still posting the reply on src/cart.ts:14…"
     );
+}
+
+#[test]
+fn x_asks_first_then_closes_and_a_closed_pr_reopens() {
+    let (model, cmds) = feed(model_of(pr(json!({}))), keys("X"));
+    assert_eq!(cmds, []);
+    assert!(matches!(
+        model.acts().ask(),
+        Some(Ask::Close { close: true, .. })
+    ));
+    let (model, cmds) = feed(model, keys("y"));
+    assert_eq!(
+        cmds,
+        [Cmd::Run(Job::Close {
+            url: URL.to_owned(),
+            number: 88,
+            close: true
+        })]
+    );
+    assert_eq!(model.acts().busy().collect::<Vec<_>>(), ["Closing #88"]);
+    let done = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::Closed {
+            close: true,
+            login: "ada".to_owned(),
+        },
+    };
+    let (model, _) = feed(model, [Msg::Done(done)]);
+    assert_eq!(toast(&model), ("✓ Closed #88 as ada", Tone::Good));
+
+    let closed = model_of(pr(json!({"state": "CLOSED"})));
+    assert!(
+        closed
+            .offers()
+            .iter()
+            .any(|o| o.key == "X" && o.words == "Reopen the PR")
+    );
+    let (model, _) = feed(closed, keys("Xn"));
+    assert_eq!(model.acts().ask(), None, "n asks nothing more");
+    let (model, cmds) = feed(model, keys("Xy"));
+    assert!(matches!(
+        cmds.as_slice(),
+        [Cmd::Run(Job::Close { close: false, .. })]
+    ));
+    assert_eq!(model.acts().busy().collect::<Vec<_>>(), ["Reopening #88"]);
+
+    let (model, cmds) = feed(model_of(pr(json!({"state": "MERGED"}))), keys("X"));
+    assert_eq!(cmds, []);
+    assert_eq!(toast(&model).0, "#88 is merged");
+    assert!(!model.offers().iter().any(|o| o.key == "X"));
+}
+
+#[test]
+fn r_offers_actions_checks_that_failed_or_were_skipped_and_starts_them_behind_a_question() {
+    let check = |name: &str, conclusion: &str, workflow: Option<&str>| json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion, "workflow": workflow});
+    let passing = model_of(pr(
+        json!({"statusCheckRollup": [check("build", "SUCCESS", Some("CI"))]}),
+    ));
+    assert!(!passing.offers().iter().any(|o| o.key == "R"));
+    let (model, cmds) = feed(passing, keys("R"));
+    assert_eq!(cmds, []);
+    assert_eq!(
+        toast(&model).0,
+        "#88 has no failed or skipped Actions check"
+    );
+
+    let entry = pr(json!({"statusCheckRollup": [
+        check("build", "SUCCESS", Some("CI")),
+        check("e2e", "SKIPPED", Some("CI")),
+        check("deploy", "FAILURE", Some("Deploy")),
+        check("ext", "FAILURE", None),
+    ]}));
+    let model = model_of(entry);
+    let offer = model
+        .offers()
+        .into_iter()
+        .find(|o| o.key == "R")
+        .expect("R");
+    assert_eq!(offer.words, "Run 2 checks again");
+    let (model, _) = feed(model, keys("R"));
+    assert!(matches!(
+        model.acts().ask(),
+        Some(Ask::Rerun { names, .. }) if names == &["e2e".to_owned(), "deploy".to_owned()]
+    ));
+    let (model, cmds) = feed(model, keys("y"));
+    assert_eq!(
+        cmds,
+        [Cmd::Run(Job::Rerun {
+            url: URL.to_owned(),
+            number: 88
+        })]
+    );
+    let reran = |ran: &[&str], refused: &[&str]| Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::Reran {
+            ran: ran.iter().map(|&r| r.to_owned()).collect(),
+            refused: refused.iter().map(|&r| r.to_owned()).collect(),
+        },
+    };
+    let (model, _) = feed(
+        model,
+        [Msg::Done(reran(
+            &["CI (whole run)", "Deploy (failed jobs)"],
+            &[],
+        ))],
+    );
+    assert_eq!(
+        toast(&model),
+        (
+            "✓ Started again on #88: CI (whole run), Deploy (failed jobs)",
+            Tone::Good
+        )
+    );
+    let (model, _) = feed(model, [Msg::Done(reran(&[], &[]))]);
+    assert_eq!(toast(&model).1, Tone::Info);
+    let (model, _) = feed(
+        model,
+        [Msg::Done(reran(
+            &["CI (whole run)"],
+            &["Deploy: Couldn't run it again: HTTP 403"],
+        ))],
+    );
+    assert_eq!(toast(&model).1, Tone::Bad);
 }

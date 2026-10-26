@@ -1,7 +1,8 @@
 //! Running what the action keys asked (`prw_core::act::Job`), each on a thread of its own so a
 //! log that takes a minute holds nothing else up: a merge (`runMerge` in the mod's
 //! `hooks/register.tsx`), a comment (`postComment`), the full view's changes (a reply, a
-//! thread resolved or reopened, an approval: `prw_core::mutate`), and the reads a Fix or
+//! thread resolved or reopened, an approval: `prw_core::mutate`), the PR closed or reopened,
+//! its failed or skipped Actions runs started again (`prw_core::rerun`), and the reads a Fix or
 //! Address prompt needs (`collectFailure`, `collectThreads`). Every call goes as the login `results.json`
 //! maps the repo's owner to, by that login's own token, and never as another.
 //!
@@ -32,9 +33,10 @@ use prw_core::merge::{
     After, MergeError, MergeRun, RETRY_MS, after_server_error, is_server_error, merge_argv,
     merge_error, merge_read_argv, merge_read_of,
 };
-use prw_core::mutate::{MUTATE_ARGV, approve_input, reply_input, resolve_input};
+use prw_core::mutate::{MUTATE_ARGV, approve_input, close_argv, reply_input, resolve_input};
 use prw_core::opened::{Got, Read, ReadDone};
 use prw_core::parse_shared;
+use prw_core::rerun::{parse_reruns, rerun_argv, rerun_query};
 use prw_core::ui::{Msg, repo_of};
 
 use crate::gh::{Clock, Gh, Ran, ms};
@@ -48,6 +50,9 @@ const UNSURE: &str =
 
 /// What it says where a resolve's or an approval's call was cut off.
 const UNSURE_CHANGE: &str = "gh api did not finish: the PR is read again to show whether it took";
+
+/// What it says where a close's or a reopen's call was cut off.
+const UNSURE_CLOSE: &str = "gh pr did not finish: the PR is read again to show whether it took";
 
 /// What runs the jobs: `gh`, the clock, gh's logins and tokens (shared by every job), and the
 /// cache.
@@ -151,6 +156,16 @@ impl<G: Gh, C: Clock> Runner<G, C> {
                 };
                 (number, outcome)
             }
+            Job::Close { number, close, .. } => {
+                let verb = if close { "close" } else { "reopen" };
+                let outcome =
+                    match self.change(&url, &close_argv(&url, close), "", verb, UNSURE_CLOSE) {
+                        Ok(login) => Outcome::Closed { close, login },
+                        Err(error) => Outcome::CloseFailed(error),
+                    };
+                (number, outcome)
+            }
+            Job::Rerun { number, .. } => (number, self.rerun(&url, number)),
             Job::Collect {
                 kind,
                 facts,
@@ -226,6 +241,49 @@ impl<G: Gh, C: Clock> Runner<G, C> {
                 error: merge_error(&text),
             },
         }
+    }
+
+    /// The head commit's runs read, and each that holds a job to run again started again
+    /// (`gh run rerun`), as the repo's login; then the PR asked again, so its checks show
+    /// queued.
+    fn rerun(&self, url: &str, number: u64) -> Outcome {
+        let repo = repo_of(url);
+        let (login, token) = self.token_for(&repo);
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => return Outcome::RerunFailed(error),
+        };
+        let pr = PrRef {
+            url: url.to_owned(),
+            repo: repo.clone(),
+            number,
+        };
+        let runs = match self
+            .graphql(&rerun_query(&pr), &token)
+            .and_then(|ran| parse_reruns(&ran.stdout, &ran.stderr))
+        {
+            Ok(runs) => runs,
+            Err(error) => return Outcome::RerunFailed(error),
+        };
+        let (mut ran, mut refused) = (Vec::new(), Vec::new());
+        for run in &runs {
+            match self
+                .gh
+                .run(&rerun_argv(&repo, run), Some(&token), ms(GH_MS))
+            {
+                Ok(done) if done.is_ok() => ran.push(run.words()),
+                Ok(done) => refused.push(format!(
+                    "{}: {}",
+                    run.workflow,
+                    prw_core::comment::refused(&said(&done), &login, "run it again")
+                )),
+                Err(_) => refused.push(format!("{}: gh run rerun did not finish", run.workflow)),
+            }
+        }
+        if !runs.is_empty() {
+            self.refresh(url);
+        }
+        Outcome::Reran { ran, refused }
     }
 
     /// A comment on the PR's conversation, its text on stdin (`comment_input`).
@@ -543,6 +601,17 @@ pub fn demo(job: Job) -> Done {
         Job::Approve { number, .. } => (
             number,
             Outcome::ApproveFailed(format!("Not approved: {NOTHING}")),
+        ),
+        Job::Close { number, close, .. } => {
+            let done = if close { "closed" } else { "reopened" };
+            (
+                number,
+                Outcome::CloseFailed(format!("Not {done}: {NOTHING}")),
+            )
+        }
+        Job::Rerun { number, .. } => (
+            number,
+            Outcome::RerunFailed(format!("Nothing started: {NOTHING}")),
         ),
         Job::Collect {
             kind: Kind::Fix,
@@ -865,6 +934,113 @@ mod tests {
             done.outcome,
             Outcome::ApproveFailed(UNSURE_CHANGE.to_owned())
         );
+    }
+
+    #[test]
+    fn x_closes_or_reopens_as_the_login_that_sees_the_repo() {
+        let dir = Dir::new("close");
+        let gh = gh();
+        gh.on(starts(&["pr", "close"]), |_| ok(""));
+        gh.on(starts(&["pr", "reopen"]), |_| {
+            failed("", "gh: Could not reopen: the branch was deleted\n")
+        });
+        let runner = runner(gh, &dir);
+        let done = runner.run(Job::Close {
+            url: URL.to_owned(),
+            number: 7,
+            close: true,
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::Closed {
+                close: true,
+                login: "hubot".to_owned()
+            }
+        );
+        let closes = calls(&runner, "pr");
+        assert_eq!(closes[0].argv, ["pr", "close", URL]);
+        assert_eq!(closes[0].token.as_deref(), Some("hubot"));
+        let done = runner.run(Job::Close {
+            url: URL.to_owned(),
+            number: 7,
+            close: false,
+        });
+        assert!(
+            matches!(&done.outcome, Outcome::CloseFailed(error) if error.starts_with("Couldn't reopen")),
+            "{:?}",
+            done.outcome
+        );
+    }
+
+    #[test]
+    fn r_reads_the_heads_runs_and_starts_each_with_a_job_to_run_again() {
+        let dir = Dir::new("rerun");
+        let gh = gh();
+        let suite = |id: i64, name: &str, conclusion: &str, jobs: &[&str]| {
+            json!({
+                "status": "COMPLETED", "conclusion": conclusion,
+                "workflowRun": {"databaseId": id, "workflow": {"name": name}},
+                "checkRuns": {"nodes": jobs.iter().map(|c| json!({"conclusion": c})).collect::<Vec<_>>()},
+            })
+        };
+        let suites = json!([
+            suite(11, "CI", "SUCCESS", &["SUCCESS", "SKIPPED"]),
+            suite(12, "Deploy", "FAILURE", &["FAILURE"]),
+            suite(13, "Lint", "SUCCESS", &["SUCCESS"]),
+            suite(14, "Docs", "FAILURE", &["FAILURE"]),
+        ]);
+        let reply = json!({"data": {"p0": {"pullRequest": {"commits": {"nodes": [{"commit": {"checkSuites": {"nodes": suites}}}]}}}}});
+        gh.on(starts(&["api", "graphql"]), move |_| ok(reply.to_string()));
+        gh.on(starts(&["run", "rerun"]), |call| {
+            if call.argv.get(2).is_some_and(|id| id == "14") {
+                failed("", "gh: HTTP 403: Must have admin rights to Repository.\n")
+            } else {
+                ok("")
+            }
+        });
+        let runner = runner(gh, &dir);
+        let done = runner.run(Job::Rerun {
+            url: URL.to_owned(),
+            number: 7,
+        });
+        let Outcome::Reran { ran, refused } = &done.outcome else {
+            panic!("{:?}", done.outcome);
+        };
+        assert_eq!(ran, &["CI (whole run)", "Deploy (failed jobs)"]);
+        assert_eq!(refused.len(), 1);
+        assert!(
+            refused[0].starts_with("Docs: Couldn't run it again"),
+            "{refused:?}"
+        );
+        let reruns = calls(&runner, "run");
+        assert_eq!(
+            reruns.iter().map(|c| c.argv.clone()).collect::<Vec<_>>(),
+            [
+                vec!["run", "rerun", "11", "--repo", "acme/app"],
+                vec!["run", "rerun", "12", "--repo", "acme/app", "--failed"],
+                vec!["run", "rerun", "14", "--repo", "acme/app", "--failed"],
+            ]
+        );
+        assert!(reruns.iter().all(|c| c.token.as_deref() == Some("hubot")));
+    }
+
+    #[test]
+    fn r_on_a_pr_it_cant_read_says_why_and_starts_nothing() {
+        let dir = Dir::new("rerun-missing");
+        let gh = gh();
+        gh.on(starts(&["api", "graphql"]), |_| {
+            ok(r#"{"data": {"p0": {"pullRequest": null}}}"#)
+        });
+        let runner = runner(gh, &dir);
+        let done = runner.run(Job::Rerun {
+            url: URL.to_owned(),
+            number: 7,
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::RerunFailed("Not found, or this gh account can't see it".to_owned())
+        );
+        assert_eq!(calls(&runner, "run"), []);
     }
 
     fn facts() -> PrFacts {

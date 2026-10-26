@@ -723,6 +723,17 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
         Some(thread) if thread.is_resolved => "reopen",
         _ => "resolve",
     };
+    // What `m` does on this PR ("merge", "auto-merge", "cancel auto"), and `X` ("close",
+    // "reopen"): as its actions list says, and left out where it offers neither.
+    let offers = model.offers();
+    let offered = |key: &str| {
+        offers
+            .iter()
+            .find(|o| o.key == key && o.look != Look::Busy)
+            .map(|o| o.short.clone())
+    };
+    let m = offered("m");
+    let close = offered("X");
     let keys = if model.opened().is_some() {
         vec![
             ("esc", "back", Key::Esc),
@@ -731,20 +742,21 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("r", "reply", char('r')),
             ("x", x, char('x')),
             ("a", "approve", char('a')),
-            ("m", "merge", char('m')),
+            ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
             ("g/G", "top/end", char('g')),
+            ("X", close.as_deref().unwrap_or_default(), char('X')),
         ]
     } else {
         vec![
             ("j/k", "move", char('j')),
             ("⏎", "open", Key::Enter),
             ("tab", "list", Key::Tab),
-            ("m", "merge", char('m')),
+            ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
@@ -753,8 +765,10 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("s", "sort", char('s')),
             ("a", "account", char('a')),
             ("h/l", h_l, char('l')),
+            ("X", close.as_deref().unwrap_or_default(), char('X')),
         ]
     };
+    let keys = keys.into_iter().filter(|(_, what, _)| !what.is_empty());
     let width = usize_of(r.width);
     let mut line = Marked::default();
     line.push(span(" ", Style::new()));
@@ -832,9 +846,11 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
         .iter()
         .copied()
         .chain([
-            ("m", "merge, after a y (m again: method)"),
+            ("m", "merge or auto-merge, after a y; m: method"),
             ("c", "comment: ⏎ posts, alt-⏎ a new line"),
             ("f", "fix, resolve or address: copy the prompt"),
+            ("R", "re-run failed or skipped checks, after a y"),
+            ("X", "close or reopen the PR, after a y"),
             ("o", "open in the browser"),
         ])
         .chain(acts.iter().copied())
@@ -2242,17 +2258,8 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
                 line.hit([span(cancel, fg(DIM))], Hit::Key(Key::Esc));
             }
         }
-        Ask::Approve {
-            url, number, login, ..
-        } => {
-            let answers = [('y', "yes"), ('n', "no")];
-            let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
-            let question = format!("Approve {} #{number}{}?", repo_of(url), as_login(login));
-            line.push(Span::raw(" "));
-            line.push(span(clip(&question, width.saturating_sub(tail)), bold(FG)));
-            for (k, w) in answers {
-                line.hit([key(&k.to_string()), what(w)], Hit::Key(Key::Char(k)));
-            }
+        Ask::Approve { .. } | Ask::Close { .. } | Ask::Rerun { .. } => {
+            yes_no(&mut line, &question_of(ask), width);
         }
         Ask::Pick { number, kinds, .. } => {
             line.push(span(format!(" Hand off #{number}:"), bold(FG)));
@@ -2269,6 +2276,45 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
         }
     }
     line.done()
+}
+
+/// What `a`, `X` and `R` ask before they run.
+fn question_of(ask: &Ask) -> String {
+    match ask {
+        Ask::Approve {
+            url, number, login, ..
+        } => format!("Approve {} #{number}{}?", repo_of(url), as_login(login)),
+        Ask::Close { url, number, close } => {
+            let verb = if *close { "Close" } else { "Reopen" };
+            format!("{verb} {} #{number}?", repo_of(url))
+        }
+        Ask::Rerun { number, names, .. } => match names.as_slice() {
+            [name] => format!("Run {name} on #{number} again?"),
+            _ => format!(
+                "Run {} checks on #{number} again: {}?",
+                names.len(),
+                names.join(", ")
+            ),
+        },
+        Ask::Merge { .. } | Ask::Comment { .. } | Ask::Pick { .. } => String::new(),
+    }
+}
+
+/// A question `y` or `n` answers, clipped to leave the answers room (a click on one presses it).
+fn yes_no(line: &mut Marked, question: &str, width: usize) {
+    let answers = [('y', "yes"), ('n', "no")];
+    let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
+    line.push(Span::raw(" "));
+    line.push(span(clip(question, width.saturating_sub(tail)), bold(FG)));
+    for (k, w) in answers {
+        line.hit(
+            [
+                span(format!("  {k}"), fg(ACCENT)),
+                span(format!(" {w}"), fg(DIM)),
+            ],
+            Hit::Key(Key::Char(k)),
+        );
+    }
 }
 
 /// The prompt last copied, the whole screen, to read, or to select and copy by hand where

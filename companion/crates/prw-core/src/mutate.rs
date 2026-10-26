@@ -1,7 +1,9 @@
 //! What the full view changes on GitHub: a reply to a review thread (`r`), the thread
-//! resolved or reopened (`x`), and an approval (`a`). Each is one GraphQL mutation, sent as
-//! the request's JSON body on gh's stdin ([`MUTATE_ARGV`]): a reply's text never goes in
-//! argv, so a text starting with `-` or `@`, or holding newlines, posts as typed.
+//! resolved or reopened (`x`), and an approval (`a`); and, from anywhere, the PR closed or
+//! reopened (`X`, `gh pr close` or `gh pr reopen`: [`close_argv`]). The rest are each one
+//! GraphQL mutation, sent as the request's JSON body on gh's stdin ([`MUTATE_ARGV`]): a
+//! reply's text never goes in argv, so a text starting with `-` or `@`, or holding newlines,
+//! posts as typed.
 
 use serde_json::json;
 
@@ -38,6 +40,13 @@ pub fn resolve_input(thread: &str, resolve: bool) -> String {
 #[must_use]
 pub fn approve_input(pr: &str) -> String {
     json!({ "query": APPROVE, "variables": { "pr": pr } }).to_string()
+}
+
+/// `gh pr close` (or `gh pr reopen`, where `close` is false) of the PR at `url`.
+#[must_use]
+pub fn close_argv(url: &str, close: bool) -> Vec<String> {
+    let verb = if close { "close" } else { "reopen" };
+    ["pr", verb, url].map(str::to_owned).to_vec()
 }
 
 #[cfg(test)]
@@ -79,6 +88,13 @@ mod tests {
                 .is_some_and(|q| q.contains("event: APPROVE"))
         );
         assert_eq!(input["variables"], json!({ "pr": "PR_kw" }));
+    }
+
+    #[test]
+    fn x_closes_or_reopens_the_pr_it_names() {
+        let url = "https://github.com/acme/app/pull/7";
+        assert_eq!(close_argv(url, true), ["pr", "close", url]);
+        assert_eq!(close_argv(url, false), ["pr", "reopen", url]);
     }
 
     proptest! {

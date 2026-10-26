@@ -986,3 +986,18 @@ fn a_row_wears_its_repos_chip_and_its_dates_and_s_orders_the_rows() {
         &["billing", "opened 20h ago"],
     );
 }
+
+#[test]
+fn the_key_bar_says_what_m_does_on_the_pr_and_leaves_it_out_where_it_does_nothing() {
+    let bar = |n| {
+        let text = screen(&feed(demo(160, 30), to_row(n)), 160, 30);
+        text.lines().last().unwrap_or_default().to_owned()
+    };
+    // #409, ready: merge.
+    assert!(bar(5).contains("m merge  "), "{}", bar(5));
+    // #412, blocked on checks, where auto-merge may be turned on.
+    assert!(bar(7).contains("m auto-merge"), "{}", bar(7));
+    // #88, blocked, and auto-merge isn't allowed: nothing for m to do.
+    assert!(!bar(1).contains(" m "), "{}", bar(1));
+    assert!(bar(1).contains("X close"), "{}", bar(1));
+}

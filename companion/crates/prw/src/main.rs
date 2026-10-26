@@ -98,8 +98,10 @@ Options:
   -V, --version      Print the version
 
 Keys: j/k move, tab next list, h/l panes or lists, g/G first/last, ? help, q quit.
-On the selected PR: m merge (asks first), c comment, f hand off to an agent (copies
-the prompt), o open in the browser, a switch its gh login, v show the prompt last copied.
+On the selected PR: m merge or auto-merge (asks first), c comment, f hand off to an
+agent (copies the prompt), R re-run its failed or skipped checks, X close or reopen it
+(both ask first), o open in the browser, a switch its gh login, v show the prompt last
+copied.
 A click picks a list or a PR, or presses the key it shows (a hint, an action, an
 answer); the wheel moves in the pane under it. While v shows, the mouse selects text.
 ";
