@@ -198,6 +198,8 @@ function fakeHost(
   const posting: { reply: ((body: unknown) => RunReply | Promise<RunReply>) | null } = { reply: null }
   const moves = { done: [] as [string, string][], fail: 0 }
   const reads = Object.assign([] as string[][], { fail: 0 })
+  // The card telling of prw, dismissed long ago, unless a test says otherwise.
+  if (!files.has(COMPANION)) files.set(COMPANION, { text: JSON.stringify({ state: 'dismissed' }), mtimeMs: 0 })
   on('env.get', ($, e) => ({ value: { HOME: '/home/me', ...env }[e.name] }))
   const own = (path: string) => (path.endsWith('/.claude-plugin/plugin.json') ? files.get('plugin.json') : undefined)
   on('fs.read', ($, e) => ({ value: (files.get(e.path) ?? own(e.path))?.text ?? '' }))
@@ -536,6 +538,7 @@ test("one session's round fetches every live session's PRs in a single query", a
 })
 
 const CACHE = '/home/me/.cache/pr-watch'
+const COMPANION = `${CACHE}/companion.json`
 
 // A session started in `cwd` (its project root `root`), watching #12; the clock past its first tick.
 async function startSession($: Parameters<TestBody>[0], on: On, files: Map<string, { text: string; mtimeMs: number }>, cwd = '/work/app', root = cwd) {
@@ -937,6 +940,60 @@ test('turning the notice off in /config takes the note away at once, and stops t
   await clock.advance(60_000)
   expect(asked.length).toBeGreaterThan(0)
   expect(asked.some(asksLatest)).toBe(false)
+})
+
+// No companion.json yet: nobody has dismissed the card, nor run prw.
+const unseen = () => new Map([[COMPANION, { text: '', mtimeMs: 0 }]])
+
+test('the card telling of prw stays until dismissed, then is gone in every session for good', async ($, on) => {
+  const { files, clock } = await newerSession($, on, GH, [FAILING], [], unseen())
+  await clock.advance(10_500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /all your PRs in one terminal/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Link' })).find(link => link.props.label === 'Learn more ↗')?.props.href).toBe('https://elirazked.github.io/claude-code-pr-watch/prw.html')
+  await ui.unmount()
+
+  // Round after round, it stays.
+  await clock.advance(120_000)
+  const later = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await later.find({ text: /all your PRs in one terminal/ })).toBeDefined()
+  await later.press({ key: 'companion-dismiss' })
+  await later.unmount()
+  expect(JSON.parse(files.get(COMPANION)?.text ?? '{}')).toMatchObject({ state: 'dismissed' })
+  await clock.advance(60_000)
+  const gone = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await gone.find({ text: /all your PRs in one terminal/ })).toBeUndefined()
+  expect(await gone.find({ text: /CI FAILED/ })).toBeDefined()
+  await gone.unmount()
+})
+
+test('a dismissal in another session takes the card away at the next round', async ($, on) => {
+  const { files, clock } = await newerSession($, on, GH, [FAILING], [], unseen())
+  await clock.advance(10_500)
+  files.set(COMPANION, { text: JSON.stringify({ state: 'dismissed', at: clock.now() }), mtimeMs: clock.now() })
+  await clock.advance(10_500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /all your PRs in one terminal/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('where prw has run, the card never shows, and companion.json says why', async ($, on) => {
+  const files = unseen()
+  files.set(`${CACHE}/sessions/prw-7f3a9c.json`, { text: JSON.stringify({ urls: [], writer: 'prw' }), mtimeMs: 0 })
+  const { clock } = await newerSession($, on, GH, [FAILING], [], files)
+  await clock.advance(10_500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /all your PRs in one terminal/ })).toBeUndefined()
+  await ui.unmount()
+  expect(JSON.parse(files.get(COMPANION)?.text ?? '{}')).toEqual({ state: 'seen' })
+})
+
+test('with the notice off, the card telling of prw never shows', { options: { update_notice: false } }, async ($, on) => {
+  const { clock } = await newerSession($, on, GH, [FAILING], [], unseen())
+  await clock.advance(10_500)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ text: /all your PRs in one terminal/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 const READY = 'https://github.com/acme/app/pull/21'
@@ -2757,13 +2814,18 @@ function lines(node: unknown): string[] {
   return [kids.map(kid => kid.join('')).join(el.type === 'Box' ? ' '.repeat(Number(el.props?.gap ?? 0)) : '')]
 }
 
-type BandHost = { fixtures?: Record<string, unknown>; beneath?: RenderElement; fill?: () => { isFilled: boolean } }
+type BandHost = {
+  fixtures?: Record<string, unknown>
+  beneath?: RenderElement
+  fill?: () => { isFilled: boolean }
+  files?: Map<string, { text: string; mtimeMs: number }>
+}
 
 // A session watching `urls` (by the watch tool) on `fixtures`, over a band the engine leaves
 // empty unless another plugin draws `beneath`, and a prompt box that takes drafts while `fill`
 // says so; `opens` is each pane open since, with whether it asked for the keys, and `fills` the
 // drafts.
-async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly string[], { fixtures = GH, beneath, fill = () => ({ isFilled: true }) }: BandHost = {}) {
+async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly string[], { fixtures = GH, beneath, fill = () => ({ isFilled: true }), files }: BandHost = {}) {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   const opens: { id: string; focus?: true }[] = []
   const fills: string[] = []
@@ -2778,7 +2840,7 @@ async function bandSession($: Parameters<TestBody>[0], on: On, urls: readonly st
   on('ui.toast', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.blit', ($, e) => (blits.push({ requestId: e.requestId, key: e.key }), { value: {} }))
-  const host = fakeHost(on, clock, fixtures)
+  const host = fakeHost(on, clock, fixtures, files)
   on('command.register', () => ({ value: { command: 'pr-watch' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
   on('session.start', () => ({ cwd: '/work' }))
@@ -2816,6 +2878,32 @@ test('the band: a line per PR, most urgent first, then its buttons', IN_BAND, as
   const desk = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(lines(await desk.drawn())[1]).toBe('◌ #12 Retry uploads with exponential backoff · CI running · 1/3')
   await desk.unmount()
+})
+
+test('the band gives a row to the line telling of prw, and ✕ (p) dismisses it', IN_BAND, async ($, on) => {
+  const { files, clock } = await bandSession($, on, [RUNNING, FAILING, MERGED], { files: unseen() })
+  await clock.advance(10_500)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', requestId: 'band' })
+  // Five rows at most: the line takes the fourth, the actions the last.
+  expect(lines(await ui.drawn())).toEqual([
+    '✗ #13 Retry uploads with exponential backoff · 1 check failing',
+    '⠋ #12 Retry uploads with exponential backoff · CI running · 1/3',
+    '✓ #7 Retry uploads with exponential backoff · merged',
+    // (A Link draws no text here.)
+    '✦ New: prw, all your PRs in one terminal    p: ✕',
+    'o: Open pane  r: Refresh  f: Fix #13 with Claude',
+  ])
+  expect((await ui.findAll({ type: 'Link' })).find(link => link.props.label === 'Learn more ↗')?.props.href).toMatch(/prw\.html$/)
+  expect((await ui.find({ key: 'band-companion-dismiss' }))?.props).toMatchObject({ label: '✕', hotkey: 'p' })
+  // No two of the band's buttons share a key.
+  const keys = (await ui.findAll({ type: 'Button' })).map(button => button.props.hotkey).filter(key => key !== undefined)
+  expect(new Set(keys).size).toBe(keys.length)
+  await ui.press({ key: 'band-companion-dismiss' })
+  await ui.unmount()
+  expect(JSON.parse(files.get(COMPANION)?.text ?? '{}')).toMatchObject({ state: 'dismissed' })
+  const after = await $.ui.mount({ ...BAND, surface: 'terminal', requestId: 'band' })
+  expect(lines(await after.drawn()).join('\n')).not.toMatch(/prw/)
+  await after.unmount()
 })
 
 test('a narrow band cuts titles to fit and never wraps a line', IN_BAND, async ($, on) => {

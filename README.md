@@ -55,7 +55,7 @@ nix run github:ElirazKed/claude-code-pr-watch#prw
 cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw
 ```
 
-The [releases](https://github.com/ElirazKed/claude-code-pr-watch/releases) page has each build as an archive, with its checksum and a GitHub attestation (`gh attestation verify <file> --repo ElirazKed/claude-code-pr-watch`). `prw --cache companion/demo --demo`, from a clone, shows the demo above. Everything else is in [companion/README.md](companion/README.md).
+The [releases](https://github.com/ElirazKed/claude-code-pr-watch/releases) page has each build as an archive, with its checksum and a GitHub attestation (`gh attestation verify <file> --repo ElirazKed/claude-code-pr-watch`). `prw --cache companion/demo --demo`, from a clone, shows the demo above. More on [prw's page](https://elirazked.github.io/claude-code-pr-watch/prw.html); everything else is in [companion/README.md](companion/README.md).
 
 ## What it watches
 
@@ -237,7 +237,8 @@ Claude Code doesn't say when a third-party marketplace has a newer version, and 
 
 - **How it checks:** every 2 hours at most, the poll's first query also reads this repo's `.claude-plugin/plugin.json` on GitHub, so it costs no request of its own. It rides the PR poll, so it checks only while some session watches an open PR. What it found is kept in `~/.cache/pr-watch/results.json` for every session, and the version last toasted in `notice.json` beside it. Only plain `x.y.z` versions are compared, and a check GitHub can't answer just says nothing.
 - **What it says to do:** installed from a marketplace, `claude plugin update pr-watch@<marketplace>` (or `/plugin` → Installed → pr-watch → Update now), then a restart. Loaded from a folder (`--plugin-dir`, `CLAUDE_CODE_PLUGIN_DIRS`), `git pull` in that folder.
-- **Turning it off:** `update_notice` in `/config`. Off, the poll doesn't ask and the pane says nothing.
+- **prw, the companion app:** a card under the PRs (in the band, a line above its buttons) tells of [prw](https://elirazked.github.io/claude-code-pr-watch/prw.html). It stays until you press Dismiss (in the band, `✕` or `p`), and then it's gone in every session on the machine for good. Where prw has run, it never shows. `companion.json` beside `notice.json` keeps why it's gone.
+- **Turning it off:** `update_notice` in `/config`. Off, the poll doesn't ask and the pane says nothing, prw's card included.
 - **Auto-update instead:** `/plugin` → Marketplaces → claude-code-pr-watch → Enable auto-update, and Claude Code updates it for you.
 
 ## Develop

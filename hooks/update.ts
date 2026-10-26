@@ -76,3 +76,23 @@ export function noticeLines(version: string, how: string, columns: number): stri
 
   return cells(line) <= columns ? [line] : [headOf(version), how]
 }
+
+// Telling a mod user about prw, the companion app: a card in the pane (a line in the band)
+// that stays until it is dismissed, on every session of the machine. companion.json in the
+// cache keeps why it is gone (dismissed, or prw seen running), so it never comes back.
+export const PRW_URL = 'https://elirazked.github.io/claude-code-pr-watch/prw.html'
+export const PRW_PILL = '✦ NEW'
+export const PRW_TEXT = "all your PRs in one terminal. Yours, your searches, your agents'. Review, reply, resolve and merge without opening GitHub."
+export const PRW_LINE = 'New: prw, all your PRs in one terminal'
+
+export type CompanionState = 'dismissed' | 'seen'
+
+// What companion.json says, from its parsed text; null for none (or a file it can't read).
+export function companionIn(file: unknown): CompanionState | null {
+  const state = (file as { state?: unknown } | null | undefined)?.state
+
+  return state === 'dismissed' || state === 'seen' ? state : null
+}
+
+// Whether prw has been running here: it writes its session files as `prw-<id>…json`.
+export const isPrwIn = (names: readonly string[]) => names.some(name => name.startsWith('prw-') && name.endsWith('.json'))

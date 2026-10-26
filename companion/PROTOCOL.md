@@ -14,7 +14,7 @@ In code: the mod's side lives in `hooks/register.tsx` (the "One poller for the w
 | `lease.json` | Whose turn it is to poll | The session taking or giving back the turn | Around each round |
 | `results.json` | What GitHub said about every watched PR | The lease holder; any session fetching a PR at once | Each round, each watch / Refresh / merge / comment |
 | `results.json.<owner>.tmp` | A `results.json` on its way in | Its owner | Just before each `results.json` write |
-| `notice.json`, `errors.log` | The mod's own: the update toast it showed, failed calls | The mod | Not part of the protocol: don't write them |
+| `notice.json`, `companion.json`, `errors.log` | The mod's own: the update toast it showed, why the card telling of prw is gone, failed calls | The mod | Not part of the protocol: don't write them |
 | `companion/watches/<hash>.json` | One PR one agent's session watches through `prw watch` or `prw mcp` | `prw` | When watched; deleted when unwatched |
 | `prw-errors.log` | `prw`'s own failed calls, in the mod's `errors.log` format (`logLine`, last `LOG_LINES`) | `prw` | Not part of the protocol |
 

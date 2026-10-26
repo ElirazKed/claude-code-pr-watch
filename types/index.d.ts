@@ -148,6 +148,9 @@ declare module 'claude-code' {
       retrying: Record<string, Busy>
       // Null while no newer version is known, or the notice is off.
       newer: Newer | null
+      // Whether the card telling of prw shows: not once dismissed, or prw seen running, or the
+      // notice off (update.ts).
+      companion: boolean
       // GitHub's budget per login, and a hold, as the shared results last said.
       limits: Limits
       // Whether the gh meter's explanation is open (its `?`).

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>prw · All your PRs in one terminal</title>
+<meta name="description" content="prw is a PR manager for the terminal: your own open PRs, your saved GitHub searches and every PR your agents touch, with a full PR view to reply, resolve, approve and merge in.">
+<link rel="canonical" href="https://elirazked.github.io/claude-code-pr-watch/prw.html">
+<meta property="og:type" content="website">
+<meta property="og:title" content="prw · All your PRs in one terminal">
+<meta property="og:description" content="A PR manager for the terminal: your PRs, your searches and your agents' PRs, with a full PR view to reply, resolve, approve and merge in.">
+<meta property="og:url" content="https://elirazked.github.io/claude-code-pr-watch/prw.html">
+<meta property="og:image" content="https://elirazked.github.io/claude-code-pr-watch/prw.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://elirazked.github.io/claude-code-pr-watch/prw.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;family=Space+Grotesk:wght@500;700&amp;display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0D0E14;--band:#10121B;--card:#141622;--line:#22253A;--edge:#2A2E42;--fg:#ECEAF4;--body:#C9C7DA;--dim:#A9A7BD;--faint:#8A88A0;--teal:#94E2D5;--lav:#CBA6F7;--mono:'JetBrains Mono',Menlo,'DejaVu Sans Mono',Consolas,monospace;--head:'Space Grotesk',sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:17px;line-height:1.6}
+a{color:var(--lav)}a:hover{color:#E2CCFF}
+.wrap{max-width:1200px;margin:0 auto;padding-left:max(24px,env(safe-area-inset-left,0px));padding-right:max(24px,env(safe-area-inset-right,0px))}
+@media (max-width:640px){.wrap{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}}
+nav{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 24px;padding-block:18px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--fg);font-family:var(--mono);font-weight:700;font-size:18px}
+.links{display:flex;flex-wrap:wrap;align-items:center;gap:6px 22px;font-size:15px}
+.links a{color:var(--body);text-decoration:none}.links a:hover{color:var(--fg)}
+.gh{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border:1px solid #34384F;border-radius:8px;color:var(--fg)!important}
+section{border-top:1px solid var(--line)}
+.band{background:var(--band)}
+.eyebrow{margin:0;font-family:var(--mono);font-size:14px;letter-spacing:.04em;color:var(--teal)}
+h1,h2,h3{font-family:var(--head);font-weight:700;margin:0;text-wrap:balance}
+h1{font-size:clamp(44px,6.4vw,80px);line-height:1;letter-spacing:-.03em}
+h2{font-size:clamp(30px,3.8vw,44px);line-height:1.08;letter-spacing:-.02em}
+h3{font-size:20px;line-height:1.25}
+p{margin:0}
+.lead{font-size:19px;color:var(--body);max-width:34em}
+.muted{color:var(--body)}
+.code{position:relative;display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--edge);border-radius:10px;padding:12px 12px 12px 16px;font-family:var(--mono);font-size:14px;color:var(--fg)}
+.code code{flex:1;min-width:0;overflow-x:auto;white-space:nowrap}
+.code .p{color:var(--faint)}
+.copy{flex:none;font:inherit;font-size:13px;color:var(--body);background:transparent;border:1px solid #34384F;border-radius:7px;padding:4px 10px;cursor:pointer}
+.copy:hover{color:var(--fg);border-color:#4A4F6A}
+.btn{display:inline-flex;align-items:center;min-height:44px;padding:0 22px;border-radius:10px;font-weight:600;text-decoration:none}
+.btn.primary{background:var(--teal);color:#0F1A19}.btn.primary:hover{background:#B5EEE5;color:#0F1A19}
+.btn.ghost{border:1px solid #34384F;color:var(--fg);font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;padding:5px 12px;border-radius:999px;font-family:var(--mono);font-size:13px;font-weight:700;letter-spacing:.08em;color:#0F1A19;background:linear-gradient(90deg,var(--teal),var(--lav))}
+.hero{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:48px;align-items:center;padding-block:72px 88px}
+@media (max-width:960px){.hero{grid-template-columns:minmax(0,1fr)}}
+.shot{margin:0;position:relative}
+.shot::before{content:"";position:absolute;inset:8% 6%;background:radial-gradient(closest-side,rgba(148,226,213,.22),transparent);filter:blur(40px);z-index:0}
+.shot img{position:relative;z-index:1;width:100%;height:auto;display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:16px}
+.feat{background:var(--card);border:1px solid #262A3E;border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.feat .k{font-family:var(--mono);font-size:13px;color:var(--teal)}
+.feat p{color:var(--body);font-size:16px}
+kbd{font-family:var(--mono);font-size:.85em;padding:1px 6px;border:1px solid #3A3F58;border-bottom-width:2px;border-radius:5px;background:#1A1D2B;color:var(--fg)}
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:10px 28px;font-size:15px;color:var(--body)}
+.keys div{display:flex;gap:10px;align-items:baseline}
+.keys kbd{flex:none}
+.split{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:40px}
+.stack{display:flex;flex-direction:column;gap:14px;min-width:0}
+footer .wrap{padding-block:32px 48px;display:flex;flex-wrap:wrap;gap:12px 32px;justify-content:space-between;color:var(--dim);font-size:15px}
+</style>
+</head>
+<body>
+
+<header>
+<nav class="wrap" aria-label="Main">
+<a class="brand" href="./">
+<svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#CBA6F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><circle cx="18" cy="18" r="2.5"></circle><path d="M6 8.5v7"></path><path d="M18 15.5V10a3 3 0 0 0-3-3h-4"></path><path d="M13 4.5 10.5 7 13 9.5"></path></svg>
+pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="color:var(--teal)">prw</span>
+</a>
+<div class="links">
+<a href="#what">What it does</a>
+<a href="#keys">Keys</a>
+<a href="#install">Install</a>
+<a href="./">The Claude Code mod</a>
+<a class="gh" href="https://github.com/ElirazKed/claude-code-pr-watch">GitHub</a>
+</div>
+</nav>
+</header>
+
+<!-- Hero -->
+<section style="border-top-color:transparent">
+<div class="wrap hero">
+<div class="stack" style="gap:24px">
+<span class="pill">✦ INTRODUCING · prw 1.0</span>
+<h1>All your PRs, in one terminal.</h1>
+<p class="lead"><strong style="color:var(--fg)">prw</strong> is a PR manager for the terminal. Your own open PRs, the searches you live in, and every PR your agents touch, sorted by what needs you. Open one full size to read it, reply, resolve, approve and merge, without opening GitHub.</p>
+<div class="stack" style="gap:10px;max-width:600px">
+<div class="code"><code><span class="p">$</span> curl -LsSf https://github.com/ElirazKed/claude-code-pr-watch/releases/latest/download/prw-installer.sh | sh</code><button class="copy" type="button" data-copy>Copy</button></div>
+<p style="font-size:14px;color:var(--dim)">macOS and Linux, Intel and ARM. Needs the <a href="https://cli.github.com">GitHub CLI</a> logged in. Then run <code style="font-family:var(--mono);color:var(--fg)">prw</code>.</p>
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:12px">
+<a class="btn primary" href="#install">Install prw</a>
+<a class="btn ghost" href="#what">What it does</a>
+</div>
+</div>
+<figure class="shot">
+<img src="prw.png" width="1428" height="778" alt="prw on its demo cache: lists and sessions on the left, every watched PR with tinted repo chips and opened and updated ages in the middle, the selected PR's card with its checks on the right">
+</figure>
+</div>
+</section>
+
+<!-- What it does -->
+<section id="what" class="band">
+<div class="wrap stack" style="padding-block:88px;gap:40px">
+<div class="stack" style="max-width:780px">
+<p class="eyebrow">What it does</p>
+<h2>Every PR you care about, and everything you'd open GitHub for.</h2>
+<p class="muted">One screen for the PRs you wrote, the ones waiting on your review and the ones your agents opened, each worked out to the state that matters: conflicts, failing CI, changes asked for, ready to merge.</p>
+</div>
+<div class="grid">
+<div class="feat"><span class="k">My PRs · searches · sessions</span><h3>All your PRs in one place</h3><p>Every open PR each of your gh logins wrote, a list for each GitHub search you save (review requests, a team's repos), and one per agent session: Claude through the mod, Codex and others through <code>prw mcp</code> or <code>prw watch</code>.</p></div>
+<div class="feat"><span class="k">s · S</span><h3>Sorted by what needs you</h3><p>Most urgent first: conflicts, then failing CI, then reviews. Or by repo, oldest first, or quietest first. Each repo has a colour of its own, and every PR says when it opened and when it last moved.</p></div>
+<div class="feat"><span class="k">Enter</span><h3>The whole PR, full size</h3><p>The conversation in the order it happened, review threads with the code they're on, checks with the end of each failed job's log, and the changed files. Markdown drawn as GitHub draws it.</p></div>
+<div class="feat"><span class="k">r · x · a · c · m</span><h3>Act without opening GitHub</h3><p>Reply to a thread, resolve it or reopen it, approve, comment, and merge in the repo's method, or turn on auto-merge while checks run. It asks before a merge or an approval.</p></div>
+<div class="feat"><span class="k">f</span><h3>Hand it to your agent</h3><p>Fix (failed checks, with their logs), Resolve (conflicts with the base) or Address (the open review threads): the prompt is copied for the agent that runs the PR.</p></div>
+<div class="feat"><span class="k">a · gh meter</span><h3>Every gh login, every budget</h3><p>Each PR goes as the login that can see its repo, with that login's own token. A meter shows what's left of each login's GitHub budget, and with the mod running, one poll serves both, so no PR is asked for twice.</p></div>
+</div>
+</div>
+</section>
+
+<!-- Keys -->
+<section id="keys">
+<div class="wrap stack" style="padding-block:88px;gap:32px">
+<div class="stack" style="max-width:780px">
+<p class="eyebrow">Keys, and the mouse</p>
+<h2>Built for the keyboard.</h2>
+<p class="muted">Every action is one key, shown on the bottom row. A click picks a list or a PR, a second one opens it, and the wheel scrolls the pane under it.</p>
+</div>
+<div class="keys">
+<div><kbd>j</kbd><kbd>k</kbd> the next or previous PR</div>
+<div><kbd>Enter</kbd> open it full size</div>
+<div><kbd>Tab</kbd> the next list</div>
+<div><kbd>s</kbd> sort, <kbd>S</kbd> turn it around</div>
+<div><kbd>m</kbd> merge, after a <kbd>y</kbd></div>
+<div><kbd>c</kbd> comment</div>
+<div><kbd>r</kbd> reply to a thread</div>
+<div><kbd>x</kbd> resolve it, or reopen it</div>
+<div><kbd>a</kbd> approve (full view)</div>
+<div><kbd>f</kbd> hand it off to your agent</div>
+<div><kbd>o</kbd> open it in the browser</div>
+<div><kbd>?</kbd> every key</div>
+</div>
+</div>
+</section>
+
+<!-- Install -->
+<section id="install" class="band">
+<div class="wrap stack" style="padding-block:88px;gap:36px">
+<div class="stack" style="max-width:780px">
+<p class="eyebrow">Install</p>
+<h2>Running in a minute.</h2>
+<p class="muted">prw uses the <a href="https://cli.github.com">GitHub CLI</a> for everything, so log it in first (<code style="font-family:var(--mono)">gh auth login</code>). If gh is missing or logged out, prw tells you which.</p>
+</div>
+<div class="split">
+<div class="stack">
+<h3>The latest release</h3>
+<p class="muted">macOS and Linux (static), Intel and ARM, into <code style="font-family:var(--mono)">~/.local/bin</code>, or <code style="font-family:var(--mono)">$XDG_BIN_HOME</code> where that's set.</p>
+<div class="code"><code><span class="p">$</span> curl -LsSf https://github.com/ElirazKed/claude-code-pr-watch/releases/latest/download/prw-installer.sh | sh</code><button class="copy" type="button" data-copy>Copy</button></div>
+<p class="muted" style="font-size:15px">Every <a href="https://github.com/ElirazKed/claude-code-pr-watch/releases">release</a> also has its archives, with checksums and a GitHub attestation: <code style="font-family:var(--mono)">gh attestation verify &lt;file&gt; --repo ElirazKed/claude-code-pr-watch</code>.</p>
+</div>
+<div class="stack">
+<h3>Or with nix or cargo</h3>
+<p class="muted">Built from source, Rust 1.88 or newer for cargo.</p>
+<div class="code"><code><span class="p">$</span> nix run github:ElirazKed/claude-code-pr-watch#prw</code><button class="copy" type="button" data-copy>Copy</button></div>
+<div class="code"><code><span class="p">$</span> cargo install --locked --git https://github.com/ElirazKed/claude-code-pr-watch prw</code><button class="copy" type="button" data-copy>Copy</button></div>
+</div>
+</div>
+<div class="feat" style="flex-direction:row;flex-wrap:wrap;align-items:center;gap:16px 28px">
+<div class="stack" style="flex:1 1 420px;gap:6px"><h3>Using Claude Code?</h3><p>The <a href="./">pr-watch mod</a> keeps a live pane of the PRs a session touches, right beside the conversation. prw and the mod share one poll, and prw lists every Claude session's PRs on its own.</p></div>
+<a class="btn ghost" href="./">Meet the mod</a>
+</div>
+</div>
+</section>
+
+<footer>
+<div class="wrap">
+<span><span style="font-family:var(--mono);color:var(--fg);font-weight:700">prw</span> · part of <a href="./">pr-watch</a> · MIT licensed</span>
+<span style="display:flex;flex-wrap:wrap;gap:20px"><a href="https://github.com/ElirazKed/claude-code-pr-watch/blob/main/companion/README.md">prw's README</a><a href="https://github.com/ElirazKed/claude-code-pr-watch/releases">Releases</a><a href="https://github.com/ElirazKed/claude-code-pr-watch/issues">Report an issue</a></span>
+</div>
+</footer>
+
+<script>
+document.querySelectorAll('[data-copy]').forEach(button => {
+  button.addEventListener('click', async () => {
+    const text = button.previousElementSibling.textContent.replace(/^\$\s*/, '')
+    try {
+      await navigator.clipboard.writeText(text)
+      button.textContent = 'Copied'
+    } catch {
+      const range = document.createRange()
+      range.selectNodeContents(button.previousElementSibling)
+      getSelection().removeAllRanges()
+      getSelection().addRange(range)
+      button.textContent = 'Selected'
+    }
+    setTimeout(() => (button.textContent = 'Copy'), 1600)
+  })
+})
+</script>
+</body>
+</html>
