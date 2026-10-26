@@ -21,8 +21,8 @@ mod markdown;
 use markdown::{first_words, markdown};
 
 use super::{
-    Ctx, Hits, Marked, cells, check_look, clip, filled, fit, pill, row_of, span, spinner, usize_of,
-    wrap,
+    Ctx, Hits, Marked, cells, clip, filled, fit, is_skipped, look_of, pill, row_of, span, spinner,
+    usize_of, wrap,
 };
 use crate::theme::{ACCENT, BLUE, BODY, CODE, DIM, FG, GREEN, PEACH, RED, SEL, YELLOW, bold, fg};
 
@@ -560,7 +560,8 @@ fn check_item(
     now: i64,
 ) -> Vec<Line<'static>> {
     let progress = progress_of(check);
-    let (glyph, colour, word) = check_look(progress);
+    let skipped = is_skipped(check);
+    let (glyph, colour, word) = look_of(check);
     let name = check_name(check);
     let label = match &check.workflow {
         Some(workflow) if *workflow != name => format!("{workflow} / {name}"),
@@ -574,6 +575,7 @@ fn check_item(
     let ended = check.completed_at.as_deref().and_then(parse_iso);
     let when = match (progress, started, ended) {
         (Progress::Running, Some(from), _) => format!("running {}", took(now - from)),
+        _ if skipped => word.to_owned(),
         (Progress::Passed | Progress::Failed, Some(from), Some(to)) => took(to - from),
         _ => word.to_owned(),
     };
@@ -588,7 +590,7 @@ fn check_item(
         span(fit(&label, room), name_style),
         span(
             format!(" {when}"),
-            fg(if progress == Progress::Passed {
+            fg(if progress == Progress::Passed && !skipped {
                 DIM
             } else {
                 colour

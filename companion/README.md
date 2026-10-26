@@ -231,7 +231,7 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `m`                  | merge the PR, or turn auto-merge on (or off) where it waits on checks or review, after a `y` (`m` again: the next method); the bottom row says which |
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
-| `R`                  | run its failed or skipped GitHub Actions checks again, after a `y`: a run with a failed job gets its failed jobs (and those waiting on them), one with only skipped jobs runs again whole. A job its own `if:` skipped skips again |
+| `R`                  | run its failed or skipped GitHub Actions checks again, after a `y`: a run with a failed job gets its failed jobs (and those waiting on them), one with only skipped jobs runs again whole. A job its own `if:` skipped skips again. In the full view's Checks tab, `R` on a failed or skipped check starts that job alone (with the jobs that wait on it), as GitHub's Re-run job does: the way to start a job its `if:` keeps for a later attempt (`github.run_attempt > 1`). The card and the Checks tab show a skipped check as `⊘ skipped` |
 | `X`                  | close the PR, or reopen a closed one, after a `y`            |
 | `o`                  | open it in the browser                                       |
 | `s`, `S`             | order the lists: most urgent first, by repo, oldest first, quietest first; `S` turns the order around |

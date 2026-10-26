@@ -218,12 +218,17 @@ pub fn timeline(full: &Full) -> Vec<Item> {
         .collect()
 }
 
-/// The checks as the Checks tab lists them: the latest run of each, worst first, in rollup
-/// order within each kind.
+/// The checks as the Checks tab lists them: the latest run of each, worst first (a skipped
+/// one before those that passed, as the card lists them), in rollup order within each kind.
 #[must_use]
 pub fn checks_in_order(items: &[CheckItem]) -> Vec<&CheckItem> {
     let mut checks = latest_runs(items);
-    checks.sort_by_key(|item| progress_of(item));
+    checks.sort_by_key(|item| {
+        (
+            progress_of(item),
+            item.conclusion != Some(crate::gh::Conclusion::Skipped),
+        )
+    });
     checks
 }
 
@@ -252,6 +257,27 @@ pub fn window(heights: &[usize], selected: usize, room: usize) -> usize {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn the_checks_tab_lists_a_skipped_check_before_those_that_passed() {
+        let check = |name: &str, conclusion: &str| -> CheckItem {
+            serde_json::from_value(serde_json::json!({
+                "__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion,
+            }))
+            .expect("a check")
+        };
+        let items = [
+            check("lint", "SUCCESS"),
+            check("e2e", "SKIPPED"),
+            check("build", "FAILURE"),
+            check("types", "SUCCESS"),
+        ];
+        let names: Vec<_> = checks_in_order(&items)
+            .into_iter()
+            .filter_map(|c| c.name.as_deref())
+            .collect();
+        assert_eq!(names, ["build", "e2e", "lint", "types"]);
+    }
 
     fn pr() -> PrRef {
         PrRef {

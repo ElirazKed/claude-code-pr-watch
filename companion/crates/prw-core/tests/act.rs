@@ -1049,7 +1049,8 @@ fn r_offers_actions_checks_that_failed_or_were_skipped_and_starts_them_behind_a_
         cmds,
         [Cmd::Run(Job::Rerun {
             url: URL.to_owned(),
-            number: 88
+            number: 88,
+            job: None
         })]
     );
     let reran = |ran: &[&str], refused: &[&str]| Done {
@@ -1084,4 +1085,97 @@ fn r_offers_actions_checks_that_failed_or_were_skipped_and_starts_them_behind_a_
         ))],
     );
     assert_eq!(toast(&model).1, Tone::Bad);
+}
+
+#[test]
+fn r_on_a_check_selected_in_the_full_view_starts_that_job_alone() {
+    let check = |id: i64, name: &str, conclusion: &str, workflow: &str| -> Value {
+        json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion, "workflow": workflow, "databaseId": id})
+    };
+    let rollup = json!([
+        check(101, "Run tests (click me!)", "SKIPPED", "E2E"),
+        check(102, "E2E tests", "SKIPPED", "E2E"),
+        check(103, "build", "SUCCESS", "CI"),
+    ]);
+    let full = Full {
+        id: "PR_88".to_owned(),
+        checks: serde_json::from_value(rollup.clone()).expect("checks"),
+        ..Full::default()
+    };
+    let model = opened_from(model_of(pr(json!({"statusCheckRollup": rollup}))), full);
+    let (model, _) = feed(model, keys("2"));
+    let skipped = |model: &Model| {
+        let opened = model.opened().expect("open");
+        opened.check().map(|c| c.conclusion.clone())
+    };
+    // Down the list to the first skipped job, wherever the tab puts it.
+    let model = (0..3).fold(model, |model, _| {
+        if skipped(&model) == Some(Some(prw_core::gh::Conclusion::Skipped)) {
+            model
+        } else {
+            feed(model, keys("j")).0
+        }
+    });
+    let selected = model
+        .opened()
+        .and_then(|o| o.check())
+        .expect("a check")
+        .clone();
+    let name = selected.name.clone().expect("a name");
+    let offer = model
+        .offers()
+        .into_iter()
+        .find(|o| o.key == "R")
+        .expect("R");
+    assert_eq!(offer.words, format!("Run {name} again"));
+    let (model, cmds) = feed(model, keys("Ry"));
+    assert_eq!(
+        cmds,
+        [Cmd::Run(Job::Rerun {
+            url: URL.to_owned(),
+            number: 88,
+            job: Some(prw_core::rerun::RerunJob {
+                id: selected.database_id.expect("an id"),
+                name: name.clone(),
+            }),
+        })]
+    );
+    assert_eq!(
+        model.acts().busy().collect::<Vec<_>>(),
+        [format!("Starting {name} again")]
+    );
+    let done = Done {
+        url: URL.to_owned(),
+        number: 88,
+        outcome: Outcome::Reran {
+            ran: vec![name.clone()],
+            refused: Vec::new(),
+        },
+    };
+    let (model, _) = feed(model, [Msg::Done(done)]);
+    assert_eq!(
+        toast(&model),
+        (
+            format!("✓ Started again on #88: {name}").as_str(),
+            Tone::Good
+        )
+    );
+    // On a check that passed, R is the PR's: both skipped jobs.
+    let model = (0..3).fold(model, |model, _| {
+        let on = model
+            .opened()
+            .and_then(|o| o.check())
+            .and_then(|c| c.name.clone());
+        if on.as_deref() == Some("build") {
+            model
+        } else {
+            feed(model, keys("j")).0
+        }
+    });
+    let offer = model
+        .offers()
+        .into_iter()
+        .find(|o| o.key == "R")
+        .expect("R");
+    assert_eq!(offer.words, "Run 2 checks again");
 }

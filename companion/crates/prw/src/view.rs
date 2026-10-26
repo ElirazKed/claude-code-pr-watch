@@ -5,7 +5,7 @@
 mod full;
 
 use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, as_login, prompt_body};
-use prw_core::gh::{GhPr, PrState};
+use prw_core::gh::{CheckItem, Conclusion, GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
 use prw_core::opened::Tab;
@@ -1718,19 +1718,35 @@ pub(crate) const fn check_look(progress: Progress) -> (&'static str, Color, &'st
     }
 }
 
-/// One check as the card lists it, worst first: glyph, name, what it did.
+/// A check that was skipped: it counts as passed, as GitHub counts it, but didn't run.
+pub(crate) fn is_skipped(item: &CheckItem) -> bool {
+    item.conclusion == Some(Conclusion::Skipped)
+}
+
+/// How a check looks as [`check_look`] has it, a skipped one as skipped.
+pub(crate) fn look_of(item: &CheckItem) -> (&'static str, Color, &'static str) {
+    if is_skipped(item) {
+        ("⊘", BLUE, "skipped")
+    } else {
+        check_look(progress_of(item))
+    }
+}
+
+/// One check as the card lists it, worst first (a skipped one before those that passed):
+/// glyph, name, what it did.
 fn check_lines(pr: &GhPr, width: usize) -> Vec<Line<'static>> {
-    let mut checks: Vec<(Progress, String)> = latest_runs(pr.checks())
+    let mut checks: Vec<(Progress, bool, &CheckItem)> = latest_runs(pr.checks())
         .into_iter()
-        .map(|item| (progress_of(item), check_name(item)))
+        .map(|item| (progress_of(item), !is_skipped(item), item))
         .collect();
-    checks.sort_by_key(|(progress, _)| *progress);
+    checks.sort_by_key(|(progress, ran, _)| (*progress, *ran));
     checks
         .into_iter()
-        .map(|(progress, name)| {
-            let (glyph, colour, word) = check_look(progress);
+        .map(|(progress, ran, item)| {
+            let (glyph, colour, word) = look_of(item);
+            let name = check_name(item);
             let is_failed = progress == Progress::Failed;
-            let is_passed = progress == Progress::Passed;
+            let is_passed = progress == Progress::Passed && ran;
             Line::from(vec![
                 span(format!("{glyph} "), fg(colour)),
                 span(
@@ -1922,7 +1938,15 @@ fn detail_checks(
     let Some(pr) = gh.filter(|_| checks.total > 0) else {
         return (Vec::new(), Vec::new());
     };
-    let count = format!("{}/{}", checks.passed, checks.total);
+    let skipped = latest_runs(pr.checks())
+        .into_iter()
+        .filter(|item| is_skipped(item))
+        .count();
+    let count = if skipped == 0 {
+        format!("{}/{}", checks.passed, checks.total)
+    } else {
+        format!("{}/{} · {skipped} skipped", checks.passed, checks.total)
+    };
     let mut head = vec![
         Line::raw(""),
         Line::from(vec![

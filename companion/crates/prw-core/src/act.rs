@@ -20,7 +20,7 @@ use crate::gh::{GhPr, PrState};
 use crate::handoff::{Kind, PrFacts, kinds_of};
 use crate::merge::{MergeError, MergeRun, done_words, label, next_method, run_for, standing};
 use crate::opened::Opened;
-use crate::rerun::rerunnable;
+use crate::rerun::{RerunJob, job_to_rerun, rerunnable};
 use crate::resolve::resolve_prompt;
 use crate::status::{MergeMethod, mergeable_of, summarize_checks};
 use crate::ui::{Cmd, Key, Row};
@@ -78,8 +78,13 @@ pub enum Job {
         number: u64,
         close: bool,
     },
-    /// The head commit's failed or skipped Actions runs started again ([`crate::rerun`]).
-    Rerun { url: String, number: u64 },
+    /// The head commit's failed or skipped Actions runs started again ([`crate::rerun`]), or
+    /// only `job`, where one is named.
+    Rerun {
+        url: String,
+        number: u64,
+        job: Option<RerunJob>,
+    },
     /// Read what a Fix or Address prompt needs (the checks and logs, or the threads) and write
     /// the prompt. `failing` are the card's failing checks, for when the checks won't read.
     Collect {
@@ -334,6 +339,8 @@ pub enum Ask {
         number: u64,
         /// The checks that ended so, for the question.
         names: Vec<String>,
+        /// The one job it starts, where a check selected in the full view is one.
+        job: Option<RerunJob>,
     },
     /// A PR with more than one hand-off: each one's key runs it.
     Pick {
@@ -667,12 +674,9 @@ impl Acts {
         if let Some(pr) = target.pr.filter(|pr| pr.state == PrState::Open) {
             if let Some(words) = is_busy(Slot::Rerun) {
                 found.push(busy("R", words));
-            } else {
-                let names = rerunnable(pr.checks());
-                if !names.is_empty() {
-                    let words = format!("Run {} again", counted_checks(&names));
-                    found.push(offer("R", words, "re-run"));
-                }
+            } else if let Some((names, _)) = to_rerun(target, pr) {
+                let words = format!("Run {} again", counted_checks(&names));
+                found.push(offer("R", words, "re-run"));
             }
         }
         if let Some(words) = is_busy(Slot::Close) {
@@ -831,11 +835,21 @@ impl Acts {
                     Vec::new()
                 }
             },
-            Ask::Rerun { url, number, names } => match key {
-                Key::Char('y') | Key::Enter => self.start(Job::Rerun { url, number }, now),
+            Ask::Rerun {
+                url,
+                number,
+                names,
+                job,
+            } => match key {
+                Key::Char('y') | Key::Enter => self.start(Job::Rerun { url, number, job }, now),
                 Key::Char('n') | Key::Esc => Vec::new(),
                 _ => {
-                    self.ask = Some(Ask::Rerun { url, number, names });
+                    self.ask = Some(Ask::Rerun {
+                        url,
+                        number,
+                        names,
+                        job,
+                    });
                     Vec::new()
                 }
             },
@@ -952,6 +966,7 @@ impl Acts {
                 ..
             } => format!("Closing #{number}"),
             Job::Close { number, .. } => format!("Reopening #{number}"),
+            Job::Rerun { job: Some(job), .. } => format!("Starting {} again", job.name),
             Job::Rerun { number, .. } => format!("Starting #{number}'s checks again"),
             Job::Collect {
                 kind: Kind::Fix,
@@ -1096,19 +1111,19 @@ impl Acts {
             self.say(format!("#{number} is {state}"), Tone::Info, now);
             return Vec::new();
         }
-        let names = rerunnable(pr.checks());
-        if names.is_empty() {
+        let Some((names, job)) = to_rerun(target, pr) else {
             self.say(
                 format!("#{number} has no failed or skipped Actions check"),
                 Tone::Info,
                 now,
             );
             return Vec::new();
-        }
+        };
         self.ask = Some(Ask::Rerun {
             url: target.url().to_owned(),
             number,
             names,
+            job,
         });
         Vec::new()
     }
@@ -1446,6 +1461,22 @@ fn on_thread(thread: &crate::address::GhThread) -> OnThread {
         id: thread.id.clone(),
         spot: short_spot(thread),
     }
+}
+
+/// What `R` starts on the PR: the check selected in the full view's Checks tab, where it is
+/// a job to start again, else every failed or skipped Actions run; `None` where there is none.
+fn to_rerun(target: &Target<'_>, pr: &GhPr) -> Option<(Vec<String>, Option<RerunJob>)> {
+    // The poll may be newer than the full view's read, so its workflow is asked of both.
+    let selected = target.opened.and_then(|o| {
+        let check = o.check()?;
+        job_to_rerun(pr.checks(), check)?;
+        job_to_rerun(o.checks(), check)
+    });
+    if let Some(job) = selected {
+        return Some((vec![job.name.clone()], Some(job)));
+    }
+    let names = rerunnable(pr.checks());
+    (!names.is_empty()).then_some((names, None))
 }
 
 /// "build" alone, else "3 checks".

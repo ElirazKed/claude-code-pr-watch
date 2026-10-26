@@ -36,7 +36,7 @@ use prw_core::merge::{
 use prw_core::mutate::{MUTATE_ARGV, approve_input, close_argv, reply_input, resolve_input};
 use prw_core::opened::{Got, Read, ReadDone};
 use prw_core::parse_shared;
-use prw_core::rerun::{parse_reruns, rerun_argv, rerun_query};
+use prw_core::rerun::{RerunJob, parse_reruns, rerun_argv, rerun_job_argv, rerun_query};
 use prw_core::ui::{Msg, repo_of};
 
 use crate::gh::{Clock, Gh, Ran, ms};
@@ -165,6 +165,11 @@ impl<G: Gh, C: Clock> Runner<G, C> {
                     };
                 (number, outcome)
             }
+            Job::Rerun {
+                number,
+                job: Some(job),
+                ..
+            } => (number, self.rerun_job(&url, &job)),
             Job::Rerun { number, .. } => (number, self.rerun(&url, number)),
             Job::Collect {
                 kind,
@@ -284,6 +289,34 @@ impl<G: Gh, C: Clock> Runner<G, C> {
             self.refresh(url);
         }
         Outcome::Reran { ran, refused }
+    }
+
+    /// One job started again (`gh run rerun --job`), as the repo's login, and the jobs that
+    /// wait on it with it; then the PR asked again.
+    fn rerun_job(&self, url: &str, job: &RerunJob) -> Outcome {
+        let repo = repo_of(url);
+        let (login, token) = self.token_for(&repo);
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => return Outcome::RerunFailed(error),
+        };
+        let outcome = match self
+            .gh
+            .run(&rerun_job_argv(&repo, job), Some(&token), ms(GH_MS))
+        {
+            Ok(done) if done.is_ok() => Outcome::Reran {
+                ran: vec![job.name.clone()],
+                refused: Vec::new(),
+            },
+            Ok(done) => Outcome::RerunFailed(prw_core::comment::refused(
+                &said(&done),
+                &login,
+                "run it again",
+            )),
+            Err(_) => Outcome::RerunFailed("gh run rerun did not finish".to_owned()),
+        };
+        self.refresh(url);
+        outcome
     }
 
     /// A comment on the PR's conversation, its text on stdin (`comment_input`).
@@ -1002,6 +1035,7 @@ mod tests {
         let done = runner.run(Job::Rerun {
             url: URL.to_owned(),
             number: 7,
+            job: None,
         });
         let Outcome::Reran { ran, refused } = &done.outcome else {
             panic!("{:?}", done.outcome);
@@ -1025,6 +1059,37 @@ mod tests {
     }
 
     #[test]
+    fn r_on_one_job_starts_that_job_alone_as_the_login_that_sees_the_repo() {
+        let dir = Dir::new("rerun-job");
+        let gh = gh();
+        gh.on(starts(&["run", "rerun"]), |_| ok(""));
+        let runner = runner(gh, &dir);
+        let job = RerunJob {
+            id: 121,
+            name: "Run tests (click me!)".to_owned(),
+        };
+        let done = runner.run(Job::Rerun {
+            url: URL.to_owned(),
+            number: 7,
+            job: Some(job),
+        });
+        assert_eq!(
+            done.outcome,
+            Outcome::Reran {
+                ran: vec!["Run tests (click me!)".to_owned()],
+                refused: Vec::new()
+            }
+        );
+        let reruns = calls(&runner, "run");
+        assert_eq!(reruns.len(), 1, "no read of the runs first");
+        assert_eq!(
+            reruns[0].argv,
+            ["run", "rerun", "--job", "121", "--repo", "acme/app"]
+        );
+        assert_eq!(reruns[0].token.as_deref(), Some("hubot"));
+    }
+
+    #[test]
     fn r_on_a_pr_it_cant_read_says_why_and_starts_nothing() {
         let dir = Dir::new("rerun-missing");
         let gh = gh();
@@ -1035,6 +1100,7 @@ mod tests {
         let done = runner.run(Job::Rerun {
             url: URL.to_owned(),
             number: 7,
+            job: None,
         });
         assert_eq!(
             done.outcome,

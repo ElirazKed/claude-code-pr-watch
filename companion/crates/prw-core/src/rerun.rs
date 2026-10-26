@@ -83,6 +83,38 @@ pub fn rerunnable(items: &[CheckItem]) -> Vec<String> {
         .collect()
 }
 
+/// One job to start again by itself (`R` on a check selected in the full view): GitHub runs
+/// it, and the jobs that wait on it, as the run's next attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunJob {
+    /// The job's id (the check run's `databaseId`).
+    pub id: i64,
+    pub name: String,
+}
+
+/// The check `item` as a job to start again, where it is one: [`is_rerunnable`], with a job
+/// id, and its workflow done (`items` are the PR's checks), as GitHub won't start a job of a
+/// run that still runs.
+#[must_use]
+pub fn job_to_rerun(items: &[CheckItem], item: &CheckItem) -> Option<RerunJob> {
+    let id = item.database_id.filter(|_| is_rerunnable(item))?;
+    let is_running = latest_runs(items).into_iter().any(|other| {
+        other.workflow == item.workflow && other.status != Some(CheckStatus::Completed)
+    });
+    (!is_running).then(|| RerunJob {
+        id,
+        name: crate::status::check_name(item),
+    })
+}
+
+/// `gh run rerun --job`'s arguments.
+#[must_use]
+pub fn rerun_job_argv(repo: &str, job: &RerunJob) -> Vec<String> {
+    ["run", "rerun", "--job", &job.id.to_string(), "--repo", repo]
+        .map(str::to_owned)
+        .to_vec()
+}
+
 /// The head commit's workflow runs, each with its jobs' ends: one call, on that press only.
 #[must_use]
 pub fn rerun_query(pr: &PrRef) -> String {
@@ -308,6 +340,42 @@ mod tests {
             "CI is still going"
         );
         assert_eq!(rerunnable(&[item(Some("CI"), "FAILURE")]), ["build"]);
+    }
+
+    #[test]
+    fn a_selected_skipped_job_runs_alone_once_its_workflow_is_done() {
+        let item = |id: i64, workflow: &str, status: &str, conclusion: Option<&str>| -> CheckItem {
+            serde_json::from_value(json!({
+                "__typename": "CheckRun", "name": format!("job{id}"), "status": status,
+                "conclusion": conclusion, "workflow": workflow, "databaseId": id,
+            }))
+            .unwrap()
+        };
+        let skipped = item(1, "E2E", "COMPLETED", Some("SKIPPED"));
+        let passed = item(2, "CI", "COMPLETED", Some("SUCCESS"));
+        let running = item(3, "CI", "IN_PROGRESS", None);
+        let items = vec![skipped.clone(), passed.clone(), running];
+        assert_eq!(
+            job_to_rerun(&items, &skipped),
+            Some(RerunJob {
+                id: 1,
+                name: "job1".to_owned()
+            })
+        );
+        assert_eq!(job_to_rerun(&items, &passed), None, "it passed");
+        let failed = item(4, "CI", "COMPLETED", Some("FAILURE"));
+        let with_failed: Vec<CheckItem> = items.iter().cloned().chain([failed.clone()]).collect();
+        assert_eq!(job_to_rerun(&with_failed, &failed), None, "CI still runs");
+        assert_eq!(
+            rerun_job_argv(
+                "acme/app",
+                &RerunJob {
+                    id: 1,
+                    name: "job1".to_owned()
+                }
+            ),
+            ["run", "rerun", "--job", "1", "--repo", "acme/app"]
+        );
     }
 
     proptest! {
