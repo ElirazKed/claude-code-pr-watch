@@ -116,7 +116,7 @@ pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="
 <div class="feat"><span class="k">My PRs · searches · sessions</span><h3>All your PRs in one place</h3><p>Every open PR each of your gh logins wrote, a list for each GitHub search you save (review requests, a team's repos), and one per agent session: Claude through the mod, Codex and others through <code>prw mcp</code> or <code>prw watch</code>.</p></div>
 <div class="feat"><span class="k">s · S</span><h3>Sorted by what needs you</h3><p>Most urgent first: conflicts, then failing CI, then reviews. Or by repo, oldest first, or quietest first. Each repo has a colour of its own, and every PR says when it opened and when it last moved.</p></div>
 <div class="feat"><span class="k">Enter</span><h3>The whole PR, full size</h3><p>The conversation in the order it happened, review threads with the code they're on, checks with the end of each failed job's log, and the changed files. Markdown drawn as GitHub draws it.</p></div>
-<div class="feat"><span class="k">r · x · a · c · m</span><h3>Act without opening GitHub</h3><p>Reply to a thread, resolve it or reopen it, approve, comment, and merge in the repo's method, or turn on auto-merge while checks run. It asks before a merge or an approval.</p></div>
+<div class="feat"><span class="k">r · x · a · c · m · R · X</span><h3>Act without opening GitHub</h3><p>Reply to a thread, resolve it or reopen it, approve, comment, and merge in the repo's method, or turn on auto-merge while checks run. Re-run failed or skipped GitHub Actions checks, all of them or, from the Checks tab, one job, and close or reopen the PR. It asks before a merge, an approval, a re-run, a close or a reopen.</p></div>
 <div class="feat"><span class="k">f</span><h3>Hand it to your agent</h3><p>Fix (failed checks, with their logs), Resolve (conflicts with the base) or Address (the open review threads): the prompt is copied for the agent that runs the PR.</p></div>
 <div class="feat"><span class="k">a · gh meter</span><h3>Every gh login, every budget</h3><p>Each PR goes as the login that can see its repo, with that login's own token. A meter shows what's left of each login's GitHub budget, and with the mod running, one poll serves both, so no PR is asked for twice.</p></div>
 </div>
@@ -136,12 +136,14 @@ pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="
 <div><kbd>Enter</kbd> open it full size</div>
 <div><kbd>Tab</kbd> the next list</div>
 <div><kbd>s</kbd> sort, <kbd>S</kbd> turn it around</div>
-<div><kbd>m</kbd> merge, after a <kbd>y</kbd></div>
+<div><kbd>m</kbd> merge, or turn auto-merge on or off, after a <kbd>y</kbd></div>
 <div><kbd>c</kbd> comment</div>
 <div><kbd>r</kbd> reply to a thread</div>
 <div><kbd>x</kbd> resolve it, or reopen it</div>
 <div><kbd>a</kbd> approve (full view)</div>
 <div><kbd>f</kbd> hand it off to your agent</div>
+<div><kbd>R</kbd> re-run failed or skipped Actions checks, after a <kbd>y</kbd></div>
+<div><kbd>X</kbd> close it, or reopen it, after a <kbd>y</kbd></div>
 <div><kbd>o</kbd> open it in the browser</div>
 <div><kbd>?</kbd> every key</div>
 </div>
