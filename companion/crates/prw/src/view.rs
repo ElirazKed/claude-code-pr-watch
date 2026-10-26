@@ -5,7 +5,7 @@
 mod full;
 
 use prw_core::act::{Acts, Ask, Copied, Look, Toast, Tone, as_login, prompt_body};
-use prw_core::gh::{GhPr, PrState};
+use prw_core::gh::{CheckItem, Conclusion, GhPr, PrState};
 use prw_core::layout::{Layout, layout};
 use prw_core::merge::{Standing, merge_question, next_method, standing};
 use prw_core::opened::Tab;
@@ -723,6 +723,17 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
         Some(thread) if thread.is_resolved => "reopen",
         _ => "resolve",
     };
+    // What `m` does on this PR ("merge", "auto-merge", "cancel auto"), and `X` ("close",
+    // "reopen"): as its actions list says, and left out where it offers neither.
+    let offers = model.offers();
+    let offered = |key: &str| {
+        offers
+            .iter()
+            .find(|o| o.key == key && o.look != Look::Busy)
+            .map(|o| o.short.clone())
+    };
+    let m = offered("m");
+    let close = offered("X");
     let keys = if model.opened().is_some() {
         vec![
             ("esc", "back", Key::Esc),
@@ -731,20 +742,21 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("r", "reply", char('r')),
             ("x", x, char('x')),
             ("a", "approve", char('a')),
-            ("m", "merge", char('m')),
+            ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
             ("g/G", "top/end", char('g')),
+            ("X", close.as_deref().unwrap_or_default(), char('X')),
         ]
     } else {
         vec![
             ("j/k", "move", char('j')),
             ("⏎", "open", Key::Enter),
             ("tab", "list", Key::Tab),
-            ("m", "merge", char('m')),
+            ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
             ("o", "browser", char('o')),
@@ -753,8 +765,10 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("s", "sort", char('s')),
             ("a", "account", char('a')),
             ("h/l", h_l, char('l')),
+            ("X", close.as_deref().unwrap_or_default(), char('X')),
         ]
     };
+    let keys = keys.into_iter().filter(|(_, what, _)| !what.is_empty());
     let width = usize_of(r.width);
     let mut line = Marked::default();
     line.push(span(" ", Style::new()));
@@ -832,9 +846,11 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
         .iter()
         .copied()
         .chain([
-            ("m", "merge, after a y (m again: method)"),
+            ("m", "merge or auto-merge, after a y; m: method"),
             ("c", "comment: ⏎ posts, alt-⏎ a new line"),
             ("f", "fix, resolve or address: copy the prompt"),
+            ("R", "re-run failed or skipped checks, after a y"),
+            ("X", "close or reopen the PR, after a y"),
             ("o", "open in the browser"),
         ])
         .chain(acts.iter().copied())
@@ -1702,19 +1718,35 @@ pub(crate) const fn check_look(progress: Progress) -> (&'static str, Color, &'st
     }
 }
 
-/// One check as the card lists it, worst first: glyph, name, what it did.
+/// A check that was skipped: it counts as passed, as GitHub counts it, but didn't run.
+pub(crate) fn is_skipped(item: &CheckItem) -> bool {
+    item.conclusion == Some(Conclusion::Skipped)
+}
+
+/// How a check looks as [`check_look`] has it, a skipped one as skipped.
+pub(crate) fn look_of(item: &CheckItem) -> (&'static str, Color, &'static str) {
+    if is_skipped(item) {
+        ("⊘", BLUE, "skipped")
+    } else {
+        check_look(progress_of(item))
+    }
+}
+
+/// One check as the card lists it, worst first (a skipped one before those that passed):
+/// glyph, name, what it did.
 fn check_lines(pr: &GhPr, width: usize) -> Vec<Line<'static>> {
-    let mut checks: Vec<(Progress, String)> = latest_runs(pr.checks())
+    let mut checks: Vec<(Progress, bool, &CheckItem)> = latest_runs(pr.checks())
         .into_iter()
-        .map(|item| (progress_of(item), check_name(item)))
+        .map(|item| (progress_of(item), !is_skipped(item), item))
         .collect();
-    checks.sort_by_key(|(progress, _)| *progress);
+    checks.sort_by_key(|(progress, ran, _)| (*progress, *ran));
     checks
         .into_iter()
-        .map(|(progress, name)| {
-            let (glyph, colour, word) = check_look(progress);
+        .map(|(progress, ran, item)| {
+            let (glyph, colour, word) = look_of(item);
+            let name = check_name(item);
             let is_failed = progress == Progress::Failed;
-            let is_passed = progress == Progress::Passed;
+            let is_passed = progress == Progress::Passed && ran;
             Line::from(vec![
                 span(format!("{glyph} "), fg(colour)),
                 span(
@@ -1906,7 +1938,15 @@ fn detail_checks(
     let Some(pr) = gh.filter(|_| checks.total > 0) else {
         return (Vec::new(), Vec::new());
     };
-    let count = format!("{}/{}", checks.passed, checks.total);
+    let skipped = latest_runs(pr.checks())
+        .into_iter()
+        .filter(|item| is_skipped(item))
+        .count();
+    let count = if skipped == 0 {
+        format!("{}/{}", checks.passed, checks.total)
+    } else {
+        format!("{}/{} · {skipped} skipped", checks.passed, checks.total)
+    };
     let mut head = vec![
         Line::raw(""),
         Line::from(vec![
@@ -2242,17 +2282,8 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
                 line.hit([span(cancel, fg(DIM))], Hit::Key(Key::Esc));
             }
         }
-        Ask::Approve {
-            url, number, login, ..
-        } => {
-            let answers = [('y', "yes"), ('n', "no")];
-            let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
-            let question = format!("Approve {} #{number}{}?", repo_of(url), as_login(login));
-            line.push(Span::raw(" "));
-            line.push(span(clip(&question, width.saturating_sub(tail)), bold(FG)));
-            for (k, w) in answers {
-                line.hit([key(&k.to_string()), what(w)], Hit::Key(Key::Char(k)));
-            }
+        Ask::Approve { .. } | Ask::Close { .. } | Ask::Rerun { .. } => {
+            yes_no(&mut line, &question_of(ask), width);
         }
         Ask::Pick { number, kinds, .. } => {
             line.push(span(format!(" Hand off #{number}:"), bold(FG)));
@@ -2269,6 +2300,45 @@ fn ask_line(ask: &Ask, width: usize) -> (Line<'static>, Spots) {
         }
     }
     line.done()
+}
+
+/// What `a`, `X` and `R` ask before they run.
+fn question_of(ask: &Ask) -> String {
+    match ask {
+        Ask::Approve {
+            url, number, login, ..
+        } => format!("Approve {} #{number}{}?", repo_of(url), as_login(login)),
+        Ask::Close { url, number, close } => {
+            let verb = if *close { "Close" } else { "Reopen" };
+            format!("{verb} {} #{number}?", repo_of(url))
+        }
+        Ask::Rerun { number, names, .. } => match names.as_slice() {
+            [name] => format!("Run {name} on #{number} again?"),
+            _ => format!(
+                "Run {} checks on #{number} again: {}?",
+                names.len(),
+                names.join(", ")
+            ),
+        },
+        Ask::Merge { .. } | Ask::Comment { .. } | Ask::Pick { .. } => String::new(),
+    }
+}
+
+/// A question `y` or `n` answers, clipped to leave the answers room (a click on one presses it).
+fn yes_no(line: &mut Marked, question: &str, width: usize) {
+    let answers = [('y', "yes"), ('n', "no")];
+    let tail: usize = answers.iter().map(|(_, w)| 4 + cells(w)).sum();
+    line.push(Span::raw(" "));
+    line.push(span(clip(question, width.saturating_sub(tail)), bold(FG)));
+    for (k, w) in answers {
+        line.hit(
+            [
+                span(format!("  {k}"), fg(ACCENT)),
+                span(format!(" {w}"), fg(DIM)),
+            ],
+            Hit::Key(Key::Char(k)),
+        );
+    }
 }
 
 /// The prompt last copied, the whole screen, to read, or to select and copy by hand where

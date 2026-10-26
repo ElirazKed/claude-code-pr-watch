@@ -70,7 +70,7 @@ From it you can act on what you read, each as the gh login that sees the repo:
   `x` again undoes it.
 - **`a` approves** the PR, after a `y`, with no text. Your own PR, or one not read yet, says why
   not instead. In the lists `a` still switches the login.
-- `m`, `c`, `f` and `o` act on the open PR as they do in the lists.
+- `m`, `c`, `f`, `R`, `X` and `o` act on the open PR as they do in the lists.
 
 The text of a reply goes to gh on stdin as a GraphQL variable, never in argv. A reply that didn't
 post comes back with `r` on its thread (a comment's with `c`), and what GitHub said shows on the
@@ -228,9 +228,11 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | Enter                | open the PR full size                                        |
 | Tab, Shift-Tab       | the next or previous list                                    |
 | `h` `l`, `←` `→`     | three panes: the lists pane or the PRs; narrower: the previous or next list |
-| `m`                  | merge the PR, after a `y` (`m` again: the next method)       |
+| `m`                  | merge the PR, or turn auto-merge on (or off) where it waits on checks or review, after a `y` (`m` again: the next method); the bottom row says which |
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
+| `R`                  | run its failed or skipped GitHub Actions checks again, after a `y`: a run with a failed job gets its failed jobs (and those waiting on them), one with only skipped jobs runs again whole. A job its own `if:` skipped skips again. In the full view's Checks tab, `R` on a failed or skipped check starts that job alone (with the jobs that wait on it), as GitHub's Re-run job does: the way to start a job its `if:` keeps for a later attempt (`github.run_attempt > 1`). The card and the Checks tab show a skipped check as `⊘ skipped` |
+| `X`                  | close the PR, or reopen a closed one, after a `y`            |
 | `o`                  | open it in the browser                                       |
 | `s`, `S`             | order the lists: most urgent first, by repo, oldest first, quietest first; `S` turns the order around |
 | `a`                  | switch the gh login its owner's PRs go as (with two or more); in the full view, approve |

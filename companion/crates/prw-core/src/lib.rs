@@ -26,7 +26,8 @@
 //!   review threads).
 //! - One PR full size (Enter): [`full`] (the whole PR read in one call: its conversation,
 //!   checks and files), [`opened`] (the view's tabs, selection and reads) and [`mutate`]
-//!   (what it changes: a reply, a thread resolved, an approval).
+//!   (what it changes: a reply, a thread resolved, an approval, the PR closed or reopened).
+//! - [`rerun`] (`R`): a PR's failed or skipped GitHub Actions runs started again.
 //! - Watches from other agents: [`watch`] (`prw watch` and the MCP `watch` tool: one file per
 //!   watch, announced as one session file per agent's session) and [`mcp`] (`prw mcp`'s
 //!   JSON-RPC).
@@ -58,6 +59,7 @@ pub mod poll;
 pub mod protocol;
 pub mod rate;
 pub mod repos;
+pub mod rerun;
 pub mod resolve;
 pub mod review;
 pub mod search;

@@ -221,6 +221,15 @@ impl Opened {
         &self.checks
     }
 
+    /// The check selected, where the Checks tab shows and lists one.
+    #[must_use]
+    pub fn check(&self) -> Option<&CheckItem> {
+        if self.tab != Tab::Checks {
+            return None;
+        }
+        self.checks.get(self.selected(Tab::Checks))
+    }
+
     /// The review thread selected, where the conversation shows and one is.
     #[must_use]
     pub fn thread(&self) -> Option<&GhThread> {

@@ -986,3 +986,47 @@ fn a_row_wears_its_repos_chip_and_its_dates_and_s_orders_the_rows() {
         &["billing", "opened 20h ago"],
     );
 }
+
+#[test]
+fn the_key_bar_says_what_m_does_on_the_pr_and_leaves_it_out_where_it_does_nothing() {
+    let bar = |n| {
+        let text = screen(&feed(demo(160, 30), to_row(n)), 160, 30);
+        text.lines().last().unwrap_or_default().to_owned()
+    };
+    // #409, ready: merge.
+    assert!(bar(5).contains("m merge  "), "{}", bar(5));
+    // #412, blocked on checks, where auto-merge may be turned on.
+    assert!(bar(7).contains("m auto-merge"), "{}", bar(7));
+    // #88, blocked, and auto-merge isn't allowed: nothing for m to do.
+    assert!(!bar(1).contains(" m "), "{}", bar(1));
+    assert!(bar(1).contains("X close"), "{}", bar(1));
+}
+
+#[test]
+fn a_skipped_check_shows_as_skipped_not_as_passed() {
+    let mut results: serde_json::Value = serde_json::from_str(RESULTS).expect("JSON");
+    let url = "https://github.com/acme/app/pull/409";
+    let rollup = results["prs"][url]["pr"]["statusCheckRollup"]
+        .as_array_mut()
+        .expect("#409's checks");
+    rollup.push(serde_json::json!({
+        "__typename": "CheckRun", "name": "e2e (click me!)", "status": "COMPLETED",
+        "conclusion": "SKIPPED", "workflow": "CI",
+    }));
+    let shared = parse_shared(&results.to_string()).expect("the demo reads");
+    let now = shared.fetched_at + 12_000;
+    let model = feed(
+        Model::new(120, 44),
+        [
+            Msg::SharedRead(Ok(shared), now),
+            Msg::SessionsRead(sessions_at(now), now),
+        ],
+    );
+    let text = screen(&feed(model, to_row(5)), 120, 44);
+    let line = text
+        .lines()
+        .find(|l| l.contains("e2e (click me!)"))
+        .expect("the skipped check is listed");
+    assert!(line.contains('⊘') && line.contains("skipped"), "{line}");
+    assert_says(&text, &["1 skipped", "[R] Run e2e (click me!) again"]);
+}

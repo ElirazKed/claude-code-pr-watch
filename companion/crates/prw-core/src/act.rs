@@ -2,7 +2,9 @@
 //! field, `f` hands a PR on (copying the prompt), `o` opens it in the browser and `v` shows
 //! the last prompt copied. With the PR open full size, `r` replies to the review thread
 //! selected (elsewhere it comments), `x` resolves or reopens it and `a` approves behind a
-//! question, where in the lists `a` switches the login. No I/O here: a key gives [`Cmd`]s (a [`Job`] for the binary's
+//! question, where in the lists `a` switches the login. Anywhere, `X` closes the PR (or
+//! reopens a closed one) and `R` starts its failed or skipped Actions runs again, each behind
+//! a question. No I/O here: a key gives [`Cmd`]s (a [`Job`] for the binary's
 //! worker, a copy, a browser to open), and what came of each comes back as a message.
 //!
 //! One question at a time, on the bottom line ([`Ask`]); what ran says so in a [`Toast`]. A
@@ -18,6 +20,7 @@ use crate::gh::{GhPr, PrState};
 use crate::handoff::{Kind, PrFacts, kinds_of};
 use crate::merge::{MergeError, MergeRun, done_words, label, next_method, run_for, standing};
 use crate::opened::Opened;
+use crate::rerun::{RerunJob, job_to_rerun, rerunnable};
 use crate::resolve::resolve_prompt;
 use crate::status::{MergeMethod, mergeable_of, summarize_checks};
 use crate::ui::{Cmd, Key, Row};
@@ -69,6 +72,19 @@ pub enum Job {
         number: u64,
         pr: String,
     },
+    /// The PR closed, or reopened where `close` is false.
+    Close {
+        url: String,
+        number: u64,
+        close: bool,
+    },
+    /// The head commit's failed or skipped Actions runs started again ([`crate::rerun`]), or
+    /// only `job`, where one is named.
+    Rerun {
+        url: String,
+        number: u64,
+        job: Option<RerunJob>,
+    },
     /// Read what a Fix or Address prompt needs (the checks and logs, or the threads) and write
     /// the prompt. `failing` are the card's failing checks, for when the checks won't read.
     Collect {
@@ -88,7 +104,9 @@ impl Job {
             | Self::Switch { url, .. }
             | Self::Reply { url, .. }
             | Self::Resolve { url, .. }
-            | Self::Approve { url, .. } => url,
+            | Self::Approve { url, .. }
+            | Self::Close { url, .. }
+            | Self::Rerun { url, .. } => url,
             Self::Collect { facts, .. } => &facts.url,
         }
     }
@@ -101,6 +119,8 @@ impl Job {
             Self::Reply { thread, .. } => Slot::Reply(thread.id.clone()),
             Self::Resolve { thread, .. } => Slot::Resolve(thread.id.clone()),
             Self::Approve { .. } => Slot::Approve,
+            Self::Close { .. } => Slot::Close,
+            Self::Rerun { .. } => Slot::Rerun,
             Self::Collect { kind, .. } => Slot::Handoff(*kind),
         }
     }
@@ -171,6 +191,19 @@ pub enum Outcome {
         login: String,
     },
     ApproveFailed(String),
+    /// Closed, or reopened where `close` is false, as this login.
+    Closed {
+        close: bool,
+        login: String,
+    },
+    CloseFailed(String),
+    /// The runs started again (as a toast names each: "CI (failed jobs)"), and those GitHub
+    /// refused, with why. Both empty where none had a job to run again.
+    Reran {
+        ran: Vec<String>,
+        refused: Vec<String>,
+    },
+    RerunFailed(String),
     /// The prompt, and what didn't come for it ("No log for build: …").
     Prompt {
         kind: Kind,
@@ -196,6 +229,8 @@ impl Outcome {
                 Slot::Resolve(thread.id.clone())
             }
             Self::Approved { .. } | Self::ApproveFailed(_) => Slot::Approve,
+            Self::Closed { .. } | Self::CloseFailed(_) => Slot::Close,
+            Self::Reran { .. } | Self::RerunFailed(_) => Slot::Rerun,
             Self::Prompt { kind, .. } | Self::PromptFailed { kind, .. } => Slot::Handoff(*kind),
         }
     }
@@ -214,11 +249,15 @@ impl Outcome {
             | Self::Resolved { .. }
             | Self::ResolveFailed { .. }
             | Self::Approved { .. }
-            | Self::ApproveFailed(_) => true,
+            | Self::ApproveFailed(_)
+            | Self::Closed { .. }
+            | Self::CloseFailed(_)
+            | Self::Reran { .. } => true,
             Self::MergeFailed { .. }
             | Self::CommentFailed(_)
             | Self::PutBack { .. }
             | Self::SwitchFailed(_)
+            | Self::RerunFailed(_)
             | Self::Prompt { .. }
             | Self::PromptFailed { .. } => false,
         }
@@ -235,6 +274,8 @@ pub enum Slot {
     Reply(String),
     Resolve(String),
     Approve,
+    Close,
+    Rerun,
     Handoff(Kind),
 }
 
@@ -286,6 +327,21 @@ pub enum Ask {
         /// Who it approves as ("" where nothing says).
         login: String,
     },
+    /// `y` closes it (or reopens it, where `close` is false), `n` doesn't.
+    Close {
+        url: String,
+        number: u64,
+        close: bool,
+    },
+    /// `y` starts its failed or skipped Actions runs again, `n` doesn't.
+    Rerun {
+        url: String,
+        number: u64,
+        /// The checks that ended so, for the question.
+        names: Vec<String>,
+        /// The one job it starts, where a check selected in the full view is one.
+        job: Option<RerunJob>,
+    },
     /// A PR with more than one hand-off: each one's key runs it.
     Pick {
         url: String,
@@ -302,6 +358,8 @@ impl Ask {
             Self::Merge { url, .. }
             | Self::Comment { url, .. }
             | Self::Approve { url, .. }
+            | Self::Close { url, .. }
+            | Self::Rerun { url, .. }
             | Self::Pick { url, .. } => url,
         }
     }
@@ -579,6 +637,7 @@ impl Acts {
                 offers.push(offer("a", words, "account", Look::Plain));
             }
         }
+        offers.extend(self.state_offers(target));
         offers.push(offer(
             "o",
             "Open on GitHub ↗".to_owned(),
@@ -594,6 +653,46 @@ impl Acts {
             offers.push(offer("v", words, "view", Look::Plain));
         }
         offers
+    }
+
+    /// `R` and `X`: what the PR's checks and state offer.
+    fn state_offers(&self, target: &Target<'_>) -> Vec<Offer> {
+        let is_busy = |slot| self.busy.get(&(target.url().to_owned(), slot));
+        let offer = |key, words: String, short: &str| Offer {
+            key,
+            words,
+            short: short.to_owned(),
+            look: Look::Plain,
+        };
+        let busy = |key, words: &String| Offer {
+            key,
+            words: format!("{words}…"),
+            short: "…".to_owned(),
+            look: Look::Busy,
+        };
+        let mut found = Vec::new();
+        if let Some(pr) = target.pr.filter(|pr| pr.state == PrState::Open) {
+            if let Some(words) = is_busy(Slot::Rerun) {
+                found.push(busy("R", words));
+            } else if let Some((names, _)) = to_rerun(target, pr) {
+                let words = format!("Run {} again", counted_checks(&names));
+                found.push(offer("R", words, "re-run"));
+            }
+        }
+        if let Some(words) = is_busy(Slot::Close) {
+            found.push(busy("X", words));
+        } else {
+            match target.pr.map(|pr| &pr.state) {
+                Some(PrState::Open) => {
+                    found.push(offer("X", "Close the PR".to_owned(), "close"));
+                }
+                Some(PrState::Closed) => {
+                    found.push(offer("X", "Reopen the PR".to_owned(), "reopen"));
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     /// What a key does, where it is an action key or the keys are held; `None` leaves it to
@@ -641,6 +740,8 @@ impl Acts {
                 }
             }
             Key::Char('x') => self.resolve(&target?, now)?,
+            Key::Char('X') => self.close(&target?, now),
+            Key::Char('R') => self.rerun(&target?, now),
             Key::Char('a') => {
                 let target = target?;
                 if target.opened.is_some() {
@@ -722,6 +823,32 @@ impl Acts {
                         number,
                         pr,
                         login,
+                    });
+                    Vec::new()
+                }
+            },
+            Ask::Close { url, number, close } => match key {
+                Key::Char('y') | Key::Enter => self.start(Job::Close { url, number, close }, now),
+                Key::Char('n') | Key::Esc => Vec::new(),
+                _ => {
+                    self.ask = Some(Ask::Close { url, number, close });
+                    Vec::new()
+                }
+            },
+            Ask::Rerun {
+                url,
+                number,
+                names,
+                job,
+            } => match key {
+                Key::Char('y') | Key::Enter => self.start(Job::Rerun { url, number, job }, now),
+                Key::Char('n') | Key::Esc => Vec::new(),
+                _ => {
+                    self.ask = Some(Ask::Rerun {
+                        url,
+                        number,
+                        names,
+                        job,
                     });
                     Vec::new()
                 }
@@ -833,6 +960,14 @@ impl Acts {
             } => format!("Resolving {}", thread.spot),
             Job::Resolve { thread, .. } => format!("Reopening {}", thread.spot),
             Job::Approve { number, .. } => format!("Approving #{number}"),
+            Job::Close {
+                number,
+                close: true,
+                ..
+            } => format!("Closing #{number}"),
+            Job::Close { number, .. } => format!("Reopening #{number}"),
+            Job::Rerun { job: Some(job), .. } => format!("Starting {} again", job.name),
+            Job::Rerun { number, .. } => format!("Starting #{number}'s checks again"),
             Job::Collect {
                 kind: Kind::Fix,
                 facts,
@@ -935,6 +1070,61 @@ impl Acts {
             }
             Err(why) => self.say(why, Tone::Info, now),
         }
+        Vec::new()
+    }
+
+    /// `X`: the PR closed, or reopened where it is closed, behind a question.
+    fn close(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
+        let number = target.number();
+        let close = match target.pr.map(|pr| &pr.state) {
+            None => {
+                self.say(format!("#{number} hasn't been read yet"), Tone::Info, now);
+                return Vec::new();
+            }
+            Some(PrState::Merged) => {
+                self.say(format!("#{number} is merged"), Tone::Info, now);
+                return Vec::new();
+            }
+            Some(state) => *state == PrState::Open,
+        };
+        self.ask = Some(Ask::Close {
+            url: target.url().to_owned(),
+            number,
+            close,
+        });
+        Vec::new()
+    }
+
+    /// `R`: the PR's failed or skipped Actions runs started again, behind a question.
+    fn rerun(&mut self, target: &Target<'_>, now: i64) -> Vec<Cmd> {
+        let number = target.number();
+        let Some(pr) = target.pr else {
+            self.say(format!("#{number} hasn't been read yet"), Tone::Info, now);
+            return Vec::new();
+        };
+        if pr.state != PrState::Open {
+            let state = if pr.state == PrState::Merged {
+                "merged"
+            } else {
+                "closed"
+            };
+            self.say(format!("#{number} is {state}"), Tone::Info, now);
+            return Vec::new();
+        }
+        let Some((names, job)) = to_rerun(target, pr) else {
+            self.say(
+                format!("#{number} has no failed or skipped Actions check"),
+                Tone::Info,
+                now,
+            );
+            return Vec::new();
+        };
+        self.ask = Some(Ask::Rerun {
+            url: target.url().to_owned(),
+            number,
+            names,
+            job,
+        });
         Vec::new()
     }
 
@@ -1086,16 +1276,13 @@ impl Acts {
             Outcome::Resolved { thread, .. } => {
                 self.say(format!("● Reopened {}", thread.spot), Tone::Good, now);
             }
-            Outcome::Approved { login } => {
-                self.say(
-                    format!("✓ Approved #{number}{}", as_login(&login)),
-                    Tone::Good,
-                    now,
-                );
-            }
-            Outcome::SwitchFailed(error)
-            | Outcome::ResolveFailed { error, .. }
-            | Outcome::ApproveFailed(error) => {
+            outcome @ (Outcome::Approved { .. }
+            | Outcome::ApproveFailed(_)
+            | Outcome::Closed { .. }
+            | Outcome::CloseFailed(_)
+            | Outcome::Reran { .. }
+            | Outcome::RerunFailed(_)) => self.say_state(number, outcome, now),
+            Outcome::SwitchFailed(error) | Outcome::ResolveFailed { error, .. } => {
                 self.say(format!("✗ #{number}: {error}"), Tone::Bad, now);
             }
             Outcome::CommentFailed(error) => {
@@ -1124,6 +1311,45 @@ impl Acts {
             }
         }
         Vec::new()
+    }
+
+    /// What the toast says of a change to the PR itself: `a`'s approval, `X`'s close or
+    /// reopen, and the runs `R` started again and those GitHub refused.
+    fn say_state(&mut self, number: u64, outcome: Outcome, now: i64) {
+        let (text, tone) = match outcome {
+            Outcome::Approved { login } => (
+                format!("✓ Approved #{number}{}", as_login(&login)),
+                Tone::Good,
+            ),
+            Outcome::Closed { close, login } => {
+                let done = if close { "✓ Closed" } else { "● Reopened" };
+                (format!("{done} #{number}{}", as_login(&login)), Tone::Good)
+            }
+            Outcome::Reran { ran, refused } => match (ran.is_empty(), refused.is_empty()) {
+                (true, true) => (
+                    format!("#{number} has no finished run with a job to run again"),
+                    Tone::Info,
+                ),
+                (false, true) => (
+                    format!("✓ Started again on #{number}: {}", ran.join(", ")),
+                    Tone::Good,
+                ),
+                (true, false) => (format!("✗ #{number}: {}", refused.join("; ")), Tone::Bad),
+                (false, false) => (
+                    format!(
+                        "Started again on #{number}: {} · ✗ {}",
+                        ran.join(", "),
+                        refused.join("; ")
+                    ),
+                    Tone::Bad,
+                ),
+            },
+            Outcome::ApproveFailed(error)
+            | Outcome::CloseFailed(error)
+            | Outcome::RerunFailed(error) => (format!("✗ #{number}: {error}"), Tone::Bad),
+            _ => return,
+        };
+        self.say(text, tone, now);
     }
 
     /// The copy the last prompt asked for: by which means, or why it failed.
@@ -1234,6 +1460,31 @@ fn on_thread(thread: &crate::address::GhThread) -> OnThread {
     OnThread {
         id: thread.id.clone(),
         spot: short_spot(thread),
+    }
+}
+
+/// What `R` starts on the PR: the check selected in the full view's Checks tab, where it is
+/// a job to start again, else every failed or skipped Actions run; `None` where there is none.
+fn to_rerun(target: &Target<'_>, pr: &GhPr) -> Option<(Vec<String>, Option<RerunJob>)> {
+    // The poll may be newer than the full view's read, so its workflow is asked of both.
+    let selected = target.opened.and_then(|o| {
+        let check = o.check()?;
+        job_to_rerun(pr.checks(), check)?;
+        job_to_rerun(o.checks(), check)
+    });
+    if let Some(job) = selected {
+        return Some((vec![job.name.clone()], Some(job)));
+    }
+    let names = rerunnable(pr.checks());
+    (!names.is_empty()).then_some((names, None))
+}
+
+/// "build" alone, else "3 checks".
+#[must_use]
+pub fn counted_checks(names: &[String]) -> String {
+    match names {
+        [one] => one.clone(),
+        _ => format!("{} checks", names.len()),
     }
 }
 
