@@ -191,6 +191,8 @@ function fakeHost(
   // Each GraphQL call's timeout.
   const timeouts: number[] = []
   const tokens: (string | undefined)[] = []
+  // Each call the mod made with an environment or stdin of its own: none should be.
+  const unforwarded: string[][] = []
   const mergeTokens: (string | undefined)[] = []
   const sight = { owners: {} as Record<string, string[]> }
   const auth = { failStatus: 0, failToken: {} as Record<string, number>, asks: [] as string[] }
@@ -209,10 +211,24 @@ function fakeHost(
       .filter(([path]) => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
       .map(([path, f]) => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
   }))
-  on('process.run', ($, e) => {
+  on('process.run', ($, called) => {
     const out = (exitCode: number, stdout: string, stderr = '') => ({
       value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
     })
+    // The mod passes no environment nor stdin (a guard on mods may refuse a call that does).
+    if (called.init?.env !== undefined || called.init?.stdin !== undefined) unforwarded.push([...called.argv])
+    // A call as a login (ghArgv): sh asks gh for the login's token, then runs gh with it.
+    const isAs = called.argv[0] === '/bin/sh' && called.argv[1] === '-c'
+    const as = isAs ? String(called.argv[4]) : ''
+    if (isAs) {
+      auth.asks.push(`token ${as}`)
+      if ((auth.failToken[as] ?? 0) > 0) {
+        auth.failToken[as] = (auth.failToken[as] ?? 0) - 1
+
+        return out(4, '', `Couldn't get ${as}'s gh token\n`)
+      }
+    }
+    const e = isAs ? { ...called, argv: ['gh', ...called.argv.slice(5)], init: { ...called.init, env: { GH_TOKEN: `${as}-token` } } } : called
     if (e.argv[1] === 'pr' && e.argv[2] === 'merge') {
       merges.push([...e.argv])
       mergeTokens.push(e.init?.env?.GH_TOKEN)
@@ -294,7 +310,8 @@ function fakeHost(
     if (e.argv[1] === 'pr' && e.argv[2] === 'view') return branchPr ? out(0, `${branchPr}\n`) : out(1, '')
     const issue = String(e.argv[4] ?? '').match(/^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/)
     if (e.argv[1] === 'api' && issue !== null) {
-      const body = (JSON.parse(e.init?.stdin ?? '{}') as { body?: unknown }).body
+      const field = e.argv.slice(e.argv.indexOf('-f') + 1)[0] ?? ''
+      const body = field.startsWith('body=') ? field.slice('body='.length) : undefined
       comments.push({ argv: [...e.argv], body, token: e.init?.env?.GH_TOKEN })
       const posted: RunReply = { exitCode: 0, stdout: JSON.stringify({ html_url: `https://github.com/${issue[1]}/pull/${issue[2]}#issuecomment-${comments.length}`, body }) }
 
@@ -338,7 +355,7 @@ function fakeHost(
     return gate.hold !== null && query.includes('body') ? gate.hold.then(() => reply) : reply
   })
 
-  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, sight, auth, comments, posting, moves, reads }
+  return { queries, files, merges, runs, asked, gate, blips, budget, restAsks, timeouts, tokens, mergeTokens, unforwarded, sight, auth, comments, posting, moves, reads }
 }
 
 test('cards show every lifecycle state, animate CI, and dismiss when merged', async ($, on) => {
@@ -2426,7 +2443,8 @@ test("every call carries its own login's token, the active one's too: a gh auth 
 })
 
 test("a token gh won't give is no PR not found: nothing is asked as another login, and the next round asks again", async ($, on) => {
-  const { clock, queries, files, of } = await twoLogins($, on, host => void (host.auth.failToken.hubot = 1))
+  // The round's two calls as hubot (its rate and its PRs) each ask gh for the token, in the call.
+  const { clock, queries, files, of } = await twoLogins($, on, host => void (host.auth.failToken.hubot = 2))
   // hubot's PR was never asked about, as hubot or as me: a failure that passes, said at once
   // on a card that has nothing else to show.
   expect(queries.flat()).not.toContain(HUBOT_PR)
@@ -2436,7 +2454,7 @@ test("a token gh won't give is no PR not found: nothing is asked as another logi
   expect(await ui.find({ key: `retry:${HUBOT_PR}` })).toBeUndefined()
   await ui.unmount()
   const logged = (files.get(ERRORS_LOG)?.text ?? '').trim().split('\n').map(line => JSON.parse(line))
-  expect(logged.at(-1)).toMatchObject({ login: 'hubot', class: 'other', error: "Couldn't get hubot's gh token: no oauth token found for github.com account hubot" })
+  expect(logged.at(-1)).toMatchObject({ login: 'hubot', class: 'other', error: "Couldn't get hubot's gh token" })
 
   // The round at 12:00:10 asks gh for it again, and reads the PR as hubot.
   await clock.advance(10_500)
@@ -2553,22 +2571,22 @@ test("a merge whose login gh gives no token for says so, and never runs as anoth
   await ui.unmount()
 })
 
-test("a token gh gave once stands where it won't give it again, so a locked keyring stops nothing", async ($, on) => {
-  const { clock, auth, of, tokens } = await twoLogins($, on)
-  await clock.advance(5 * 60_000)
-  auth.failToken.hubot = 99
-  tokens.length = 0
-  await clock.advance(2 * 60_000)
-  expect(auth.asks).toContain('token hubot')
+test('the mod holds no token: each call as a login has gh hand it the token, with no env or stdin of its own', async ($, on) => {
+  const { clock, auth, of, tokens, unforwarded } = await twoLogins($, on)
+  const asked = auth.asks.filter(ask => ask === 'token hubot').length
+  await clock.advance(10_500)
+  // Asked again in the next round's own call: nothing kept between them.
+  expect(auth.asks.filter(ask => ask === 'token hubot').length).toBeGreaterThan(asked)
   expect(tokens).toContain('hubot-token')
-  expect(of(HUBOT_PR).at).toBe(NOON + 6 * 60_000 + 10_000)
   expect(of(HUBOT_PR).error).toBe(undefined)
+  expect(unforwarded).toEqual([])
 })
 
 // ---- Comment ------------------------------------------------------------------------------
 
 const FIELD = `comment-text:${READY}`
-const POST = ['gh', 'api', '--method', 'POST', 'repos/acme/app/issues/21/comments', '--input', '-']
+// The call as gh is run with it (the fake strips the sh that hands it the login's token).
+const POST = (text: string) => ['gh', 'api', '--method', 'POST', 'repos/acme/app/issues/21/comments', '-f', `body=${text}`]
 
 // Watches #21 as `fixture` (a clean PR by default), `setup` shaping gh first, and draws the pane.
 async function commentCard($: Parameters<TestBody>[0], on: On, fixture = mergeable(), setup: (host: ReturnType<typeof fakeHost>) => void = () => {}) {
@@ -2599,8 +2617,8 @@ test('Comment opens a field saying who will post; Enter posts the text as that l
 
   queries.length = 0
   await ui.input({ key: FIELD, text: 'LGTM' })
-  // By the login's own token, the text on stdin only.
-  expect(comments).toEqual([{ argv: POST, body: 'LGTM', token: 'me-token' }])
+  // By the login's own token, the text as gh's raw field.
+  expect(comments).toEqual([{ argv: POST('LGTM'), body: 'LGTM', token: 'me-token' }])
   expect(await ui.find({ text: /✓ Commented as me/ })).toBeDefined()
   const link = (await ui.findAll({ type: 'Link' })).find(l => l.props.label === 'comment on #21 ↗')
   expect(link?.props.href).toBe(`${READY}#issuecomment-1`)
@@ -2615,7 +2633,7 @@ test('Comment opens a field saying who will post; Enter posts the text as that l
   await ui.unmount()
 })
 
-test('a text starting with @ or -, or holding newlines, posts as typed and never reaches argv', async ($, on) => {
+test('a text starting with @ or -, or holding newlines, posts as typed, whole in its raw field', async ($, on) => {
   const { ui, comments } = await commentCard($, on)
   const texts = ['@octocat /retest', '--method=DELETE', '-F body=@/etc/passwd', 'first line\nsecond line\n']
   for (const text of texts) {
@@ -2623,7 +2641,7 @@ test('a text starting with @ or -, or holding newlines, posts as typed and never
     await ui.input({ key: FIELD, text })
   }
   expect(comments.map(c => c.body)).toEqual(texts)
-  expect(comments.every(c => JSON.stringify(c.argv) === JSON.stringify(POST))).toBe(true)
+  expect(comments.map(c => c.argv)).toEqual(texts.map(POST))
   await ui.unmount()
 })
 

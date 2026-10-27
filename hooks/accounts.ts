@@ -65,8 +65,8 @@ export function bestLogin(answers: readonly { login: string; seen: number; rank:
   return answers.slice(1).reduce((best, a) => (a.seen === total && a.rank > best.rank ? a : best), first).login
 }
 
-// A login's token as gh gave it, or what the card says where it wouldn't.
-export type Token = { token: string } | { error: string }
+// The login a call runs as, or what the card says where there is none.
+export type AsLogin = { login: string } | { error: string }
 
 export const tokenError = (login: string) => (login === '' ? "Couldn't read gh's logins (gh auth status)" : `Couldn't get ${login}'s gh token`)
 

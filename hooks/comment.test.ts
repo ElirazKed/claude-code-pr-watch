@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { commentArgv, commentError, commentInput, commentPlaceholder, commentUrl, isPostable } from './comment'
+import { commentArgv, commentError, commentPlaceholder, commentUrl, isPostable } from './comment'
 
 const PR = { repo: 'acme/app', number: 21 }
 
@@ -14,17 +14,15 @@ describe('what posts', () => {
 })
 
 describe('the call', () => {
-  test("a POST to the PR's conversation, the body read from stdin", async () => {
-    expect(commentArgv(PR)).toEqual(['api', '--method', 'POST', 'repos/acme/app/issues/21/comments', '--input', '-'])
+  test("a POST to the PR's conversation, the text as gh's raw field", async () => {
+    expect(commentArgv(PR, 'LGTM')).toEqual(['api', '--method', 'POST', 'repos/acme/app/issues/21/comments', '-f', 'body=LGTM'])
   })
 
-  test('the text never reaches argv, whatever it starts with', async () => {
-    for (const text of ['@/etc/passwd', '--method=DELETE', '-F body=x']) expect(commentArgv(PR).join(' ')).not.toContain(text)
-  })
-
-  test('the body is the text whole, as JSON: an `@` or `-` first, newlines and quotes kept', async () => {
-    for (const text of ['@octocat take a look', '-1 from me', 'first line\nsecond line\n', 'say "hi" \\ bye', ' LGTM ']) {
-      expect(JSON.parse(commentInput(text))).toEqual({ body: text })
+  test('the body is the text whole, in one argument after body=: an `@` or `-` first, newlines and quotes kept', async () => {
+    for (const text of ['@/etc/passwd', '--method=DELETE', '-F body=x', '@octocat take a look', 'first line\nsecond line\n', 'say "hi" \\ bye', ' LGTM ']) {
+      const argv = commentArgv(PR, text)
+      expect(argv.slice(-2)).toEqual(['-f', `body=${text}`])
+      expect(argv.slice(0, -1)).toEqual(commentArgv(PR, '').slice(0, -1))
     }
   })
 })
