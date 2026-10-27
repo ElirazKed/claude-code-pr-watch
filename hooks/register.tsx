@@ -38,7 +38,7 @@ import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, thre
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
 import type { Failure, Handoff } from './fix'
 import { resolveHeading, resolvePrompt } from './resolve'
-import { commentArgv, commentError, commentInput, commentPlaceholder, commentUrl, isPostable } from './comment'
+import { commentArgv, commentError, commentPlaceholder, commentUrl, isPostable } from './comment'
 import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
 import { CHECK_MS, PRW_LINE, PRW_PILL, PRW_TEXT, PRW_URL, companionIn, headOf, howToUpdate, isNewer, isPrwIn, noticeLines, noticeToast, versionIn } from './update'
 import type { CompanionState } from './update'
@@ -46,7 +46,7 @@ import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf
 import type { Layout } from './band'
 import { failedEntry, isMiss, isUnreachable, keptEntries } from './cache'
 import { NO_LOGINS, bestLogin, everyLogin, isDue, learned, loginFor, loginsOf, notFoundAs, ownersBelowWrite, rankOf, tokenError, untriedBy } from './accounts'
-import type { Logins, Token } from './accounts'
+import type { AsLogin, Logins } from './accounts'
 import type { Entry } from './cache'
 import { GH_HELP, bandNote, bucketOf, ghMeter, isRestDue, legacyRate, lowUntil, restOf, roundWaitsUntil, withSeen } from './rate'
 import type { Bar, Rates } from './rate'
@@ -195,21 +195,20 @@ let placeSeq = 0
 let loginsKept: Logins = NO_LOGINS
 let loginsAsked: { at: number; isOk: boolean } | undefined
 let loginsAsk: Promise<Logins> | null = null
-// Each login's token as gh last gave it, and when; when gh last wouldn't, and what the card
-// says then (isDue again, for both); and the asks under way.
-const tokens = new Map<string, { at: number; token: string }>()
-const tokenMisses = new Map<string, { at: number; error: string }>()
-const tokenAsks = new Map<string, Promise<Token>>()
 let prunedAt = 0
 
 const empty = (): Shared => ({ fetchedAt: 0, nextAt: 0, prs: {}, accounts: {}, rate: null, rates: {}, latest: { version: null, checkedAt: 0 } })
 
-async function gh($: EngineInterface, argv: string[], token?: string, cwd?: string, timeoutMs = GH_MS) {
-  return $.process.run(['gh', ...argv], {
-    cwd,
-    timeoutMs,
-    env: token ? { GH_TOKEN: token } : undefined,
-  })
+// A call as `login` goes through sh, which asks gh for the login's token and hands it to that
+// one gh call: the mod never holds a token, nor sets one in env or argv (a guard on mods may
+// refuse a call that sets env). A login gh has no token for fails with tokenError's text,
+// never runs as the active account.
+const AS_LOGIN = `t=$(gh auth token --hostname github.com --user "$1" 2>/dev/null) && [ -n "$t" ] || { echo "Couldn't get $1's gh token" >&2; exit 4; }; shift; export GH_TOKEN="$t"; exec gh "$@"`
+
+const ghArgv = (argv: readonly string[], login?: string) => (login ? ['/bin/sh', '-c', AS_LOGIN, 'sh', login, ...argv] : ['gh', ...argv])
+
+async function gh($: EngineInterface, argv: string[], login?: string, cwd?: string, timeoutMs = GH_MS) {
+  return $.process.run(ghArgv(argv, login), { cwd, timeoutMs })
 }
 
 async function home($: EngineInterface): Promise<string | null> {
@@ -350,43 +349,9 @@ async function logins($: EngineInterface, isFresh = false, timeoutMs = GH_MS): P
   return loginsAsk !== null && (isFresh || loginsKept === NO_LOGINS) ? loginsAsk : loginsKept
 }
 
-// A login's own token, from gh, never written anywhere. Every call made as a login carries
-// it, the active one's too: gh's active account is whichever was switched to last, so a call
-// without a token may run as anyone. A token is asked of gh again every few minutes (a login
-// logged in again has a new one); where gh won't give it then, the last one it gave stands,
-// and where it never gave one, that is said, never stood in for.
-async function tokenFor($: EngineInterface, login: string, timeoutMs = GH_MS): Promise<Token> {
-  if (login === '') return { error: tokenError('') }
-  const at = await $.clock.now()
-  const good = tokens.get(login)
-  const miss = tokenMisses.get(login)
-  const isKept = (good !== undefined && !isDue({ at: good.at, isOk: true }, at)) || (miss !== undefined && !isDue({ at: miss.at, isOk: false }, at))
-  if (isKept && !tokenAsks.has(login)) return good !== undefined ? { token: good.token } : { error: miss?.error ?? tokenError(login) }
-  const asking =
-    tokenAsks.get(login) ??
-    (async (): Promise<Token> => {
-      const res = await gh($, ['auth', 'token', '--hostname', 'github.com', '--user', login], undefined, undefined, timeoutMs).catch(() => null)
-      const said = res?.stdout.trim() ?? ''
-      const doneAt = await $.clock.now()
-      if (res !== null && res.exitCode === 0 && said !== '') {
-        tokens.set(login, { at: doneAt, token: said })
-        tokenMisses.delete(login)
-
-        return { token: said }
-      }
-      const error = tokenError(login)
-      tokenMisses.set(login, { at: doneAt, error })
-      const why = res === null ? 'gh auth token did not finish' : res.stderr.trim().split('\n')[0] || `gh auth token exited ${res.exitCode}`
-      const http = { status: null, headers: {}, body: '' }
-      await logFailure($, { login, size: 0, ms: doneAt - at, http, failure: 'other', error: `${error}: ${why}` })
-      const last = tokens.get(login)
-
-      return last !== undefined ? { token: last.token } : { error }
-    })().finally(() => tokenAsks.delete(login))
-  tokenAsks.set(login, asking)
-
-  return asking
-}
+// The login a call runs as, or what the card says where there is none. No token is read here:
+// gh() has gh hand the login's token to the one call it makes (AS_LOGIN).
+const asLogin = (login: string): AsLogin => (login === '' ? { error: tokenError('') } : { login })
 
 // The login a press acts as: the one the poller found sees the owner's repos, else the active
 // one, which polls the owners no other login was found for. Never another: a press whose
@@ -398,12 +363,17 @@ async function pressLogin($: EngineInterface, pr: TrackedPr): Promise<string> {
 const ownerOf = (ref: PrRef) => ref.repo.split('/')[0] ?? ''
 
 // One batch's call, timed, and what GitHub said: the status and headers, and the reply.
-async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], token: string, timeoutMs = GH_MS) {
+async function askBatch($: EngineInterface, part: readonly PrRef[], argv: string[], login: string, timeoutMs = GH_MS) {
   const startedAt = await $.clock.now()
-  // A call past its timeout throws: it fails as a timeout, rather than losing the round.
-  const res = await gh($, argv, token, undefined, timeoutMs).catch(() => ({
+  // A call past its timeout throws: it fails as a timeout, rather than losing the round. One
+  // that throws sooner was refused or couldn't start, and says why: never a timeout, so it
+  // isn't asked again.
+  const res = await gh($, argv, login, undefined, timeoutMs).catch(async (e: unknown) => ({
     stdout: '',
-    stderr: `gh api graphql did not finish: timeout after ${Math.round(timeoutMs / 1_000)}s`,
+    stderr:
+      (await $.clock.now()) - startedAt >= timeoutMs - 1_000
+        ? `gh api graphql did not finish: timeout after ${Math.round(timeoutMs / 1_000)}s`
+        : `gh api graphql didn't run: ${e instanceof Error ? e.message : String(e)}`,
   }))
   const http = parseHttp(res.stdout)
 
@@ -440,8 +410,8 @@ async function logFailure($: EngineInterface, call: CallLog) {
 // it and may take no more than is left (callBudget); the rest are `left` for the next round,
 // as they were. A secondary limit stops the asking (`waitMs`: how long every session holds
 // off), and spent points stop this login's. Neither is a card's error: the gh meter says it
-// (rate.ts), and the PRs keep what they have. Every batch goes as `login`, with its token; where
-// that won't come, nothing is asked, and the PRs fail as on a timeout: none is called not found.
+// (rate.ts), and the PRs keep what they have. Every batch goes as `login` (gh hands the call its
+// token); where gh won't, the call fails with tokenError's text and none is called not found.
 async function query($: EngineInterface, refs: readonly PrRef[], login: string, until: number, withLatest = false) {
   const out = {
     found: new Map<string, GhPr>(),
@@ -455,16 +425,9 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
     isLatestAsked: false,
     waitMs: null as number | null,
   }
-  // The token, too, comes inside the lease: a keyring that hangs never outlives it.
-  const tokenBudget = callBudget(until, await $.clock.now(), GH_MS)
-  if (tokenBudget === null) {
-    out.left.push(...refs)
-
-    return out
-  }
-  const token = await tokenFor($, login, tokenBudget)
-  if ('error' in token) {
-    for (const ref of refs) out.failed.set(ref.url, token.error)
+  const as = asLogin(login)
+  if ('error' in as) {
+    for (const ref of refs) out.failed.set(ref.url, as.error)
 
     return out
   }
@@ -478,13 +441,13 @@ async function query($: EngineInterface, refs: readonly PrRef[], login: string, 
     }
     const argv = ['api', 'graphql', '-f', `query=${buildQuery(part, withLatest && i === 0)}`, '-i']
     out.isLatestAsked ||= withLatest && i === 0
-    let call = await askBatch($, part, argv, token.token, budget)
+    let call = await askBatch($, part, argv, as.login, budget)
     let failure = await failureIn($, login, part.length, call)
     if (failure === 'timeout') {
       const retry = callBudget(until, (await $.clock.now()) + RETRY_MS, GH_MS)
       if (retry !== null) {
         await $.clock.sleep(RETRY_MS)
-        call = await askBatch($, part, argv, token.token, retry)
+        call = await askBatch($, part, argv, as.login, retry)
         failure = await failureIn($, login, part.length, call)
       }
     }
@@ -672,8 +635,8 @@ async function askRest($: EngineInterface, rates: Rates, at: number, until: numb
     const budget = callBudget(until, await $.clock.now(), REST_CALL_MS)
     if (budget === null) break
     // A login gh gives no token for is not asked as another: it counts as asked, unanswered.
-    const token = await tokenFor($, login, budget)
-    const res = 'token' in token ? await gh($, ['api', 'rate_limit'], token.token, undefined, budget).catch(() => null) : null
+    const as = asLogin(login)
+    const res = 'login' in as ? await gh($, ['api', 'rate_limit'], as.login, undefined, budget).catch(() => null) : null
     const read = res !== null && res.exitCode === 0 ? restOf(res.stdout, await $.clock.now()) : null
     seen = withSeen(seen, login, { ...read, askedAt: at })
   }
@@ -1020,16 +983,16 @@ async function runMerge($: EngineInterface, pr: TrackedPr, run: MergeRun) {
   if (!(await claimMerge($, pr.url, { method, busy }))) return
   let ask: MergeAsk = { method }
   try {
-    const got = await tokenFor($, await pressLogin($, pr))
+    const got = asLogin(await pressLogin($, pr))
     if ('error' in got) ask = { method, error: got.error }
     else {
-      let res = await gh($, mergeArgv(pr.url, run), got.token)
+      let res = await gh($, mergeArgv(pr.url, run), got.login)
       if (res.exitCode !== 0 && isServerError(res.stderr || res.stdout)) {
         await $.clock.sleep(RETRY_MS)
-        const view = await gh($, mergeReadArgv(pr.url), got.token).catch(() => null)
+        const view = await gh($, mergeReadArgv(pr.url), got.login).catch(() => null)
         const next = afterServerError(run, view !== null && view.exitCode === 0 ? mergeReadOf(view.stdout) : null)
         if (next === 'done') res = { ...res, exitCode: 0 }
-        else if (next === 'retry') res = await gh($, mergeArgv(pr.url, run), got.token)
+        else if (next === 'retry') res = await gh($, mergeArgv(pr.url, run), got.login)
       }
       if (res.exitCode !== 0) {
         const { message, isMethodRefused } = mergeError(res.stderr || res.stdout)
@@ -1111,11 +1074,10 @@ async function postComment($: EngineInterface, pr: TrackedPr, text: string) {
   let ask: CommentAsk = { isOpen: true }
   try {
     const login = await pressLogin($, pr)
-    const got = await tokenFor($, login)
+    const got = asLogin(login)
     if ('error' in got) ask = { isOpen: true, error: got.error }
     else {
-      // The text on stdin, never in argv (comment.ts), which is why this isn't gh().
-      const res = await $.process.run(['gh', ...commentArgv(pr)], { timeoutMs: GH_MS, env: { GH_TOKEN: got.token }, stdin: commentInput(text) })
+      const res = await gh($, commentArgv(pr, text), got.login)
       ask = res.exitCode === 0 ? { done: { url: commentUrl(res.stdout) ?? pr.url, login } } : { isOpen: true, error: commentError(res.stderr || res.stdout, login) }
     }
   } catch {
@@ -1187,18 +1149,18 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
   const busy = { at: await $.clock.now() }
   if (!(await claimHandoff($, 'fix', pr.url, busy))) return
   try {
-    const got = await tokenFor($, await pressLogin($, pr))
+    const got = asLogin(await pressLogin($, pr))
     // No token for that login: nothing is read as another one.
     if ('error' in got) {
       await settleHandoff($, 'fix', pr.url, busy.at, { error: got.error })
 
       return
     }
-    const { token } = got
+    const { login } = got
     let failures: Failure[]
     let problem: string | null = null
     try {
-      const res = await gh($, ['api', 'graphql', '-f', `query=${checksQuery(refOf(pr))}`], token)
+      const res = await gh($, ['api', 'graphql', '-f', `query=${checksQuery(refOf(pr))}`], login)
       const reply = parseChecks(res.stdout, res.stderr, refOf(pr))
       if ('error' in reply) throw new Error(reply.error)
       failures = failingChecks(reply.checks, pr.repo)
@@ -1219,7 +1181,7 @@ async function collectFailure($: EngineInterface, pr: TrackedPr) {
         if (!wanted.has(failure) || failure.jobId === null) return { failure }
         try {
           const argv = ['run', 'view', '--job', String(failure.jobId), '--log-failed', '-R', pr.repo]
-          const res = await gh($, argv, token, undefined, 60_000)
+          const res = await gh($, argv, login, undefined, 60_000)
 
           return res.exitCode === 0 ? { failure, log: res.stdout } : { failure, error: logError(res.stderr || res.stdout) }
         } catch {
@@ -1243,13 +1205,13 @@ async function collectThreads($: EngineInterface, pr: TrackedPr) {
   const busy = { at: await $.clock.now() }
   if (!(await claimHandoff($, 'address', pr.url, busy))) return
   try {
-    const got = await tokenFor($, await pressLogin($, pr))
+    const got = asLogin(await pressLogin($, pr))
     if ('error' in got) {
       await settleHandoff($, 'address', pr.url, busy.at, { error: got.error })
 
       return
     }
-    const res = await gh($, ['api', 'graphql', '-f', `query=${threadsQuery(refOf(pr))}`], got.token)
+    const res = await gh($, ['api', 'graphql', '-f', `query=${threadsQuery(refOf(pr))}`], got.login)
     const reply = parseThreads(res.stdout, res.stderr)
     if ('error' in reply) {
       await settleHandoff($, 'address', pr.url, busy.at, { error: `Couldn't read the review threads: ${reply.error}` })
@@ -1598,11 +1560,9 @@ export const register: Register = (on, options) => {
   ownVersion = undefined
   isPaneDrawn = false
   toldVersion = null
-  // gh's logins and their tokens are read again: one may have been added or logged out.
+  // gh's logins are read again: one may have been added or logged out.
   loginsKept = NO_LOGINS
   loginsAsked = undefined
-  tokens.clear()
-  tokenMisses.clear()
 
   // A change in /config applies from the next round, no reload needed.
   on('config.set', async ($, e, next) => {
