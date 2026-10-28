@@ -13,9 +13,11 @@ A [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview) that 
 │  ● CI RUNNING                       acme/app │
 │ #12 Retry uploads with exponential backoff   │
 │ feat/retry → main  +120 −14  @octocat        │
-│                                              │
 │ ✓ Open ━━━━━━ ⠹ CI ┈┈┈┈┈┈ ○ Review ┈┈ ○ Merge │
 │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1/3  │
+│                                              │
+│ Overview  Checks 1/3  Reviews 2  Threads     │
+│ ──────────────────────────────────────────── │
 │ Running build · 1 queued · 1/3 passed        │
 │ open #12 ↗ · checked just now             ✕  │
 ╰──────────────────────────────────────────────╯
@@ -69,6 +71,15 @@ Close (`x`), beside Refresh, closes the pane, as does `ctrl+x x` or the mark on 
 
 Each card shows the state that matters most first: merge conflicts, then failing or running CI (naming the checks), then review, then whether GitHub will let it merge. A toast appears when the state changes or a review lands, and the status line follows the focused PR.
 
+Under the stepper, a card has **tabs**. Each one counts what it holds, and a press shows it. The card keeps that tab until you pick another.
+
+- **Overview** (where a card starts): the headline, as above.
+- **Checks 2/3**: every check on the head commit, the latest run of each, failing first, then running, queued, passed and skipped.
+- **Reviews 1/2**: what the base branch's rules ask for (rulesets, and classic branch protection) and where the PR stands. It shows how many approvals are required and how many it has, then a row per required group: each code-owner team or person, and each team a ruleset requires. A row reads ✓ with who approved, ◷ waiting, or ✗ where a member asked for changes. Then come the approvals still owed by anyone, and every reviewer, each on a row. A ruleset's team that counts only for some files, and that no one asked or approved for, shows as ○ with its patterns: GitHub doesn't say whether the PR touches them. A code owner who is a person shows only while asked: once they approve, GitHub no longer says they were one.
+- **Threads 3**: each unresolved review thread, by file and line, with who opened it, their first line and how many replied.
+
+A tab reads GitHub when it opens, for that PR alone, so the poll asks no more than before. A press of the tab you're on reads it again, and so does a round that changes what the tab shows (a new review, a check finishing). A read that fails says why under the strip.
+
 Under the pane's buttons, the **gh meter** shows how much of GitHub's hourly budget each of your gh logins has left, so you can put off heavy `gh` work before it runs out:
 
 ```
@@ -115,7 +126,7 @@ A change applies at once. Switching to `band` closes the pane; switching back to
 - **`tide`**: each card is a glass that fills with liquid in its state's colour as the PR moves on. While CI runs the fill is the share of checks finished. In review it is nearly full, and ready or merged it is full. A closed PR's glass is empty. The liquid gets deeper toward the bottom and toward where it started. Its front is a wave that sways gently while the PR is moving and holds still when it isn't, and a full card that is still moving (auto-merge on) has a glint sweeping across. The header rule is a wave too.
 - **`aurora`**: each card is a night sky (a pale dawn on a light terminal) with soft curtains of northern light in its state's colours. The light reaches further across the card as the PR moves on, and drifts while it is moving.
 
-`tide` and `aurora` lay the card out differently: a headline row with the number, title and state badge on the right; a meta row with *repo · branch → base · +/−* and the author; what it is doing now, with the CI tally; then reviewers, open threads and errors. The fill itself shows progress, so there is no separate bar or stepper. Each text cell is drawn in whichever of the theme's two text colours reads better on that cell's own background, so text stays readable over both the filled and the empty part. The buttons and the `open #12 ↗` link sit on their own rows under the art and work as on any card. In a terminal the art is one painted cell grid per card, updated about five times a second, and only for cards that are moving. Emoji and other double-width characters in a title show as `?` or `•` there, because each cell holds one single-width character. Off the terminal (the desktop app), the same rows are drawn as plain text on the card's tint.
+`tide` and `aurora` lay the card out differently: a headline row with the number, title and state badge on the right; a meta row with *repo · branch → base · +/−* and the author; what it is doing now, with the CI tally; then reviewers, open threads and errors. The tab strip, and any tab but Overview, sit under the art. The fill itself shows progress, so there is no separate bar or stepper. Each text cell is drawn in whichever of the theme's two text colours reads better on that cell's own background, so text stays readable over both the filled and the empty part. The buttons and the `open #12 ↗` link sit on their own rows under the art and work as on any card. In a terminal the art is one painted cell grid per card, updated about five times a second, and only for cards that are moving. Emoji and other double-width characters in a title show as `?` or `•` there, because each cell holds one single-width character. Off the terminal (the desktop app), the same rows are drawn as plain text on the card's tint.
 
 `/pr-watch theme <name>` switches at once (any case: `/pr-watch theme Neon`) and saves the choice in `/config`, so every session uses it. Where `/config` has no row for it, the choice lasts for that session only, and the reply says so. `/pr-watch theme` lists the themes and marks the current one.
 

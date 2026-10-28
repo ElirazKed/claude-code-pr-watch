@@ -111,6 +111,37 @@ export type CommentAsk = {
   error?: string
 }
 
+// A card's tabs (tabs.ts): Overview, what the card has always said, and the three it reads on
+// its own when opened.
+export type Tab = 'overview' | 'checks' | 'reviews' | 'threads'
+
+// One check on the head commit, as the Checks tab lists it.
+export type CheckRow = { name: string; workflow: string | null; state: 'failed' | 'running' | 'queued' | 'passed' | 'skipped' }
+
+// One unresolved review thread, as the Threads tab lists it: where it is, who opened it, the
+// first line they wrote, and how many replied.
+export type ThreadRow = { spot: string; author: string; text: string; replies: number; isOutdated: boolean }
+
+// A group whose review the branch's rules ask for: a code owner (a team, or a person) or a
+// ruleset's required team. Approved by enough of its members; changes asked by one; asked and
+// waiting; or required only where the PR touches its files (`maybe`), which GitHub doesn't say.
+export type Gate = { name: string; state: 'approved' | 'changes' | 'waiting' | 'maybe'; by: string[]; need: number; patterns: string[] }
+
+// What the base branch's rules require of a PR's reviews, and where it stands.
+export type Approvals = {
+  // Approvals the rules ask for (the strictest rule), and the ones given.
+  required: number
+  approved: number
+  isOwnersRequired: boolean
+  gates: Gate[]
+}
+
+// What a tab read: being read, what came, or why nothing did; and the card as it was read
+// (tabs.ts's seenOf), so a round that changes it reads again.
+export type Fetched<T> = { busy?: Busy; data?: T; error?: string; seen?: string }
+
+export type Details = { checks?: Fetched<CheckRow[]>; reviews?: Fetched<Approvals>; threads?: Fetched<ThreadRow[]> }
+
 // A newer pr-watch than the one running, and how this copy updates (update.ts).
 export type Newer = { version: string; how: string }
 
@@ -155,6 +186,10 @@ declare module 'claude-code' {
       limits: Limits
       // Whether the gh meter's explanation is open (its `?`).
       ghHelp: boolean
+      // The tab each card shows, by PR url: Overview where none was picked.
+      tabs: Record<string, Tab>
+      // What each card's tabs read, by PR url.
+      details: Record<string, Details>
     }
   }
 }

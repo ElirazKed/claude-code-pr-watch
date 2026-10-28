@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Busy, CommentAsk, HandoffAsk, Limits, MergeAsk, Reviews, TrackedPr, Verdict } from '../types'
+import type { Approvals, Busy, CommentAsk, Details, Fetched, HandoffAsk, Limits, MergeAsk, Tab, TrackedPr, Verdict } from '../types'
 import { barCells, barRuns, fullBarCells, meterCells, ruleCells, ruleText, spinnerCell } from './look'
 import { artCard, artCells, bannerLines, roleTone } from './art'
 import type { ArtCard, Seg } from './art'
@@ -39,7 +39,8 @@ import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } 
 import type { Failure, Handoff } from './fix'
 import { resolveHeading, resolvePrompt } from './resolve'
 import { commentArgv, commentError, commentPlaceholder, commentUrl, isPostable } from './comment'
-import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside, verdictLine } from './review'
+import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside } from './review'
+import { TABS, approvalsHeading, approvalsOf, approvalsQuery, checkRows, gateNote, parseApprovals, parseTeams, ruledTeamIds, seenOf, stillNeeded, tabLabel, teamsQuery, threadRows } from './tabs'
 import { CHECK_MS, PRW_LINE, PRW_PILL, PRW_TEXT, PRW_URL, companionIn, headOf, howToUpdate, isNewer, isPrwIn, noticeLines, noticeToast, versionIn } from './update'
 import type { CompanionState } from './update'
 import { BAND_ROWS, SHARED_ROWS, actionsOf, buttonCells, layoutOf, planOf, rowOf } from './band'
@@ -81,6 +82,9 @@ const companion = atom({ plugin: 'pr-watch', key: 'companion' } as const, false)
 const limits = atom({ plugin: 'pr-watch', key: 'limits' } as const, { logins: [], heldUntil: 0 })
 // Whether the gh meter's explanation is open (its `?`): shut until asked, per session.
 const ghHelp = atom({ plugin: 'pr-watch', key: 'ghHelp' } as const, false)
+// Each card's tab, and what its tabs read (tabs.ts), by PR url.
+const tabs = atom({ plugin: 'pr-watch', key: 'tabs' } as const, {})
+const details = atom({ plugin: 'pr-watch', key: 'details' } as const, {})
 const WATCH_TOOL = 'mcp__pr-watch__watch'
 const FRAME_MS = 90
 
@@ -802,9 +806,10 @@ async function apply($: EngineInterface, shared: Shared) {
   }
   await refreshStatus($)
   await syncAnimation($)
-  // Last, and never thrown: the update notice must not cost a PR result.
+  // Last, and never thrown: the update notice, and a tab read again, must not cost a PR result.
   await sayNewer($, shared).catch(() => undefined)
   await sayCompanion($).catch(() => undefined)
+  await refreshTabs($, next).catch(() => undefined)
 }
 
 // What the gh meter shows: the logged-in logins' buckets, the active one first (every login the
@@ -1519,6 +1524,94 @@ async function syncAnimation($: EngineInterface) {
   }
 }
 
+// ---- A card's tabs (tabs.ts) --------------------------------------------------------------
+
+type Reads = Exclude<Tab, 'overview'>
+type Got = { data: NonNullable<Fetched<unknown>['data']> } | { error: string }
+
+// One query for this PR alone, of what the tab shows, as the gh account the poller found sees
+// the repo; a ruleset's teams take a second, for their names.
+async function fetchTab($: EngineInterface, pr: TrackedPr, tab: Reads, login: string): Promise<Got> {
+  const ref = refOf(pr)
+  const ask = async (query: string) => gh($, ['api', 'graphql', '-f', `query=${query}`], login)
+  if (tab === 'checks') {
+    const res = await ask(checksQuery(ref))
+    const reply = parseChecks(res.stdout, res.stderr, ref)
+
+    return 'error' in reply ? { error: `Couldn't read the checks: ${reply.error}` } : { data: checkRows(reply.checks) }
+  }
+  if (tab === 'threads') {
+    const res = await ask(threadsQuery(ref))
+    const reply = parseThreads(res.stdout, res.stderr)
+
+    return 'error' in reply ? { error: `Couldn't read the review threads: ${reply.error}` } : { data: threadRows(reply.threads) }
+  }
+  const res = await ask(approvalsQuery(ref))
+  const reply = parseApprovals(res.stdout, res.stderr)
+  if ('error' in reply) return { error: `Couldn't read the review rules: ${reply.error}` }
+  const ids = ruledTeamIds(reply.pr)
+  // Teams it can't name are left out, as for a login that can't see them.
+  const teams = ids.length === 0 ? new Map<string, string>() : parseTeams((await ask(teamsQuery(ids)).catch(() => ({ stdout: '' }))).stdout)
+
+  return { data: approvalsOf(reply.pr, ownerOf(pr), teams) }
+}
+
+// Reads a card's tab, once at a time: a read under way is not started again. What it came to
+// replaces what the tab held; a failure keeps what was there, with why beside it. Dismissed
+// meanwhile, the card's row is gone, and what came is dropped.
+async function readTab($: EngineInterface, pr: TrackedPr, tab: Reads) {
+  const at = await $.clock.now()
+  let isClaimed = false
+  await update($, details, all => {
+    const held: Fetched<unknown> | undefined = all[pr.url]?.[tab]
+    isClaimed = !isBusy(held?.busy, at)
+
+    return isClaimed ? ({ ...all, [pr.url]: { ...all[pr.url], [tab]: { ...held, busy: { at } } } } as Record<string, Details>) : all
+  })
+  if (!isClaimed) return
+  const seen = seenOf(tab, pr)
+  const settle = (got: Got) =>
+    update($, details, all => {
+      const held: Fetched<unknown> | undefined = all[pr.url]?.[tab]
+      if (held?.busy?.at !== at || !(pr.url in all)) return all
+      const fetched = 'error' in got ? { data: held.data, error: got.error, seen } : { data: got.data, seen }
+
+      return { ...all, [pr.url]: { ...all[pr.url], [tab]: fetched } } as Record<string, Details>
+    })
+  try {
+    const got = asLogin(await pressLogin($, pr))
+    await settle('error' in got ? { error: got.error } : await fetchTab($, pr, tab, got.login))
+  } catch {
+    await settle({ error: "Couldn't read GitHub" })
+  }
+}
+
+// A tab pressed: the card shows it from then on, and a tab that reads, reads now (pressed
+// again, again: it is also how to read it afresh).
+async function openTab($: EngineInterface, pr: TrackedPr, tab: Tab) {
+  await update($, tabs, all => {
+    const { [pr.url]: _, ...rest } = all
+
+    return tab === 'overview' ? rest : { ...rest, [pr.url]: tab }
+  })
+  if (tab !== 'overview') await readTab($, pr, tab)
+}
+
+// After a round: a card on a tab that reads reads it again where the round changed what it
+// shows; one that didn't costs nothing.
+async function refreshTabs($: EngineInterface, list: readonly TrackedPr[]) {
+  const shown = await read($, tabs)
+  const held = await read($, details)
+  const stale = list.flatMap(pr => {
+    const tab = shown[pr.url]
+    if (tab === undefined || tab === 'overview') return []
+    const fetched: Fetched<unknown> | undefined = held[pr.url]?.[tab]
+
+    return fetched !== undefined && fetched.seen !== seenOf(tab, pr) ? [{ pr, tab }] : []
+  })
+  await Promise.all(stale.map(({ pr, tab }) => readTab($, pr, tab)))
+}
+
 async function dismiss($: EngineInterface, url: string) {
   await update($, prs, list => list.filter(pr => pr.url !== url))
   await update($, dropped, list => (list.includes(url) ? list : [...list, url]))
@@ -1527,6 +1620,8 @@ async function dismiss($: EngineInterface, url: string) {
   await setHandoff($, 'address', url, null)
   await setHandoff($, 'resolve', url, null)
   await setComment($, url, null)
+  await update($, tabs, ({ [url]: _, ...rest }) => rest)
+  await update($, details, ({ [url]: _, ...rest }) => rest)
   drafts.delete(url)
   barWidth.delete(url)
   artCards.delete(url)
@@ -1773,6 +1868,8 @@ export const register: Register = (on, options) => {
     const handoffs = await readHandoffs($)
     const retries = await read($, retrying)
     const comments = await read($, commenting)
+    const shownTabs = await read($, tabs)
+    const read_ = await read($, details)
     // The login an open field will post as, for its placeholder.
     // Only for a field that draws (an open card, a surface with Input), and results.json and
     // gh's logins read once for all of them, not once per card on every redraw.
@@ -2179,36 +2276,201 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // Who reviewed, and the threads still open: "✓ alice approved · 💬 nadav commented" and
-    // "3 unresolved threads (1 outdated)", each only when there is something to say.
-    const reviewLines = (reviews: Reviews, threads: string) => {
-      const pieces = verdictLine(reviews, inner)
+    // ---- The tabs (tabs.ts): a strip of them under the stepper, and the one shown under it.
+    const tabOf = (pr: TrackedPr): Tab => shownTabs[pr.url] ?? 'overview'
+
+    // "Overview  Checks 2/3  Reviews 1/2  Threads 3": the one shown bold in the card's colour.
+    const tabStrip = (pr: TrackedPr) => {
+      const shown = tabOf(pr)
+
+      return (
+        <Box columnGap={2} flexWrap="wrap">
+          {TABS.map(tab => {
+            const { name, count } = tabLabel(tab, pr, read_[pr.url]?.reviews?.data)
+            const isShown = tab === shown
+
+            return (
+              <Button key={`tab:${tab}:${pr.url}`} label={count === '' ? name : `${name} ${count}`} plain dimColor={!isShown} onPress={() => openTab($, pr, tab)}>
+                <Text bold={isShown} underline={isShown} color={isShown ? ink(pr.tone, 'steps') : undefined}>
+                  {name}
+                </Text>
+                {count !== '' && <Text dimColor> {count}</Text>}
+              </Button>
+            )
+          })}
+        </Box>
+      )
+    }
+
+    // What a reading tab says while it reads with nothing yet to show, or why it couldn't.
+    const readNote = (fetched: Fetched<unknown> | undefined, what: string) => {
+      if (fetched === undefined || (fetched.data === undefined && isBusy(fetched.busy, at))) {
+        return <Text color={ink('suggestion')}>{`◌ Reading ${what}…`}</Text>
+      }
+
+      return fetched.error === undefined ? null : (
+        <Text color={ink('error')} wrap="wrap">
+          {`✗ ${fetched.error}`}
+        </Text>
+      )
+    }
+
+    // At most `max` rows, then "+3 more".
+    const capped = <T,>(rows: readonly T[], max: number) => ({ shown: rows.slice(0, rows.length > max ? max - 1 : max), more: rows.length > max ? rows.length - max + 1 : 0 })
+    const moreRow = (more: number, what = '') => more > 0 && <Text dimColor>{`  +${more} more${what}`}</Text>
+
+    const CHECK_ICON = { failed: '✗', running: '◌', queued: '○', passed: '✓', skipped: '⊘' } as const
+    const CHECK_TONE = { failed: 'error', running: 'warning', queued: undefined, passed: 'success', skipped: undefined } as const
+
+    // Every check on the head commit, failing first: "✗ unit · CI". Before the first read, what
+    // the poll knows: the failing and running ones by name, and how many passed or wait.
+    const checksPanel = (pr: TrackedPr) => {
+      const fetched = read_[pr.url]?.checks
+      const rows = fetched?.data
+      if (rows === undefined) {
+        const { failing, running, queued, passed } = pr.checks
+
+        return (
+          <Box flexDirection="column">
+            {readNote(fetched, 'the checks')}
+            {failing.map(name => (
+              <Text color={ink('error')} wrap="truncate-end">{`✗ ${name}`}</Text>
+            ))}
+            {running.map(name => (
+              <Text color={ink('warning')} wrap="truncate-end">{`◌ ${name}`}</Text>
+            ))}
+            {queued + passed > 0 && <Text dimColor>{[queued > 0 ? `${queued} queued` : '', passed > 0 ? `${passed} passed` : ''].filter(Boolean).join(' · ')}</Text>}
+          </Box>
+        )
+      }
+      if (rows.length === 0) return <Text dimColor>No checks have reported on the head commit.</Text>
+      const { shown, more } = capped(rows, 10)
 
       return (
         <Box flexDirection="column">
-          {pieces.length > 0 && (
-            <Text wrap="truncate-end">
-              {pieces.map((piece, i) => {
-                // A pending request, or "+2 more": dim.
-                const tone = piece.verdict === null ? undefined : VERDICT_COLOUR[piece.verdict]
-                const colour = tone === undefined ? undefined : ink(tone)
+          {readNote(fetched, 'the checks')}
+          {shown.map(row => {
+            const tone = CHECK_TONE[row.state]
+
+            return (
+              <Text wrap="truncate-end">
+                <Text color={tone === undefined ? undefined : ink(tone)} dimColor={tone === undefined}>{`${CHECK_ICON[row.state]} ${row.name}`}</Text>
+                {row.workflow !== null && <Text dimColor>{` · ${row.workflow}`}</Text>}
+                {row.state === 'skipped' && <Text dimColor> · skipped</Text>}
+              </Text>
+            )
+          })}
+          {moreRow(more)}
+        </Box>
+      )
+    }
+
+    const GATE_ICON = { approved: '✓', changes: '✗', waiting: '◷', maybe: '○' } as const
+    const GATE_TONE = { approved: 'success', changes: 'error', waiting: 'warning', maybe: undefined } as const
+    const VERDICT_SAYS: Record<Verdict, string> = { approved: 'approved', changes: 'requested changes', commented: 'commented', requested: 'asked' }
+    const VERDICT_ICON: Record<Verdict, string> = { approved: '✓', changes: '✗', commented: '💬', requested: '◷' }
+
+    // What the branch's rules ask for and where each part stands: "Required · 1 of 2
+    // approvals", a row per code owner or required team (✓ met, by whom; ◷ waiting; ✗ changes
+    // asked), the approvals still owed by anyone; then every reviewer, a row each.
+    const reviewsPanel = (pr: TrackedPr) => {
+      const fetched = read_[pr.url]?.reviews
+      const approvals: Approvals | undefined = fetched?.data
+      // A code owner still asked has its gate's row: not a second one here.
+      const gated = new Set((approvals?.gates ?? []).map(gate => gate.name.replace(/^@(?:[^/]+\/)?/, '')))
+      const reviewers = (pr.reviews?.reviewers ?? []).filter(reviewer => reviewer.verdict !== 'requested' || !gated.has(reviewer.login))
+      const nameW = Math.min(22, Math.max(0, ...(approvals?.gates ?? []).map(gate => gate.name.length)))
+      const owed = approvals === undefined ? '' : stillNeeded(approvals)
+
+      return (
+        <Box flexDirection="column">
+          {readNote(fetched, 'the review rules')}
+          {approvals !== undefined && (
+            <Box flexDirection="column">
+              <Text bold wrap="truncate-end">
+                {approvalsHeading(approvals)}
+              </Text>
+              {approvals.gates.map(gate => {
+                const tone = GATE_TONE[gate.state]
 
                 return (
-                  <Text>
-                    {i > 0 && <Text dimColor> · </Text>}
-                    <Text color={colour} dimColor={colour === undefined}>
-                      {piece.text}
+                  <Text wrap="truncate-end">
+                    <Text color={tone === undefined ? undefined : ink(tone)} dimColor={tone === undefined}>
+                      {` ${GATE_ICON[gate.state]} ${gate.name.length > nameW ? `${gate.name.slice(0, nameW - 1)}…` : gate.name.padEnd(nameW)}`}
                     </Text>
+                    <Text dimColor>{`  ${gateNote(gate)}`}</Text>
                   </Text>
                 )
               })}
-            </Text>
+              {owed !== '' && (
+                <Text wrap="truncate-end">
+                  <Text color={ink('warning')}>{` ○ ${owed}`}</Text>
+                  <Text dimColor> · anyone with write access</Text>
+                </Text>
+              )}
+            </Box>
           )}
-          {threads !== '' && (
-            <Text color={ink('warning')} wrap="truncate-end">
-              {threads}
-            </Text>
+          {reviewers.length > 0 && (
+            <Box flexDirection="column" marginTop={approvals === undefined ? 0 : 1}>
+              <Text bold>Reviewers</Text>
+              {reviewers.map(reviewer => {
+                const tone = VERDICT_COLOUR[reviewer.verdict]
+
+                return (
+                  <Text wrap="truncate-end">
+                    <Text color={tone === undefined ? undefined : ink(tone)} dimColor={tone === undefined}>{` ${VERDICT_ICON[reviewer.verdict]} ${reviewer.login}`}</Text>
+                    <Text dimColor>{` ${VERDICT_SAYS[reviewer.verdict]}`}</Text>
+                  </Text>
+                )
+              })}
+              {moreRow(pr.reviews?.more ?? 0)}
+            </Box>
           )}
+          {reviewers.length === 0 && approvals !== undefined && <Text dimColor>No reviews yet.</Text>}
+        </Box>
+      )
+    }
+
+    // The threads still open, by file and line: where, then who opened it and what they said.
+    const threadsPanel = (pr: TrackedPr) => {
+      const fetched = read_[pr.url]?.threads
+      const rows = fetched?.data
+      const note = readNote(fetched, 'the threads')
+      if (rows === undefined) return note
+      if (rows.length === 0) return note ?? <Text dimColor>No unresolved threads.</Text>
+      const { shown, more } = capped(rows, 5)
+
+      return (
+        <Box flexDirection="column">
+          {note}
+          {shown.map(row => (
+            <Box flexDirection="column">
+              <Text wrap="truncate-start">
+                <Text color={ink(row.isOutdated ? 'subtle' : 'warning')}>{row.spot}</Text>
+                {row.replies > 0 && <Text dimColor>{` · ${row.replies} repl${row.replies === 1 ? 'y' : 'ies'}`}</Text>}
+              </Text>
+              <Text wrap="truncate-end">
+                <Text bold>{`  ${row.author || 'ghost'}`}</Text>
+                <Text dimColor>{` ${row.text}`}</Text>
+              </Text>
+            </Box>
+          ))}
+          {moreRow(more)}
+        </Box>
+      )
+    }
+
+    // A card's tab strip, a rule, and the panel of a reading tab: nothing for Overview, whose
+    // rows are the card's own. None for a card never read, which has nothing to tab through.
+    const tabsBlock = (pr: TrackedPr, overview: RenderChildren) => {
+      if (pr.checkedAt === null || pr.isNotFound) return overview
+      const tab = tabOf(pr)
+
+      return (
+        <Box flexDirection="column">
+          <Box marginTop={1}>{tabStrip(pr)}</Box>
+          <Text dimColor>{'─'.repeat(inner)}</Text>
+          {tab === 'overview' ? overview : tab === 'checks' ? checksPanel(pr) : tab === 'reviews' ? reviewsPanel(pr) : threadsPanel(pr)}
         </Box>
       )
     }
@@ -2247,6 +2509,7 @@ export const register: Register = (on, options) => {
       const label = `${pr.checks.passed}/${pr.checks.total}`
       const barW = Math.max(6, inner - label.length - 1)
       const hasBar = (pr.state === 'OPEN' && pr.checks.total > 0) || isMerged
+      // The headline's own note on the threads it counts ("1 outdated"); the Threads tab has the rest.
       const threads = pr.state === 'OPEN' && pr.reviews !== null ? threadsBeside(pr.headline, pr.reviews) : { line: '', note: '' }
 
       if (hasBar && !isMerged) barWidth.set(pr.url, barW)
@@ -2295,7 +2558,7 @@ export const register: Register = (on, options) => {
             </Text>
           )}
 
-          <Box marginTop={1}>
+          <Box>
             {STEPS.map((name, i) => (
               <Box>
                 {glyph(i)}
@@ -2341,18 +2604,14 @@ export const register: Register = (on, options) => {
             </Box>
           )}
 
-          <Text color={toneColour} wrap="wrap">
-            {pr.headline}
-            {isMerged && pr.mergedAt !== null && <Text dimColor> · {ago(at - Date.parse(pr.mergedAt))}</Text>}
-            {threads.note !== '' && <Text dimColor> · {threads.note}</Text>}
-          </Text>
-          {pr.checks.failing.length > 2 &&
-            pr.checks.failing.slice(2, 5).map(name => (
-              <Text color={ink('error')} dimColor wrap="truncate-end">
-                {'  '}✗ {name}
-              </Text>
-            ))}
-          {pr.state === 'OPEN' && pr.reviews !== null && reviewLines(pr.reviews, threads.line)}
+          {tabsBlock(
+            pr,
+            <Text color={toneColour} wrap="wrap">
+              {pr.headline}
+              {isMerged && pr.mergedAt !== null && <Text dimColor> · {ago(at - Date.parse(pr.mergedAt))}</Text>}
+              {threads.note !== '' && <Text dimColor> · {threads.note}</Text>}
+            </Text>,
+          )}
           {pr.error !== null && (
             <Text color={ink('error')} wrap="truncate-end">
               ⚠ {pr.error}
@@ -2376,6 +2635,8 @@ export const register: Register = (on, options) => {
       const glass = variant.tones[pr.tone].fill ?? undefined
       const below = (
         <Box flexDirection="column" paddingX={1} backgroundColor={glass}>
+          {/* The art is the banner's Overview: the strip, and another tab's panel, go under it. */}
+          {tabsBlock(pr, null)}
           {notFoundRow(pr)}
           {pr.state === 'OPEN' && actionRow(pr)}
           {pr.state === 'OPEN' && mergeRow(pr)}
