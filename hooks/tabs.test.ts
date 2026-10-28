@@ -199,6 +199,7 @@ describe('the Reviews tab', () => {
     ])
     expect(approvalsHeading(approvals)).toBe('Required · 1 of 1 approval')
     expect(stillNeeded(approvals)).toBe('')
+    expect(gateNote({ name: '@acme/fyi', state: 'maybe', by: [], need: 1, patterns: [] })).toBe('for some files')
   })
 
   test('classic branch protection counts too, the stricter of it and the rulesets', async () => {

@@ -283,6 +283,17 @@ export function checksQuery(ref: PrRef): string {
 }`
 }
 
+// One PR's checks as the poll has them, names and states only: what the Checks tab lists.
+export function rollupQuery(ref: PrRef): string {
+  const [owner = '', name = ''] = ref.repo.split('/')
+
+  return `query {
+  p0: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${ref.number}) {
+    ${checksOf()}
+  } }
+}`
+}
+
 export function parseChecks(stdout: string, stderr: string, ref: PrRef): { checks: CheckItem[] } | { error: string } {
   const reply = parseReply(stdout, stderr, [ref])
   if (reply.error !== null) return { error: reply.error }

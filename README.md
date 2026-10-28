@@ -78,7 +78,7 @@ Under the stepper, a card has **tabs**. Each one counts what it holds, and a pre
 - **Reviews 1/2**: what the base branch's rules ask for (rulesets, and classic branch protection) and where the PR stands. It shows how many approvals are required and how many it has, then a row per required group: each code-owner team or person, and each team a ruleset requires. A row reads ✓ with who approved, ◷ waiting, or ✗ where a member asked for changes. Then come the approvals still owed by anyone, and every reviewer, each on a row. A ruleset's team that counts only for some files, and that no one asked or approved for, shows as ○ with its patterns: GitHub doesn't say whether the PR touches them. A code owner who is a person shows only while asked: once they approve, GitHub no longer says they were one.
 - **Threads 3**: each unresolved review thread, by file and line, with who opened it, their first line and how many replied.
 
-A tab reads GitHub when it opens, for that PR alone, so the poll asks no more than before. A press of the tab you're on reads it again, and so does a round that changes what the tab shows (a new review, a check finishing). A read that fails says why under the strip.
+A tab reads GitHub when it opens, for that PR alone, so the poll asks no more than before. A press of the tab you're on reads it again, and so does a round that changes what the tab shows (a new review, a check finishing). A read that fails says why under the strip, and the next round tries it again.
 
 Under the pane's buttons, the **gh meter** shows how much of GitHub's hourly budget each of your gh logins has left, so you can put off heavy `gh` work before it runs out:
 

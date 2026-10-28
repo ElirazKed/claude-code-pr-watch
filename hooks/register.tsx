@@ -32,7 +32,7 @@ import {
   stepIndex,
   touched,
 } from './pr'
-import { appendLog, buildQuery, callBudget, checksQuery, chunks, failureOf, logLine, parseChecks, parseHttp, parseReply, rateOf, retryAfterOf } from './batch'
+import { appendLog, buildQuery, callBudget, checksQuery, chunks, failureOf, logLine, parseChecks, parseHttp, parseReply, rateOf, retryAfterOf, rollupQuery } from './batch'
 import type { CallFailure, CallLog, Http, RateLimit } from './batch'
 import { addressHeading, addressPrompt, openThreads, parseThreads, redraft, threadsQuery } from './address'
 import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } from './fix'
@@ -809,7 +809,8 @@ async function apply($: EngineInterface, shared: Shared) {
   // Last, and never thrown: the update notice, and a tab read again, must not cost a PR result.
   await sayNewer($, shared).catch(() => undefined)
   await sayCompanion($).catch(() => undefined)
-  await refreshTabs($, next).catch(() => undefined)
+  // Not awaited: the round's tick never waits on a tab's own reads.
+  void refreshTabs($, next).catch(() => undefined)
 }
 
 // What the gh meter shows: the logged-in logins' buckets, the active one first (every login the
@@ -1535,7 +1536,7 @@ async function fetchTab($: EngineInterface, pr: TrackedPr, tab: Reads, login: st
   const ref = refOf(pr)
   const ask = async (query: string) => gh($, ['api', 'graphql', '-f', `query=${query}`], login)
   if (tab === 'checks') {
-    const res = await ask(checksQuery(ref))
+    const res = await ask(rollupQuery(ref))
     const reply = parseChecks(res.stdout, res.stderr, ref)
 
     return 'error' in reply ? { error: `Couldn't read the checks: ${reply.error}` } : { data: checkRows(reply.checks) }
@@ -1566,7 +1567,8 @@ async function readTab($: EngineInterface, pr: TrackedPr, tab: Reads) {
     const held: Fetched<unknown> | undefined = all[pr.url]?.[tab]
     isClaimed = !isBusy(held?.busy, at)
 
-    return isClaimed ? ({ ...all, [pr.url]: { ...all[pr.url], [tab]: { ...held, busy: { at } } } } as Record<string, Details>) : all
+    // What the last read failed with goes: this read says its own.
+    return isClaimed ? ({ ...all, [pr.url]: { ...all[pr.url], [tab]: { data: held?.data, seen: held?.seen, busy: { at } } } } as Record<string, Details>) : all
   })
   if (!isClaimed) return
   const seen = seenOf(tab, pr)
@@ -1574,7 +1576,8 @@ async function readTab($: EngineInterface, pr: TrackedPr, tab: Reads) {
     update($, details, all => {
       const held: Fetched<unknown> | undefined = all[pr.url]?.[tab]
       if (held?.busy?.at !== at || !(pr.url in all)) return all
-      const fetched = 'error' in got ? { data: held.data, error: got.error, seen } : { data: got.data, seen }
+      // A failed read marks nothing as seen, so the next round tries it again.
+      const fetched = 'error' in got ? { data: held.data, error: got.error } : { data: got.data, seen }
 
       return { ...all, [pr.url]: { ...all[pr.url], [tab]: fetched } } as Record<string, Details>
     })
@@ -1598,7 +1601,7 @@ async function openTab($: EngineInterface, pr: TrackedPr, tab: Tab) {
 }
 
 // After a round: a card on a tab that reads reads it again where the round changed what it
-// shows; one that didn't costs nothing.
+// shows, or where its last read failed; one that didn't costs nothing.
 async function refreshTabs($: EngineInterface, list: readonly TrackedPr[]) {
   const shown = await read($, tabs)
   const held = await read($, details)

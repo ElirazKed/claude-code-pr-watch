@@ -1870,6 +1870,21 @@ test("a tab that can't be read says why under the strip, and a press reads it ag
   await ui.unmount()
 })
 
+test('a tab whose read failed reads again on the next round, though the card did not change', async ($, on) => {
+  const { clock, host, ui } = await tabsPane($, on, { [RUNNING]: GH[RUNNING] })
+  host.blips.push({ stderr: 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' })
+  const pressed = ui.press({ key: `tab:checks:${RUNNING}` })
+  await clock.advance(10)
+  await pressed
+  expect(await ui.find({ text: /Couldn't read the checks/ })).toBeDefined()
+  await clock.advance(70_000)
+  expect(await ui.find({ text: /Couldn't read/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '✓ lint' })).toBeDefined()
+  // The tab asks for names and states only, never the failed runs' summaries.
+  expect(host.asked.filter(query => query.includes('statusCheckRollup') && !query.includes('reviewThreads')).every(query => !query.includes('checkSuites'))).toBe(true)
+  await ui.unmount()
+})
+
 test('a card with unresolved threads offers Address with Claude; a resolved or unreviewed one does not', async ($, on) => {
   const done = pr(READY, { statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')], reviews: comments, threads: [{ isResolved: true, isOutdated: false }] })
   const { ui } = await fixCard($, on, { [REVIEWED]: discussed, [READY]: done, [BROKEN]: broken })

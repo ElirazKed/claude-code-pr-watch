@@ -253,6 +253,7 @@ export function gateNote(gate: Gate): string {
   if (gate.state === 'changes') return 'changes requested'
   if (gate.state === 'approved') return gate.by.join(', ')
   if (gate.state === 'maybe') {
+    if (gate.patterns.length === 0) return 'for some files'
     const more = gate.patterns.length > 2 ? ` +${gate.patterns.length - 2}` : ''
 
     return `if it changes ${gate.patterns.slice(0, 2).join(', ')}${more}`
