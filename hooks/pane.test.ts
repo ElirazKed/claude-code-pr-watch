@@ -62,29 +62,54 @@ type Thread = { isResolved: boolean; isOutdated: boolean }
 
 // The review connections GitHub answers the poller with, from a fixture's `reviews` (every
 // review, oldest first), `requested` (logins with a request pending) and `threads`. As GitHub
-// does, the latest reviews leave out a reviewer with a request pending.
+// does, the latest reviews leave out a reviewer with a request pending. For the Reviews tab:
+// `ownerTeams`, code-owner teams asked (and `owners`, the requested logins CODEOWNERS asked),
+// and `onBehalf`, the teams each login's review counted for.
 function reviewsGql(fixture: Record<string, unknown>) {
   const said = (fixture.reviews ?? []) as Said[]
   const requested = (fixture.requested ?? []) as string[]
   const threads = (fixture.threads ?? []) as Thread[]
+  const owners = (fixture.owners ?? []) as string[]
+  const ownerTeams = (fixture.ownerTeams ?? []) as string[]
+  const onBehalf = (fixture.onBehalf ?? {}) as Record<string, string[]>
   const node = (r: Said) => ({ author: { __typename: r.isBot ? 'Bot' : 'User', login: r.login }, state: r.state, submittedAt: r.at })
   const latest = [...new Map(said.map(r => [r.login, r])).values()].filter(r => !requested.includes(r.login)).map(node)
-  const opinionated = [...new Map(said.filter(r => r.state !== 'COMMENTED').map(r => [r.login, r])).values()].map(node)
+  const opinionated = [...new Map(said.filter(r => r.state !== 'COMMENTED').map(r => [r.login, r])).values()].map(r => ({
+    ...node(r),
+    onBehalfOf: { nodes: (onBehalf[r.login] ?? []).map(slug => ({ slug })) },
+  }))
+  const requests = [
+    ...requested.map(login => ({ asCodeOwner: owners.includes(login), requestedReviewer: { __typename: 'User', login } })),
+    ...ownerTeams.map(slug => ({ asCodeOwner: true, requestedReviewer: { __typename: 'Team', slug } })),
+  ]
 
   return {
     latestReviews: { totalCount: latest.length, nodes: latest },
     latestOpinionatedReviews: { nodes: opinionated },
-    reviewRequests: { totalCount: requested.length, nodes: requested.map(login => ({ requestedReviewer: { __typename: 'User', login } })) },
+    reviewRequests: { totalCount: requests.length, nodes: requests },
     reviewThreads: { totalCount: threads.length, nodes: threads },
   }
 }
+
+// The base branch's rules, from a fixture's `required` (approvals) and `ownersRequired`.
+const rulesGql = (fixture: Record<string, unknown>) => ({
+  baseRef: {
+    rules: {
+      nodes: [
+        { type: 'PULL_REQUEST', parameters: { requiredApprovingReviewCount: fixture.required ?? 0, requireCodeOwnerReview: fixture.ownersRequired === true, requiredReviewers: [] } },
+      ],
+    },
+    branchProtectionRule: null,
+  },
+})
 
 // gh's GraphQL shape for a fixture: the repository alias with its merge settings, and the PR
 // in it, checks nested under the head commit. A check run's title and summary come only by
 // the commit's check suites, for failed runs, and only when `query` asks for them there; the
 // reviews only when it asks for them (the poller's query).
 const asGql = (fixture: Record<string, unknown>, query = '') => {
-  const { statusCheckRollup, repository, reviews: _r, requested: _q, threads: _t, ...rest } = fixture
+  const { statusCheckRollup, repository, reviews: _r, requested: _q, threads: _t, owners: _o, ownerTeams: _ot, onBehalf: _b, required: _n, ownersRequired: _or, ...rest } =
+    fixture
   const all = statusCheckRollup as Record<string, unknown>[]
   const nodes = all.map(({ title: _t, summary: _s, ...item }) => item)
   const failed = all
@@ -93,9 +118,10 @@ const asGql = (fixture: Record<string, unknown>, query = '') => {
   const suites = query.includes('checkSuites') ? { checkSuites: { nodes: [{ checkRuns: { nodes: failed } }] } } : {}
   const commits = { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes } }, ...suites } }] }
 
-  const reviews = query.includes('reviewThreads') ? reviewsGql(fixture) : {}
+  const reviews = query.includes('reviewThreads') || query.includes('asCodeOwner') ? reviewsGql(fixture) : {}
+  const rules = query.includes('branchProtectionRule') ? rulesGql(fixture) : {}
 
-  return { ...(repository as object | undefined), pullRequest: { ...rest, closedAt: null, commits, ...reviews } }
+  return { ...(repository as object | undefined), pullRequest: { ...rest, closedAt: null, commits, ...reviews, ...rules } }
 }
 
 type MergeReply = { exitCode: number; stderr?: string }
@@ -1606,7 +1632,7 @@ const commented = pr(REVIEWED, {
   threads: [unresolved(), unresolved(), unresolved(true), { isResolved: true, isOutdated: false }],
 })
 
-test('a card shows who reviewed and the threads still open, and the comments are the headline', async ($, on) => {
+test('a card counts its reviewers and threads on its tabs, the comments the headline; Reviews lists who reviewed', async ($, on) => {
   const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
   quietUi(on)
   fakeHost(on, clock, { [REVIEWED]: commented })
@@ -1618,15 +1644,25 @@ test('a card shows who reviewed and the threads still open, and the comments are
     expect(await ui.find({ text: /💬 COMMENTS/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '3 comments to address · 1 outdated' })).toBeDefined()
     expect(await ui.find({ text: /Waiting for review/ })).toBeUndefined()
-    // Docked at 50 columns the verbs don't fit: icons and names.
-    expect(await ui.find({ type: 'Text', text: '💬 nadav · 💬 codebot · ◷ carol' })).toBeDefined()
-    // The headline counts the threads, so no second line says it again.
-    expect(await ui.find({ text: /unresolved/ })).toBeUndefined()
+    // Overview names no reviewer: the tabs count them.
+    expect(await ui.find({ text: /nadav|carol/ })).toBeUndefined()
+    expect((await ui.find({ key: `tab:overview:${REVIEWED}` }))?.props.label).toBe('Overview')
+    expect((await ui.find({ key: `tab:checks:${REVIEWED}` }))?.props.label).toBe('Checks 1/1')
+    expect((await ui.find({ key: `tab:reviews:${REVIEWED}` }))?.props.label).toBe('Reviews 3')
+    expect((await ui.find({ key: `tab:threads:${REVIEWED}` }))?.props.label).toBe('Threads 3')
     await ui.unmount()
   }
-  const wide = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 80 } })
-  expect(await wide.find({ type: 'Text', text: '💬 nadav commented · 💬 codebot commented · ◷ carol requested' })).toBeDefined()
-  await wide.unmount()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 50 } })
+  await ui.press({ key: `tab:reviews:${REVIEWED}` })
+  // A row each, the verb beside the name; the headline gives way to the tab.
+  expect(await ui.find({ type: 'Text', text: ' 💬 nadav commented' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' 💬 codebot commented' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ◷ carol asked' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'No approvals required by the branch rules' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '3 comments to address · 1 outdated' })).toBeUndefined()
+  await ui.press({ key: `tab:overview:${REVIEWED}` })
+  expect(await ui.find({ type: 'Text', text: '3 comments to address · 1 outdated' })).toBeDefined()
+  await ui.unmount()
 })
 
 test("a PR with no reviews has no reviewers line, and a merged one shows none", async ($, on) => {
@@ -1682,8 +1718,14 @@ test("a review that lands between rounds toasts once; the ones there at first si
   expect(toasts).toEqual(['✓ alice approved #41', '✗ bob requested changes on #41'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ text: /CHANGES REQUESTED/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '3 unresolved threads (1 outdated)' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '✗ bob · ✓ alice · 💬 nadav · 💬 codebot · +2 more' })).toBeDefined()
+  expect((await ui.find({ key: `tab:threads:${REVIEWED}` }))?.props.label).toBe('Threads 3')
+  await ui.press({ key: `tab:reviews:${REVIEWED}` })
+  expect(await ui.find({ type: 'Text', text: ' ✗ bob requested changes' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ✓ alice approved' })).toBeDefined()
+  // Every one of them, each on a row: none cut for width.
+  expect(await ui.find({ type: 'Text', text: ' ◷ carol asked' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' 💬 me commented' })).toBeDefined()
+  await ui.press({ key: `tab:overview:${REVIEWED}` })
   await ui.unmount()
 
   // The author's own thread replies toast nothing; a merge in the same round as a review (an
@@ -1730,6 +1772,117 @@ const discussed = pr(REVIEWED, {
   statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')],
   reviews: comments,
   threads: discussion,
+})
+
+// The tabs: each reads on its own when pressed, as the login the poller found.
+const tabsPane = async ($: Parameters<TestBody>[0], on: On, gh: Record<string, unknown>) => {
+  const clock = mock.clock(on, { now: Date.parse('2026-10-07T12:00:00Z') })
+  quietUi(on)
+  const host = fakeHost(on, clock, gh)
+  // A session, so rounds keep coming.
+  on('command.register', () => ({ value: { command: 'pr-watch' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__pr-watch__watch' } }))
+  on('session.start', () => ({ cwd: '/work' }))
+  await $.session.start({ source: 'startup', cwd: '/work' } as never)
+  await $.command.run({ command: 'pr-watch', args: Object.keys(gh).join(' '), origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  return { clock, host, ui }
+}
+
+test("Reviews reads the branch's rules: each code owner's gate, who met it, what is still owed", async ($, on) => {
+  const owned = pr(REVIEWED, {
+    statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')],
+    reviews: [{ login: 'alice', state: 'APPROVED', at: '2026-10-07T10:00:00Z' }],
+    requested: ['dana'],
+    owners: ['dana'],
+    ownerTeams: ['security'],
+    onBehalf: { alice: ['backend'] },
+    required: 2,
+    ownersRequired: true,
+  })
+  const { host, ui } = await tabsPane($, on, { [REVIEWED]: owned })
+  const before = host.asked.length
+  await ui.press({ key: `tab:reviews:${REVIEWED}` })
+  expect(host.asked.slice(before).filter(query => query.includes('asCodeOwner'))).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: 'Required · 1 of 2 approvals · code owners' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ✓ @acme/backend   alice' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ◷ @acme/security  waiting' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ◷ @dana           waiting' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ○ 1 more approval · anyone with write access' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ✓ alice approved' })).toBeDefined()
+  // Read, the rules count the tab: approvals of the ones asked for.
+  expect((await ui.find({ key: `tab:reviews:${REVIEWED}` }))?.props.label).toBe('Reviews 1/2')
+  await ui.unmount()
+})
+
+test('a tab reads again after a round that changed what it shows, and not after one that did not', async ($, on) => {
+  const gh: Record<string, unknown> = { [REVIEWED]: pr(REVIEWED, { statusCheckRollup: [check('build', 'COMPLETED', 'SUCCESS')], requested: ['dana'], owners: ['dana'], required: 1 }) }
+  const { clock, host, ui } = await tabsPane($, on, gh)
+  await ui.press({ key: `tab:reviews:${REVIEWED}` })
+  expect(await ui.find({ type: 'Text', text: ' ◷ @dana  waiting' })).toBeDefined()
+  const reads = () => host.asked.filter(query => query.includes('asCodeOwner')).length
+  expect(reads()).toBe(1)
+  await clock.advance(70_000)
+  expect(reads()).toBe(1)
+
+  gh[REVIEWED] = { ...(gh[REVIEWED] as object), requested: [], reviews: [{ login: 'dana', state: 'APPROVED', at: '2026-10-07T12:01:00Z' }], reviewDecision: 'APPROVED' }
+  await clock.advance(70_000)
+  expect(reads()).toBe(2)
+  expect(await ui.find({ type: 'Text', text: 'Required · 1 of 1 approval' })).toBeDefined()
+  expect(await ui.find({ text: /@dana/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ' ✓ dana approved' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Checks lists every check on the head commit, failing first; Threads, each open thread and its first words', async ($, on) => {
+  const { ui } = await tabsPane($, on, { [RUNNING]: GH[RUNNING], [REVIEWED]: discussed })
+  await ui.press({ key: `tab:checks:${RUNNING}` })
+  // A row's Text holds Texts of its own: each text once.
+  const texts = async () => [...new Set((await ui.findAll({ type: 'Text' })).map(text => text.text))]
+  const checks = (await texts()).filter(text => /^[✗◌○✓⊘] /.test(text))
+  expect(checks).toEqual(['◌ build', '○ e2e', '✓ lint'])
+  // The other card stays on its Overview.
+  expect(await ui.find({ type: 'Text', text: '2 comments to address · 1 outdated' })).toBeDefined()
+
+  await ui.press({ key: `tab:threads:${REVIEWED}` })
+  expect(await ui.find({ type: 'Text', text: 'src/upload.ts (outdated; was line 7)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  nadav Is this branch still needed?' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'src/upload.ts:40-42 · 1 reply' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  nadav Take the retry count from config.' })).toBeDefined()
+  expect(await ui.find({ text: /Fixed already/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a tab that can't be read says why under the strip, and a press reads it again", async ($, on) => {
+  const { clock, host, ui } = await tabsPane($, on, { [RUNNING]: GH[RUNNING] })
+  host.blips.push({ stderr: 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' })
+  const pressed = ui.press({ key: `tab:checks:${RUNNING}` })
+  await clock.advance(10)
+  await pressed
+  expect(await ui.find({ type: 'Text', text: "✗ Couldn't read the checks: HTTP 502: Bad Gateway (https://api.github.com/graphql)" })).toBeDefined()
+  // Until then, what the poll knows.
+  expect(await ui.find({ type: 'Text', text: '◌ build' })).toBeDefined()
+  await ui.press({ key: `tab:checks:${RUNNING}` })
+  expect(await ui.find({ text: /Couldn't read/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '✓ lint' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a tab whose read failed reads again on the next round, though the card did not change', async ($, on) => {
+  const { clock, host, ui } = await tabsPane($, on, { [RUNNING]: GH[RUNNING] })
+  host.blips.push({ stderr: 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' })
+  const pressed = ui.press({ key: `tab:checks:${RUNNING}` })
+  await clock.advance(10)
+  await pressed
+  expect(await ui.find({ text: /Couldn't read the checks/ })).toBeDefined()
+  await clock.advance(70_000)
+  expect(await ui.find({ text: /Couldn't read/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '✓ lint' })).toBeDefined()
+  // The tab asks for names and states only, never the failed runs' summaries.
+  expect(host.asked.filter(query => query.includes('statusCheckRollup') && !query.includes('reviewThreads')).every(query => !query.includes('checkSuites'))).toBe(true)
+  await ui.unmount()
 })
 
 test('a card with unresolved threads offers Address with Claude; a resolved or unreviewed one does not', async ($, on) => {
