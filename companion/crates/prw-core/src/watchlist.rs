@@ -30,11 +30,18 @@ pub struct Later {
     pub at: i64,
     #[serde(default)]
     pub from: Place,
-    /// Its pill then.
+    /// Its pill then: one this version doesn't know (a newer `prw` wrote it) reads as not
+    /// read yet, so the entry is kept and its next read fills it in.
+    #[serde(deserialize_with = "pill_or_loading")]
     pub pill: PillKind,
     /// When GitHub said anything last changed on it then (ms), where it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
+}
+
+fn pill_or_loading<'de, D: serde::Deserializer<'de>>(de: D) -> Result<PillKind, D::Error> {
+    let raw = Value::deserialize(de)?;
+    Ok(serde_json::from_value(raw).unwrap_or(PillKind::Loading))
 }
 
 /// `lists.json`.
@@ -242,6 +249,11 @@ mod tests {
         assert_eq!(lists.later[0].from, Place::Inbox);
         assert_eq!(lists.later[0].updated_at, Some(5));
         assert_eq!(parse_lists("{torn"), Lists::default());
+        // A pill a newer prw wrote keeps the entry, as not read yet.
+        let newer = parse_lists(&format!(
+            r#"{{"later": [{{"url": "{A}", "pill": "someday"}}]}}"#
+        ));
+        assert_eq!(newer.later[0].pill, PillKind::Loading);
         assert_eq!(parse_lists("[]"), Lists::default());
     }
 

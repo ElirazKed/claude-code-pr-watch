@@ -322,6 +322,16 @@ pub struct Row {
     pub updated_at: Option<i64>,
 }
 
+impl Row {
+    /// How it reads now, as Later compares it.
+    const fn now(&self) -> Now {
+        Now {
+            pill: self.pr.derived.pill,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
 /// A list of PRs, as the lists pane or strip names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct List {
@@ -438,6 +448,9 @@ pub struct Model {
     watchlist: Lists,
     /// Whether `lists.json` has been read: the first read opens on Focus, where it has PRs.
     is_lists_read: bool,
+    /// When the session files were last read (ms): until they are, nothing in Later wakes,
+    /// as where it goes back to depends on who watches it.
+    sessions_read_at: Option<i64>,
 }
 
 impl Model {
@@ -468,6 +481,7 @@ impl Model {
             dates: HashMap::new(),
             watchlist: Lists::default(),
             is_lists_read: false,
+            sessions_read_at: None,
         };
         model.rebuild();
         model
@@ -909,7 +923,7 @@ impl Model {
         let Some(row) = self.current_row() else {
             return Vec::new();
         };
-        let (url, number) = (row.pr.url.clone(), row.pr.number);
+        let (url, number, now) = (row.pr.url.clone(), row.pr.number, row.now());
         let said = if self.watchlist.is_later(&url) {
             let to_focus = !self.is_listed_elsewhere(&url);
             self.watchlist.bring_back(&url, to_focus);
@@ -919,10 +933,6 @@ impl Model {
                 format!("↩ #{number} back from Later")
             }
         } else {
-            let now = Now {
-                pill: row.pr.derived.pill,
-                updated_at: row.updated_at,
-            };
             self.watchlist.put_aside(&url, now, self.now);
             format!("⏾ #{number} in Later: back when something changes")
         };
@@ -948,6 +958,9 @@ impl Model {
     /// Brings back the PRs in Later that changed since they were put aside, and takes how a
     /// PR put aside before it was read reads now as how it was.
     fn wake(&mut self) -> Vec<Cmd> {
+        if self.sessions_read_at.is_none() {
+            return Vec::new();
+        }
         let Some(later) = self.lists.iter().find(|l| l.id == ListId::Later) else {
             return Vec::new();
         };
@@ -955,13 +968,7 @@ impl Model {
             .rows
             .iter()
             .filter(|row| row.checked_at.is_some())
-            .map(|row| {
-                let now = Now {
-                    pill: row.pr.derived.pill,
-                    updated_at: row.updated_at,
-                };
-                (row.pr.url.as_str(), now)
-            })
+            .map(|row| (row.pr.url.as_str(), row.now()))
             .collect();
         let now_of = |url: &str| now.get(url).copied();
         let woken: Vec<(String, u64)> = self
@@ -1113,8 +1120,9 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
         Msg::SessionsRead(sessions, at) => {
             model.sessions = sessions;
             model.now = at;
+            model.sessions_read_at = Some(at);
             model.rebuild();
-            Vec::new()
+            model.wake()
         }
         Msg::Tick(at) => {
             model.now = at;
@@ -2453,6 +2461,30 @@ mod tests {
         assert_eq!(in_list(&model, &ListId::Later), [A]);
         let pushed = shared_of(vec![(A, dated(1, OPENED, PUSHED))]);
         let model = read(model, [Msg::SharedRead(Ok(pushed), 70_000)]);
+        assert_eq!(in_list(&model, &ListId::Focus), [A]);
+    }
+
+    #[test]
+    fn nothing_wakes_before_the_sessions_are_read() {
+        // As at the start: the lists, then results.json (A pushed to while prw was closed),
+        // then the session files, where no session watches A any more.
+        let mut kept = Lists::default();
+        let quiet_at = parse_iso(QUIET);
+        let was = Now {
+            pill: PillKind::Ready,
+            updated_at: quiet_at,
+        };
+        kept.put_aside(A, was, 0);
+        let pushed = shared_of(vec![(A, dated(1, OPENED, PUSHED))]);
+        let (model, cmds) = update(
+            read(Model::new(120, 30), [Msg::ListsRead(kept)]),
+            Msg::SharedRead(Ok(pushed), 0),
+        );
+        assert_eq!(saves(&cmds), None);
+        assert_eq!(in_list(&model, &ListId::Later), [A]);
+        let other = vec![session("s2", watching(&[C]), 0)];
+        let model = read(model, [Msg::SessionsRead(other, 0)]);
+        // Back where it is still listed: Focus, as nothing else lists it.
         assert_eq!(in_list(&model, &ListId::Focus), [A]);
     }
 
