@@ -69,6 +69,7 @@ pub mod time;
 pub mod ui;
 pub mod version;
 pub mod watch;
+pub mod watchlist;
 
 pub use layout::{Layout, layout};
 pub use order::{Tracked, order};

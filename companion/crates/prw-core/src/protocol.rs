@@ -219,6 +219,9 @@ string_enum! {
         /// `prw`'s saved searches' finds: polled like a session's PRs, but no session, so
         /// no list of sessions shows it (each `prw` lists its own searches).
         Searches = "searches",
+        /// `prw`'s Focus and Later (`watchlist`): polled like a session's PRs, listed in
+        /// their own lists.
+        Lists = "lists",
     }
 }
 

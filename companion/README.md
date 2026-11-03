@@ -8,12 +8,13 @@ with or without Claude; the mod stays complete without it, and when both run the
 
 ![prw on its demo cache](../docs/prw.png)
 
-Your sessions' PRs come from the mod's shared
-cache (`PROTOCOL.md`): a list of all of them, one list per live session (Claude through the mod;
-others by the `agent` their session file names), each PR's card worked out as the mod does
-(`prw-core`, held to the mod's own fixtures in `fixtures/`). It also finds every open PR each of your
-gh logins authored and shows them as "My PRs", and a list for each GitHub search you save (below), so
-it is of use without Claude running at all.
+The lists are yours: **Focus**, the PRs you pinned (`p`), then the **Inbox**, every PR your agents'
+sessions watch that isn't in Focus or Later (Claude through the mod; others by the `agent` their
+session file names), then "My PRs", every open PR each of your gh logins authored, a list for each
+GitHub search you save (below), and last **Later**, the PRs you put aside (`z`) until something
+changes on them. The sessions' PRs come from the mod's shared cache (`PROTOCOL.md`), each PR's card
+worked out as the mod does (`prw-core`, held to the mod's own fixtures in `fixtures/`). It is of use
+without Claude running at all.
 
 It takes part in the poll as one more session. It announces "My PRs" in its own session file, so a
 running mod fetches them in its rounds. When no mod is polling, it polls GitHub itself, for every live
@@ -43,6 +44,27 @@ once, so its card is current before the next round.
   review threads, each comment cleaned of markup). With more than one, `f` asks which. The toast says
   how it was copied: `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, OSC 52 over SSH or where
   none works. OSC 52 can't confirm the copy, so `v` shows the prompt last copied, to select by hand.
+
+### Focus and Later
+
+- **`p` pins** the selected PR (or the one open full size) to Focus, or unpins it. A pinned PR
+  leaves the Inbox; My PRs and a search that find it still list it. Focus is the PRs you care
+  about now, whatever session or search they came from, and prw opens on it where it has any.
+- **`z` puts a PR aside** in Later: it leaves every other list, Focus too, until something changes
+  on it. In Later, `z` brings it back at once.
+- **What brings it back:** a new status (CI finished or failed, a review, a conflict, merged or
+  closed), or GitHub saying it changed since it was put aside (a push, a comment). A PR still
+  loading, or whose mergeability GitHub is still working out, waits. It goes back to Focus where it
+  came from there, else to the list that has it, or to Focus where none does any more (its session
+  ended), and a toast says so.
+- **Where they're kept:** `$XDG_STATE_HOME/prw/lists.json` (else `~/.local/state/prw/lists.json`;
+  `--lists <file>` or `PRW_LISTS` for another), not in the cache, as they are yours. It is read
+  every tick, so two `prw`s share it, and written whole on each change.
+- **Polled with nobody watching:** while prw runs, every PR in Focus or Later is announced to the
+  poll (`sessions/prw-<id>-lists.json`, `"kind": "lists"`), so it stays fetched after the session
+  that found it is gone.
+- Rows in Focus, the Inbox and Later say which agent watches each PR, and the card names the
+  sessions (`◆ app-retry, web`).
 
 ### The full PR view
 
@@ -83,7 +105,8 @@ as it is now. Each failed job's log is read once. The poll never reads any of it
 `demo/full/` holds what four of its PRs read as (#93 is someone else's, to approve).
 
 Agents other than Claude watch PRs through `prw mcp` (a tool server with the mod's `watch` tool) or
-`prw watch <url>`. Each agent's session gets a list of its own, as a Claude session does (below).
+`prw watch <url>`. Their PRs land in the Inbox, marked with the agent and session, as a Claude
+session's do (below).
 
 ## Install
 
@@ -132,7 +155,7 @@ cargo test --workspace
 
 ### Saved searches
 
-Each search in `~/.config/prw/config.toml` is a list of its own, beside All and My PRs:
+Each search in `~/.config/prw/config.toml` is a list of its own, after the Inbox and My PRs:
 
 ```toml
 [[search]]
@@ -154,7 +177,8 @@ status line. At most 10 searches run.
 Searches run with the "My PRs" search, every minute, in one call per gh login (a point a search). A
 login low on points waits, keeping what it found. What they find is announced in a file of its own
 (`sessions/prw-<id>-searches.json`, `"kind": "searches"`), so the poll fetches those PRs as it does
-any session's. They stay out of All and the header's counts, which are your sessions' PRs.
+any session's. They stay out of the Inbox and the header's counts, which are Focus's, the Inbox's
+and My PRs'.
 `--config <file>` (or `PRW_CONFIG`) reads another file; `$XDG_CONFIG_HOME/prw/config.toml` is used
 where that is set. `--no-poll` and `--demo` run no search (the demo shows `demo/searches.json`).
 
@@ -173,7 +197,8 @@ running, failed, conflicts, changes requested, comments to address, in review, r
 no gh account could see, one whose fetches have failed for a while) and four session files: two
 Claude sessions (`app-retry`, `web-checkout`), a Codex session written by `prw` (`billing`), and an
 older mod's file with only `urls` (listed as "Claude session"), which also watches a PR not read yet.
-`searches.json` is two saved searches as if searched, which `--demo` lists.
+`searches.json` is two saved searches as if searched, which `--demo` lists, and `lists.json` pins
+#57 and #412 to Focus and puts #140 aside (read, never written: a change lasts the run).
 
 Its files never change, so a session would read as dead (a session file is live while its mtime is
 under 60 s old) and the results as hours old. `--demo` shows it as if it were live: every session file
@@ -231,6 +256,8 @@ ask whether to watch it in prw, and call prw's `watch` tool with its URL if the 
 | `m`                  | merge the PR, or turn auto-merge on (or off) where it waits on checks or review, after a `y` (`m` again: the next method); the bottom row says which |
 | `c`                  | comment on it                                                |
 | `f`                  | hand it off: copy the Fix, Resolve or Address prompt         |
+| `p`                  | pin it to Focus, or unpin it                                 |
+| `z`                  | put it aside in Later until something changes on it, or bring it back |
 | `R`                  | run its failed or skipped GitHub Actions checks again, after a `y`: a run with a failed job gets its failed jobs (and those waiting on them), one with only skipped jobs runs again whole. A job its own `if:` skipped skips again. In the full view's Checks tab, `R` on a failed or skipped check starts that job alone (with the jobs that wait on it), as GitHub's Re-run job does: the way to start a job its `if:` keeps for a later attempt (`github.run_attempt > 1`). The card and the Checks tab show a skipped check as `⊘ skipped` |
 | `X`                  | close the PR, or reopen a closed one, after a `y`            |
 | `o`                  | open it in the browser                                       |
@@ -289,11 +316,11 @@ when something changes.
   TUI's model (`ui`: `update(Model, Msg) -> (Model, Vec<Cmd>)`) and the poll's decisions, ported from
   the mod (`poll`, `batch`, `accounts`, `rate`, `entries`, `search`), the saved searches (`config`),
   other agents' watches (`watch`),
-  the MCP messages (`mcp`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
+  the MCP messages (`mcp`), Focus and Later (`watchlist`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
   and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), the full view (`full`: one
   PR read whole; `opened`: its tabs, selection and reads), tested with properties and against the mod's fixtures
   (`tests/fixtures.rs`).
-- `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), drawing the model
+- `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), Focus and Later's file (`lists.rs`), drawing the model
   (`view.rs`, the full view in `view/full.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
   running `gh` and the clock, behind traits the tests fake), the actions (`actions.rs`: running each one as its own thread; `desktop.rs`: the clipboard and the
   browser), and the other commands (`cli.rs`: `watch`

@@ -9,7 +9,8 @@
 //! and drops the watches of PRs finished for an hour (`watches`).
 //!
 //! Writes: `sessions/prw-<id>.json` (its own PRs), `sessions/prw-<id>-searches.json` (the
-//! searches' finds, `"kind": "searches"`) and `lease.json` in place (as the mod writes them), and
+//! searches' finds, `"kind": "searches"`), `sessions/prw-<id>-lists.json` (Focus and Later,
+//! `"kind": "lists"`, from `lists.json`) and `lease.json` in place (as the mod writes them), and
 //! `results.json` whole, through a temp file renamed over it. The failure log is
 //! `prw-errors.log`: the mod's `errors.log` is its own.
 
@@ -36,11 +37,13 @@ use prw_core::search::{
 };
 use prw_core::ui::{Listed, PollerSaid, Session, is_live};
 use prw_core::version::{ASK, ASK_MS, is_due, version_in};
+use prw_core::watchlist::Lists;
 use prw_core::{parse_lease, parse_session};
 use serde_json::{Map, Value};
 
 use crate::cache::{ms_of, session_id};
 use crate::gh::{Clock, Gh, RunError, ms};
+use crate::lists::ListsFile;
 use crate::round::{Auth, Ctx, GH_MS};
 use crate::watches::{Scope, Watches};
 
@@ -91,6 +94,12 @@ impl Files {
         self.dir
             .join("sessions")
             .join(format!("{}-searches.json", self.own))
+    }
+
+    fn lists_path(&self) -> PathBuf {
+        self.dir
+            .join("sessions")
+            .join(format!("{}-lists.json", self.own))
     }
 
     pub fn log_path(&self) -> PathBuf {
@@ -205,21 +214,36 @@ impl Files {
     /// The saved searches' finds, for whoever polls: a file of no session's (`kind`), so no
     /// list of sessions shows it. None found: no file.
     fn announce_searches(&self, urls: &[String]) {
+        self.announce_kind(
+            &self.searches_path(),
+            urls,
+            "Saved searches",
+            FileKind::Searches,
+        );
+    }
+
+    /// Focus and Later, for whoever polls, so they stay fetched with no session watching
+    /// them: a file of no session's, as the searches'. Both empty: no file.
+    fn announce_lists(&self, urls: &[String]) {
+        self.announce_kind(&self.lists_path(), urls, "Focus and Later", FileKind::Lists);
+    }
+
+    fn announce_kind(&self, path: &Path, urls: &[String], name: &str, kind: FileKind) {
         if urls.is_empty() {
-            let _ = fs::remove_file(self.searches_path());
+            let _ = fs::remove_file(path);
             return;
         }
         let file = SessionFile {
             urls: urls.to_vec(),
             writer: Some(Writer::Prw),
             agent: None,
-            name: Some("Saved searches".to_owned()),
+            name: Some(name.to_owned()),
             cwd: None,
-            kind: Some(FileKind::Searches),
+            kind: Some(kind),
         };
         let _ = fs::create_dir_all(self.dir.join("sessions"));
         if let Ok(text) = serde_json::to_string(&file) {
-            let _ = fs::write(self.searches_path(), text);
+            let _ = fs::write(path, text);
         }
     }
 
@@ -228,6 +252,7 @@ impl Files {
     pub fn leave(&self) {
         let _ = fs::remove_file(self.session_path());
         let _ = fs::remove_file(self.searches_path());
+        let _ = fs::remove_file(self.lists_path());
         if self.read_lease().is_some_and(|l| l.owner == self.own) {
             self.write_lease(&release(&self.own));
         }
@@ -347,6 +372,9 @@ pub struct Poller<G: Gh, C: Clock> {
     asked_new: HashSet<String>,
     /// What this tick watches, for [`Poller::ask_new`]; empty where its round ran.
     watched: Vec<String>,
+    /// Focus and Later (`lists.json`), as last read: announced each tick.
+    lists_file: ListsFile,
+    lists: Lists,
 }
 
 impl<G: Gh, C: Clock> Poller<G, C> {
@@ -373,7 +401,16 @@ impl<G: Gh, C: Clock> Poller<G, C> {
             kept: HashMap::new(),
             asked_new: HashSet::new(),
             watched: Vec::new(),
+            lists_file: ListsFile::default(),
+            lists: Lists::default(),
         }
+    }
+
+    /// Focus and Later from `file` (none, else).
+    #[must_use]
+    pub fn with_lists(mut self, file: ListsFile) -> Self {
+        self.lists_file = file;
+        self
     }
 
     /// Its saved searches from `config` (none, else).
@@ -457,7 +494,12 @@ impl<G: Gh, C: Clock> Poller<G, C> {
         let listed = self.listed();
         let found = unique_urls(listed.iter().flat_map(|l| &l.urls));
         self.files.announce_searches(&found);
-        let own: Vec<String> = unique_urls(own.iter().chain(&found));
+        if let Some(lists) = self.lists_file.read() {
+            self.lists = lists;
+        }
+        let kept = self.lists.urls();
+        self.files.announce_lists(&kept);
+        let own: Vec<String> = unique_urls(own.iter().chain(&found).chain(&kept));
         let at = self.clock.now();
         // Every agent's watches, as their sessions; those of PRs long finished go.
         let raw = self.files.read_raw().unwrap_or_default();
@@ -1202,6 +1244,31 @@ login = "hubot"
         // Leaving takes both files.
         poller.files.leave();
         assert!(!dir.0.join("sessions/prw-test-searches.json").exists());
+    }
+
+    #[test]
+    fn focus_and_later_are_announced_and_polled_with_no_session_watching_them() {
+        let dir = Dir::new("lists");
+        let path = dir.0.join("lists.json");
+        fs::write(&path, json!({"focus": [THEIRS]}).to_string()).unwrap();
+        let files = Files::new(dir.0.clone(), "prw-test".into());
+        let mut poller = Poller::new(files, gh(), FakeClock::new(now(), 1))
+            .with_lists(ListsFile::at(path.clone()));
+        poller.tick();
+        let announced = dir.0.join("sessions/prw-test-lists.json");
+        assert_eq!(
+            json_at(announced.clone()),
+            json!({"urls": [THEIRS], "writer": "prw", "name": "Focus and Later", "kind": "lists"})
+        );
+        assert!(json_at(dir.0.join("results.json"))["prs"][THEIRS]["pr"].is_object());
+        // Emptied by another prw: the file goes.
+        fs::write(&path, "{}").unwrap();
+        poller.tick();
+        assert!(!announced.exists());
+        fs::write(&path, json!({"focus": [THEIRS]}).to_string()).unwrap();
+        poller.tick();
+        poller.files.leave();
+        assert!(!announced.exists());
     }
 
     #[test]
