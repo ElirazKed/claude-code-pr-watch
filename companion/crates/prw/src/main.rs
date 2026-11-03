@@ -19,6 +19,7 @@ mod cache;
 mod cli;
 mod desktop;
 mod gh;
+mod lists;
 mod mcp;
 mod poller;
 mod round;
@@ -29,6 +30,7 @@ mod watches;
 #[cfg(test)]
 mod render_tests;
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
@@ -50,6 +52,7 @@ use ratatui::crossterm::{Command as Escape, execute};
 
 use crate::actions::Runner;
 use crate::cache::{Reader, default_config, default_dir, ms_of};
+use crate::lists::{ListsFile, default_lists};
 use crate::poller::{ConfigFile, Files, Poller};
 use crate::view::Hits;
 
@@ -69,7 +72,8 @@ Usage: prw [OPTIONS]
        prw mcp [--agent <NAME>] [--session <NAME>]
 
 Shows the PRs the pr-watch mod polls, from its shared cache, every open PR of each gh
-login (\"My PRs\"), and a list per search saved in config.toml. When no Claude session's
+login (\"My PRs\"), and a list per search saved in config.toml. p pins a PR to Focus,
+and z puts it aside in Later until something changes on it. When no Claude session's
 mod is polling, prw polls GitHub itself, sharing the cache's lease and rate limits with
 the mod as one more session.
 
@@ -89,6 +93,8 @@ Options:
       --config <FILE>
                      The saved searches, each a list [env: PRW_CONFIG] [default:
                      $XDG_CONFIG_HOME/prw/config.toml, else ~/.config/prw/config.toml]
+      --lists <FILE> Focus and Later [env: PRW_LISTS] [default:
+                     $XDG_STATE_HOME/prw/lists.json, else ~/.local/state/prw/lists.json]
       --no-poll      Don't poll: only read the cache, and never write to it. GitHub is
                      asked only when you act on a PR (m, c, f)
       --demo         Show a cache as if it were live: every session file counts as
@@ -113,6 +119,7 @@ struct Options {
     sub: Option<cli::Command>,
     cache: Option<PathBuf>,
     config: Option<PathBuf>,
+    lists: Option<PathBuf>,
     is_demo: bool,
     is_no_poll: bool,
     /// `watch` and `unwatch`: the PR URLs, as given.
@@ -144,7 +151,7 @@ enum Command {
 }
 
 /// The flags that take a value.
-const VALUED: [&str; 4] = ["--cache", "--config", "--agent", "--session"];
+const VALUED: [&str; 5] = ["--cache", "--config", "--lists", "--agent", "--session"];
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
     let mut options = Options::default();
@@ -180,7 +187,8 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
             match flag {
                 "--cache" => options.cache = Some(value.into()),
                 "--config" if is_tui => options.config = Some(value.into()),
-                "--config" => return Command::Unknown(flag.to_owned()),
+                "--lists" if is_tui => options.lists = Some(value.into()),
+                "--config" | "--lists" => return Command::Unknown(flag.to_owned()),
                 _ if is_tui => return Command::Unknown(flag.to_owned()),
                 "--agent" => options.agent = Some(value),
                 _ => options.session = Some(value),
@@ -284,6 +292,21 @@ fn config_path(options: &Options) -> Option<PathBuf> {
         .or_else(|| default_config(var("XDG_CONFIG_HOME").as_deref(), var("HOME").as_deref()))
 }
 
+/// Focus and Later: a demo's beside its cache, read only; else `--lists`, else `$PRW_LISTS`,
+/// else the XDG place for it.
+fn lists_file(options: &Options, dir: &std::path::Path) -> ListsFile {
+    if options.is_demo {
+        return ListsFile::read_only(dir.join("lists.json"));
+    }
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    options
+        .lists
+        .clone()
+        .or_else(|| var("PRW_LISTS").map(PathBuf::from))
+        .or_else(|| default_lists(var("XDG_STATE_HOME").as_deref(), var("HOME").as_deref()))
+        .map_or_else(ListsFile::default, ListsFile::at)
+}
+
 /// The time the model sees (ms): the wall clock, or, in a demo, the wall clock moved so it
 /// starts just after the cache's last round.
 struct Clock {
@@ -331,6 +354,7 @@ fn run(options: &Options) -> io::Result<()> {
     });
     let demo = options.is_demo.then(|| demo_searches(&dir));
     let reader = Reader::new(dir.clone(), options.is_demo);
+    let lists = lists_file(options, &dir);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     // Pasted text comes whole, newlines too, rather than as keys that might act.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
@@ -344,7 +368,9 @@ fn run(options: &Options) -> io::Result<()> {
     let said = demo.or_else(|| {
         files.clone().map(|files| {
             let config = config_path(options).map_or_else(ConfigFile::default, ConfigFile::at);
-            let poller = Poller::new(files, gh::System, gh::Wall).with_config(config);
+            let poller = Poller::new(files, gh::System, gh::Wall)
+                .with_config(config)
+                .with_lists(lists_file(options, &dir));
             poller::spawn(poller, Arc::clone(&stop))
         })
     });
@@ -354,6 +380,7 @@ fn run(options: &Options) -> io::Result<()> {
         done,
         env: desktop::Env::read(),
         dir: &dir,
+        lists: RefCell::new(lists),
     };
     let result = event_loop(
         &mut terminal,
@@ -406,6 +433,8 @@ struct Hands<'a> {
     env: desktop::Env,
     /// The cache, where a demo's full view reads from.
     dir: &'a std::path::Path,
+    /// Focus and Later: read each tick, written when they change.
+    lists: RefCell<ListsFile>,
 }
 
 /// Feeds the messages to the model in turn, carrying out the commands each gives: a copy or a
@@ -434,6 +463,7 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>, hands: &Hands) -> (Mo
                     let by = desktop::open(&url, hands.env);
                     queue.push_back(Msg::Opened(url, by));
                 }
+                Cmd::SaveLists(lists) => hands.lists.borrow_mut().save(&lists),
             }
         }
     }
@@ -458,9 +488,10 @@ fn event_loop(
     };
     let started = Instant::now();
     let size = terminal.size()?;
+    let first = hands.lists.borrow_mut().read().map(Msg::ListsRead);
     let (mut model, _) = feed(
         Model::new(size.width, size.height),
-        reader.poll(clock.now()),
+        first.into_iter().chain(reader.poll(clock.now())),
         hands,
     );
     let mut last_tick = Instant::now();
@@ -498,7 +529,9 @@ fn event_loop(
                     .into_iter()
                     .flat_map(Receiver::try_iter)
                     .map(Msg::Poller);
+                let lists = hands.lists.borrow_mut().read().map(Msg::ListsRead);
                 break polled
+                    .chain(lists)
                     .chain(reader.poll(now))
                     .chain([Msg::Tick(now)])
                     .collect();

@@ -1,0 +1,15 @@
+{
+  "focus": [
+    "https://github.com/acme/billing/pull/57",
+    "https://github.com/acme/app/pull/412"
+  ],
+  "later": [
+    {
+      "url": "https://github.com/acme/infra/pull/140",
+      "at": 1791968400000,
+      "from": "inbox",
+      "pill": "comments",
+      "updatedAt": 1789560000000
+    }
+  ]
+}

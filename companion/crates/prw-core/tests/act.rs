@@ -472,7 +472,7 @@ proptest! {
                     }
                     Cmd::Open(url) => prop_assert_eq!(url, URL),
                     Cmd::Read(read) => prop_assert_eq!(read.url(), URL),
-                    Cmd::Copy(_) | Cmd::Quit => {}
+                    Cmd::Copy(_) | Cmd::Quit | Cmd::SaveLists(_) => {}
                 }
             }
             if let Some(ask) = model.acts().ask() {

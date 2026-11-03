@@ -99,7 +99,7 @@ pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="
 </div>
 </div>
 <figure class="shot">
-<img src="prw.png" width="1428" height="778" alt="prw on its demo cache: lists and sessions on the left, every watched PR with tinted repo chips and opened and updated ages in the middle, the selected PR's card with its checks on the right">
+<img src="prw.png" width="1428" height="778" alt="prw on its demo cache: Focus, the Inbox, the searches and Later on the left, every watched PR with tinted repo chips and opened and updated ages in the middle, the selected PR's card with its checks on the right">
 </figure>
 </div>
 </section>
@@ -113,7 +113,8 @@ pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="
 <p class="muted">One screen for the PRs you wrote, the ones waiting on your review and the ones your agents opened, each worked out to the state that matters: conflicts, failing CI, changes asked for, ready to merge.</p>
 </div>
 <div class="grid">
-<div class="feat"><span class="k">My PRs · searches · sessions</span><h3>All your PRs in one place</h3><p>Every open PR each of your gh logins wrote, a list for each GitHub search you save (review requests, a team's repos), and one per agent session: Claude through the mod, Codex and others through <code>prw mcp</code> or <code>prw watch</code>.</p></div>
+<div class="feat"><span class="k">My PRs · searches · Inbox</span><h3>All your PRs in one place</h3><p>Every open PR each of your gh logins wrote, a list for each GitHub search you save (review requests, a team's repos), and an Inbox of what your agents touch: Claude through the mod, Codex and others through <code>prw mcp</code> or <code>prw watch</code>.</p></div>
+<div class="feat"><span class="k">p · z</span><h3>Focus, and Later</h3><p>Pin the few PRs you care about now to Focus, wherever they came from. Put an old one aside in Later and it stays out of the way until something changes on it: CI, a review, a push, a merge.</p></div>
 <div class="feat"><span class="k">s · S</span><h3>Sorted by what needs you</h3><p>Most urgent first: conflicts, then failing CI, then reviews. Or by repo, oldest first, or quietest first. Each repo has a colour of its own, and every PR says when it opened and when it last moved.</p></div>
 <div class="feat"><span class="k">Enter</span><h3>The whole PR, full size</h3><p>The conversation in the order it happened, review threads with the code they're on, checks with the end of each failed job's log, and the changed files. Markdown drawn as GitHub draws it.</p></div>
 <div class="feat"><span class="k">r · x · a · c · m · R · X</span><h3>Act without opening GitHub</h3><p>Reply to a thread, resolve it or reopen it, approve, comment, and merge in the repo's method, or turn on auto-merge while checks run. Re-run failed or skipped GitHub Actions checks, all of them or, from the Checks tab, one job, and close or reopen the PR. It asks before a merge, an approval, a re-run, a close or a reopen.</p></div>
@@ -142,6 +143,8 @@ pr-watch <span style="color:var(--faint);font-weight:400">/</span> <span style="
 <div><kbd>x</kbd> resolve it, or reopen it</div>
 <div><kbd>a</kbd> approve (full view)</div>
 <div><kbd>f</kbd> hand it off to your agent</div>
+<div><kbd>p</kbd> pin it to Focus, or unpin it</div>
+<div><kbd>z</kbd> put it aside until it changes, or back</div>
 <div><kbd>R</kbd> re-run failed or skipped Actions checks, after a <kbd>y</kbd></div>
 <div><kbd>X</kbd> close it, or reopen it, after a <kbd>y</kbd></div>
 <div><kbd>o</kbd> open it in the browser</div>

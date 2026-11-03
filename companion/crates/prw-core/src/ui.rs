@@ -3,7 +3,8 @@
 //! clock: the binary reads the files and the time, and says what it read as messages.
 //!
 //! What the screen shows is worked out here too, once per message rather than per frame:
-//! the [`List`]s (All, then one per live session), each list's [`Row`]s in urgency order
+//! the [`List`]s (Focus, the Inbox, My PRs, the saved searches, Later), each list's [`Row`]s in
+//! urgency order
 //! ([`order`]), and the [`Header`]. The view only draws them.
 //!
 //! The selection is a PR's URL, not an index, so it stays on its PR when a round reorders
@@ -25,6 +26,7 @@ use crate::sort::{Sort, sorted};
 use crate::status::{PillKind, derive};
 use crate::time::parse_iso;
 use crate::version;
+use crate::watchlist::{Lists, Now};
 
 /// A session file is live while its mtime is less than this old (the mod's `ALIVE_MS`).
 pub const ALIVE_MS: i64 = 60_000;
@@ -199,6 +201,8 @@ pub enum Msg {
     Scroll(Focus, isize),
     /// What came of a [`Cmd::Read`].
     Read(ReadDone),
+    /// `lists.json` as read: at the start, and whenever another `prw` changed it.
+    ListsRead(Lists),
 }
 
 /// What a click lands on, as the view drew it.
@@ -267,6 +271,8 @@ pub enum Cmd {
     Open(String),
     /// Read for the full view, off the UI thread; a [`Msg::Read`] says what came of it.
     Read(Read),
+    /// Write `lists.json`: Focus or Later changed.
+    SaveLists(Lists),
 }
 
 /// Which pane the movement keys move in. Only the three-pane layout has a lists pane to
@@ -281,15 +287,18 @@ pub enum Focus {
 /// Which list.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum ListId {
-    /// Every PR a live session watches (or, with none live, every PR in `results.json`).
+    /// The PRs you pinned (`p`).
+    Focus,
+    /// Every PR an agent's live session watches (or, with no session live, every PR in
+    /// `results.json`), but those in Focus or Later.
     #[default]
-    All,
-    /// One live session file, by its id.
+    Inbox,
+    /// `prw`'s own session file, by its id: "My PRs".
     Session(String),
-    /// The live older-mod files with no name, together.
-    Unnamed,
     /// A saved search, by its name.
     Search(String),
+    /// The PRs put aside (`z`) until something changes on them.
+    Later,
 }
 
 /// One PR in a list.
@@ -369,7 +378,7 @@ impl Poll {
     }
 }
 
-/// How many open PRs in All are in each state the header counts.
+/// How many open PRs in Focus, the Inbox and My PRs are in each state the header counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tally {
     pub failing: usize,
@@ -425,6 +434,10 @@ pub struct Model {
     /// Each PR's opened and updated times as last known, by URL: an older mod's round writes
     /// a PR without them, and the row keeps them rather than lose them until the next round.
     dates: HashMap<String, (Option<i64>, Option<i64>)>,
+    /// Focus and Later, as last read or changed here.
+    watchlist: Lists,
+    /// Whether `lists.json` has been read: the first read opens on Focus, where it has PRs.
+    is_lists_read: bool,
 }
 
 impl Model {
@@ -439,7 +452,7 @@ impl Model {
             now: 0,
             width,
             height,
-            list: ListId::All,
+            list: ListId::Inbox,
             selected: None,
             focus: Focus::Prs,
             is_help: false,
@@ -453,6 +466,8 @@ impl Model {
             opened: None,
             sort: Sort::default(),
             dates: HashMap::new(),
+            watchlist: Lists::default(),
+            is_lists_read: false,
         };
         model.rebuild();
         model
@@ -525,7 +540,24 @@ impl Model {
         layout(self.width)
     }
 
-    /// The lists: All first, then one per live session.
+    /// Focus and Later.
+    #[must_use]
+    pub const fn watchlist(&self) -> &Lists {
+        &self.watchlist
+    }
+
+    /// Yours and your agents' PRs, each once: Focus's, the Inbox's and My PRs' (not the
+    /// searches' finds, nor what is put aside in Later).
+    pub fn yours(&self) -> impl Iterator<Item = &Row> {
+        let mut seen = HashSet::new();
+        self.lists
+            .iter()
+            .filter(|l| matches!(l.id, ListId::Focus | ListId::Inbox | ListId::Session(_)))
+            .flat_map(|l| &l.rows)
+            .filter(move |r| seen.insert(r.pr.url.as_str()))
+    }
+
+    /// The lists: Focus, the Inbox, My PRs, the saved searches, Later.
     #[must_use]
     pub fn lists(&self) -> &[List] {
         &self.lists
@@ -659,12 +691,7 @@ impl Model {
     /// one.
     fn target(&self, acts: &Acts) -> Option<Target<'_>> {
         let row = match acts.ask() {
-            Some(ask) => self
-                .list()
-                .rows
-                .iter()
-                .chain(&self.lists[0].rows)
-                .find(|r| r.pr.url == ask.url())?,
+            Some(ask) => self.row_of(ask.url())?,
             None => self.current_row()?,
         };
         Some(self.target_of(row, acts))
@@ -716,6 +743,7 @@ impl Model {
             self.now,
             own,
             searches,
+            &self.watchlist,
         );
         let (sort, dates) = (self.sort, &mut self.dates);
         for list in &mut self.lists {
@@ -740,7 +768,7 @@ impl Model {
         self.lit.retain(|_, lit| now - lit.at < LIT_MS);
         if !self.lists.iter().any(|l| l.id == self.list) {
             // A different list: its first row, not the old list's place.
-            self.list = ListId::All;
+            self.list = ListId::Inbox;
             was = None;
         }
         self.header = header_of(self);
@@ -859,6 +887,134 @@ impl Model {
         vec![Cmd::Read(read)]
     }
 
+    /// `p`: pins the PR the screen is about to Focus, or unpins it.
+    fn pin(&mut self) -> Vec<Cmd> {
+        let Some(row) = self.current_row() else {
+            return Vec::new();
+        };
+        let (url, number) = (row.pr.url.clone(), row.pr.number);
+        let said = if self.watchlist.toggle_focus(&url) {
+            format!("★ #{number} pinned to Focus")
+        } else {
+            format!("#{number} unpinned from Focus")
+        };
+        self.acts.say(said, Tone::Info, self.now);
+        self.rebuild();
+        vec![Cmd::SaveLists(self.watchlist.clone())]
+    }
+
+    /// `z`: puts the PR the screen is about to aside, until something changes on it; one in
+    /// Later comes back.
+    fn put_aside(&mut self) -> Vec<Cmd> {
+        let Some(row) = self.current_row() else {
+            return Vec::new();
+        };
+        let (url, number) = (row.pr.url.clone(), row.pr.number);
+        let said = if self.watchlist.is_later(&url) {
+            let to_focus = !self.is_listed_elsewhere(&url);
+            self.watchlist.bring_back(&url, to_focus);
+            if self.watchlist.is_focus(&url) {
+                format!("↩ #{number} back from Later, in Focus")
+            } else {
+                format!("↩ #{number} back from Later")
+            }
+        } else {
+            let now = Now {
+                pill: row.pr.derived.pill,
+                updated_at: row.updated_at,
+            };
+            self.watchlist.put_aside(&url, now, self.now);
+            format!("⏾ #{number} in Later: back when something changes")
+        };
+        self.acts.say(said, Tone::Info, self.now);
+        self.rebuild();
+        vec![Cmd::SaveLists(self.watchlist.clone())]
+    }
+
+    /// Whether a list but Focus and Later would list a PR: a live session watches it (this
+    /// `prw`'s own My PRs too), a saved search found it, or with no session live, the
+    /// results hold it.
+    fn is_listed_elsewhere(&self, url: &str) -> bool {
+        let mut live = self.live_sessions().peekable();
+        let is_watched = if live.peek().is_none() {
+            self.entry(url).is_some()
+        } else {
+            live.any(|s| s.file.urls.iter().any(|u| u == url))
+        };
+        let searches = self.poller.as_ref().map_or(&[][..], |p| &p.searches);
+        is_watched || searches.iter().any(|s| s.urls.iter().any(|u| u == url))
+    }
+
+    /// Brings back the PRs in Later that changed since they were put aside, and takes how a
+    /// PR put aside before it was read reads now as how it was.
+    fn wake(&mut self) -> Vec<Cmd> {
+        let Some(later) = self.lists.iter().find(|l| l.id == ListId::Later) else {
+            return Vec::new();
+        };
+        let now: HashMap<&str, Now> = later
+            .rows
+            .iter()
+            .filter(|row| row.checked_at.is_some())
+            .map(|row| {
+                let now = Now {
+                    pill: row.pr.derived.pill,
+                    updated_at: row.updated_at,
+                };
+                (row.pr.url.as_str(), now)
+            })
+            .collect();
+        let now_of = |url: &str| now.get(url).copied();
+        let woken: Vec<(String, u64)> = self
+            .watchlist
+            .changed(now_of)
+            .into_iter()
+            .map(|url| {
+                let number = later
+                    .rows
+                    .iter()
+                    .find(|r| r.pr.url == url)
+                    .map_or(0, |r| r.pr.number);
+                (url.to_owned(), number)
+            })
+            .collect();
+        let mut watchlist = self.watchlist.clone();
+        let is_filled = watchlist.fill_in(now_of);
+        for (url, _) in &woken {
+            let to_focus = !self.is_listed_elsewhere(url);
+            watchlist.bring_back(url, to_focus);
+        }
+        if woken.is_empty() && !is_filled {
+            return Vec::new();
+        }
+        self.watchlist = watchlist;
+        match woken.as_slice() {
+            [] => {}
+            [(_, number)] => {
+                let said = format!("↩ #{number} changed: back from Later");
+                self.acts.say(said, Tone::Info, self.now);
+            }
+            more => {
+                let said = format!("↩ {} PRs changed: back from Later", more.len());
+                self.acts.say(said, Tone::Info, self.now);
+            }
+        }
+        self.rebuild();
+        vec![Cmd::SaveLists(self.watchlist.clone())]
+    }
+
+    /// `lists.json` as read. The first read opens on Focus, where it has PRs and no list was
+    /// picked yet.
+    fn lists_read(&mut self, lists: Lists) -> Vec<Cmd> {
+        if !self.is_lists_read && self.list == ListId::Inbox && !lists.focus.is_empty() {
+            self.list = ListId::Focus;
+            self.selected = None;
+        }
+        self.is_lists_read = true;
+        self.watchlist = lists;
+        self.rebuild();
+        self.wake()
+    }
+
     /// A key in the full view, where no action took it.
     fn key_opened(&mut self, key: Key) -> Vec<Cmd> {
         let Some(opened) = &mut self.opened else {
@@ -868,6 +1024,8 @@ impl Model {
             Key::Esc if self.is_help => self.is_help = false,
             Key::Esc | Key::Backspace => self.opened = None,
             Key::CtrlC | Key::Char('q') => return vec![Cmd::Quit],
+            Key::Char('p') => return self.pin(),
+            Key::Char('z') => return self.put_aside(),
             Key::Char('?') => self.is_help = !self.is_help,
             Key::Char('j') | Key::Down => opened.step(1),
             Key::Char('k') | Key::Up => opened.step(-1),
@@ -918,6 +1076,8 @@ impl Model {
             Key::BackTab | Key::Char('h') | Key::Left => self.cycle(-1),
             Key::Char('s') => self.sort_by(self.sort.next()),
             Key::Char('S') => self.sort_by(self.sort.flipped()),
+            Key::Char('p') => return self.pin(),
+            Key::Char('z') => return self.put_aside(),
             Key::Enter => return self.open(),
             Key::Newline | Key::Backspace | Key::Char(_) => {}
         }
@@ -947,8 +1107,9 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
                 Err(ReadFailure::Unreadable(_)) => model.read_failed_at = Some(at),
             }
             model.rebuild();
-            Vec::new()
+            model.wake()
         }
+        Msg::ListsRead(lists) => model.lists_read(lists),
         Msg::SessionsRead(sessions, at) => {
             model.sessions = sessions;
             model.now = at;
@@ -1112,11 +1273,12 @@ fn lights<'a>(
     })
 }
 
-/// The lists for these files at `now`: All, then `own`'s (this `prw`'s session file, its
-/// "My PRs"), then the saved `searches`, then each live session (by label, then id), then
-/// the unnamed older-mod sessions together. Each list's rows in urgency order. All is the
-/// sessions' PRs: a search's finds are in its own list only, and files that are no
-/// session's (`prw`'s searches) list nothing.
+/// The lists for these files at `now`: Focus (the `watchlist`'s pinned PRs), the Inbox (every
+/// PR an agent's live session watches, but those in Focus or Later; with no session live at
+/// all, every PR in `results.json`), `own`'s (this `prw`'s session file, its "My PRs"), the
+/// saved `searches`, then Later (the PRs put aside). A PR in Later is in no other list. Each
+/// list's rows in urgency order. Files that are no session's (`prw`'s searches, Focus and
+/// Later) list nothing of their own.
 #[must_use]
 pub fn lists_of(
     shared: Option<&Shared>,
@@ -1124,6 +1286,7 @@ pub fn lists_of(
     now: i64,
     own: Option<&str>,
     searches: &[Listed],
+    watchlist: &Lists,
 ) -> Vec<List> {
     let mut live: Vec<&Session> = sessions
         .iter()
@@ -1141,7 +1304,7 @@ pub fn lists_of(
     let names = names_of(&live);
     let prs = shared.map(|s| &s.prs);
     let watchers = watchers_of(&live);
-    let (all_urls, every_url) = urls_of(&live, prs, searches);
+    let (inbox_urls, every_url) = urls_of(&live, own, prs, searches, watchlist);
     let row = |url: &str| {
         let entry = prs.and_then(|prs| prs.get(url));
         let pr = entry.and_then(|e| e.pr.as_ref());
@@ -1169,73 +1332,98 @@ pub fn lists_of(
     // Each card derived once.
     let mut by_url: HashMap<&str, Row> = every_url.iter().map(|&url| (url, row(url))).collect();
     name_repos(by_url.values_mut());
+    // Every list but Later leaves out what is in it.
     let rows_of = |urls: Vec<&str>| -> Vec<Row> {
-        in_order(urls.into_iter().map(|url| by_url[url].clone()).collect())
+        let urls = urls.into_iter().filter(|url| !watchlist.is_later(url));
+        in_order(urls.map(|url| by_url[url].clone()).collect())
+    };
+    let list = |id: ListId, label: &str, rows: Vec<Row>| List {
+        id,
+        label: label.to_owned(),
+        agent: None,
+        cwd: None,
+        search: None,
+        rows,
     };
 
-    let mut lists = vec![List {
-        id: ListId::All,
-        label: "All".to_owned(),
-        agent: None,
-        cwd: None,
-        search: None,
-        rows: rows_of(all_urls),
-    }];
-    let session_list = |session: &Session| List {
-        id: ListId::Session(session.id.clone()),
-        label: names[session.id.as_str()].clone(),
-        agent: session.agent().map(str::to_owned),
-        cwd: session.file.cwd.clone(),
-        search: None,
-        rows: rows_of(unique(&session.file.urls)),
-    };
-    let (ours, theirs): (Vec<&&Session>, Vec<&&Session>) = live
-        .iter()
-        .filter(|s| !s.is_unnamed())
-        .partition(|s| own == Some(s.id.as_str()));
-    lists.extend(ours.into_iter().map(|s| session_list(s)));
-    lists.extend(searches.iter().map(|search| List {
-        id: ListId::Search(search.name.clone()),
-        label: search.name.clone(),
-        agent: None,
-        cwd: None,
-        search: Some(search.clone()),
-        rows: rows_of(unique(&search.urls)),
-    }));
-    lists.extend(theirs.into_iter().map(|s| session_list(s)));
-    let unnamed: Vec<&&Session> = live.iter().filter(|s| s.is_unnamed()).collect();
-    if !unnamed.is_empty() {
+    let mut lists = vec![
+        list(ListId::Focus, "Focus", rows_of(unique(&watchlist.focus))),
+        list(ListId::Inbox, "Inbox", rows_of(inbox_urls)),
+    ];
+    if let Some(mine) = live.iter().find(|s| own == Some(s.id.as_str())) {
         lists.push(List {
-            id: ListId::Unnamed,
-            label: UNNAMED.to_owned(),
-            agent: Some("claude".to_owned()),
-            cwd: None,
+            id: ListId::Session(mine.id.clone()),
+            label: names
+                .get(mine.id.as_str())
+                .map_or_else(|| mine.label().to_owned(), String::clone),
+            agent: mine.agent().map(str::to_owned),
+            cwd: mine.file.cwd.clone(),
             search: None,
-            rows: rows_of(unique(unnamed.iter().flat_map(|s| &s.file.urls))),
+            rows: rows_of(unique(&mine.file.urls)),
         });
     }
+    lists.extend(searches.iter().map(|search| List {
+        search: Some(search.clone()),
+        ..list(
+            ListId::Search(search.name.clone()),
+            &search.name,
+            rows_of(unique(&search.urls)),
+        )
+    }));
+    let later = watchlist
+        .later
+        .iter()
+        .map(|l| by_url[l.url.as_str()].clone());
+    lists.push(list(ListId::Later, "Later", in_order(later.collect())));
 
     lists
 }
 
-/// The URLs All lists (every live session's, or with none live every PR in `results.json`),
-/// and those with the saved searches' after them.
+/// The URLs the Inbox lists (every agent's live session's but `own`'s, or with no session live
+/// at all every PR in `results.json`), but those in Focus, and every URL a list has.
 fn urls_of<'a>(
     live: &[&'a Session],
+    own: Option<&str>,
     prs: Option<&'a BTreeMap<String, Entry>>,
     searches: &'a [Listed],
+    watchlist: &'a Lists,
 ) -> (Vec<&'a str>, Vec<&'a str>) {
-    let all: Vec<&str> = if live.is_empty() {
+    let watched: Vec<&str> = if live.is_empty() {
         prs.map(|prs| prs.keys().map(String::as_str).collect())
             .unwrap_or_default()
     } else {
-        unique(live.iter().flat_map(|s| &s.file.urls))
+        unique(
+            live.iter()
+                .filter(|s| own != Some(s.id.as_str()))
+                .flat_map(|s| &s.file.urls),
+        )
     };
+    let inbox = watched
+        .iter()
+        .copied()
+        .filter(|url| !watchlist.is_focus(url))
+        .collect();
+    let mine = live
+        .iter()
+        .filter(|s| own == Some(s.id.as_str()))
+        .flat_map(|s| s.file.urls.iter().map(String::as_str));
     let found = searches
         .iter()
         .flat_map(|s| s.urls.iter().map(String::as_str));
-    let every = all.iter().copied().chain(found).collect();
-    (all, every)
+    let kept = watchlist
+        .focus
+        .iter()
+        .map(String::as_str)
+        .chain(watchlist.later.iter().map(|l| l.url.as_str()));
+    let mut seen = HashSet::new();
+    let every = watched
+        .into_iter()
+        .chain(mine)
+        .chain(found)
+        .chain(kept)
+        .filter(|url| seen.insert(*url))
+        .collect();
+    (inbox, every)
 }
 
 /// Gives each row its repo's name, one name for a repo in every list: the owner too
@@ -1345,9 +1533,8 @@ fn header_of(model: &Model) -> Header {
         .filter(|s| s.fetched_at > 0)
         .map(|s| now.saturating_sub(s.fetched_at));
     let mut tally = Tally::default();
-    let open = model.lists[0]
-        .rows
-        .iter()
+    let open = model
+        .yours()
         .filter(|r| r.pr.state == Some(crate::gh::PrState::Open));
     for row in open {
         let count = match row.pr.derived.pill {
@@ -1445,13 +1632,6 @@ mod tests {
         }
     }
 
-    fn by_mod(urls: &[&str]) -> SessionFile {
-        SessionFile {
-            writer: Some(Writer::Mod),
-            ..watching(urls)
-        }
-    }
-
     fn open(number: u64) -> Entry {
         Entry {
             at: 1,
@@ -1469,15 +1649,25 @@ mod tests {
     const B: &str = "https://github.com/acme/app/pull/2";
     const C: &str = "https://github.com/acme/web/pull/3";
 
-    #[test]
-    fn saved_searches_come_after_my_prs_and_stay_out_of_all() {
-        let shared = Shared {
+    fn urls(list: &List) -> Vec<String> {
+        let mut urls: Vec<String> = list.rows.iter().map(|r| r.pr.url.clone()).collect();
+        urls.sort();
+        urls
+    }
+
+    fn all_open() -> Shared {
+        Shared {
             prs: [(A, open(1)), (B, open(2)), (C, open(3))]
                 .into_iter()
                 .map(|(u, e)| (u.to_owned(), e))
                 .collect(),
             ..Shared::default()
-        };
+        }
+    }
+
+    #[test]
+    fn focus_the_inbox_my_prs_the_searches_then_later() {
+        let shared = all_open();
         let mine = SessionFile {
             name: Some("My PRs".into()),
             writer: Some(Writer::Prw),
@@ -1506,39 +1696,64 @@ mod tests {
             is_searched: true,
             ..Listed::default()
         }];
-        let lists = lists_of(Some(&shared), &sessions, 120_000, Some("prw-1"), &searches);
+        let none = Lists::default();
+        let lists = lists_of(
+            Some(&shared),
+            &sessions,
+            120_000,
+            Some("prw-1"),
+            &searches,
+            &none,
+        );
         let ids: Vec<&ListId> = lists.iter().map(|l| &l.id).collect();
         assert_eq!(
             ids,
             [
-                &ListId::All,
+                &ListId::Focus,
+                &ListId::Inbox,
                 &ListId::Session("prw-1".into()),
                 &ListId::Search("Review requests".into()),
-                &ListId::Session("a-web".into()),
+                &ListId::Later,
             ]
         );
-        let urls = |list: &List| -> Vec<String> {
-            let mut urls: Vec<String> = list.rows.iter().map(|r| r.pr.url.clone()).collect();
-            urls.sort();
-            urls
-        };
-        assert_eq!(urls(&lists[0]), [A, B]);
-        assert_eq!(urls(&lists[2]), [B, C]);
-        assert_eq!(lists[2].search.as_ref().map(|s| s.total), Some(40));
+        // The Inbox is the agents' sessions' PRs: My PRs and the searches' finds have lists
+        // of their own.
+        assert_eq!(urls(&lists[1]), [B]);
+        assert_eq!(urls(&lists[2]), [A]);
+        assert_eq!(urls(&lists[3]), [B, C]);
+        assert_eq!(lists[3].search.as_ref().map(|s| s.total), Some(40));
         // A found PR a session watches shows its watcher.
-        let b = lists[2].rows.iter().find(|r| r.pr.url == B).unwrap();
+        let b = lists[3].rows.iter().find(|r| r.pr.url == B).unwrap();
         assert_eq!(b.watchers, ["web"]);
+
+        // Pinned: in Focus, and out of the Inbox (not of My PRs or a search). Put aside: in
+        // Later alone, wherever else it was.
+        let mut kept = Lists::default();
+        kept.toggle_focus(A);
+        kept.toggle_focus(B);
+        let ready = Now {
+            pill: PillKind::Ready,
+            updated_at: None,
+        };
+        kept.put_aside(C, ready, 0);
+        let lists = lists_of(
+            Some(&shared),
+            &sessions,
+            120_000,
+            Some("prw-1"),
+            &searches,
+            &kept,
+        );
+        assert_eq!(urls(&lists[0]), [A, B]);
+        assert_eq!(lists[1].rows, []);
+        assert_eq!(urls(&lists[2]), [A]);
+        assert_eq!(urls(&lists[3]), [B]);
+        assert_eq!(urls(&lists[4]), [C]);
     }
 
     #[test]
-    fn all_then_a_list_per_live_session_and_the_unnamed_together() {
-        let shared = Shared {
-            prs: [(A, open(1)), (B, open(2)), (C, open(3))]
-                .into_iter()
-                .map(|(u, e)| (u.to_owned(), e))
-                .collect(),
-            ..Shared::default()
-        };
+    fn the_inbox_holds_every_agents_sessions_prs() {
+        let shared = all_open();
         let named = SessionFile {
             name: Some("web".into()),
             writer: Some(Writer::Mod),
@@ -1560,28 +1775,19 @@ mod tests {
                 0,
             ),
         ];
-        let lists = lists_of(Some(&shared), &sessions, 120_000, None, &[]);
-        let said: Vec<(&ListId, &str, Option<&str>, usize)> = lists
-            .iter()
-            .map(|l| (&l.id, l.label.as_str(), l.agent.as_deref(), l.rows.len()))
-            .collect();
-        assert_eq!(
-            said,
-            [
-                (&ListId::All, "All", None, 3),
-                (&ListId::Session("prw-x".into()), "prw-x", Some("codex"), 1),
-                (&ListId::Session("s-web".into()), "web", Some("claude"), 2),
-                (&ListId::Unnamed, UNNAMED, Some("claude"), 2),
-            ]
-        );
-        let a = lists[0].rows.iter().find(|r| r.pr.url == A).unwrap();
+        let none = Lists::default();
+        let lists = lists_of(Some(&shared), &sessions, 120_000, None, &[], &none);
+        let ids: Vec<&ListId> = lists.iter().map(|l| &l.id).collect();
+        assert_eq!(ids, [&ListId::Focus, &ListId::Inbox, &ListId::Later]);
+        assert_eq!(urls(&lists[1]), [A, B, C]);
+        let a = lists[1].rows.iter().find(|r| r.pr.url == A).unwrap();
         assert_eq!(a.agent.as_deref(), Some("codex"));
         assert_eq!(a.watchers, ["prw-x", UNNAMED, UNNAMED]);
 
-        // Nobody live: every PR in results.json, and no session lists.
-        let lists = lists_of(Some(&shared), &sessions, 10_000_000, None, &[]);
-        assert_eq!(lists.len(), 1);
-        assert_eq!(lists[0].rows.len(), 3);
+        // Nobody live: every PR in results.json.
+        let lists = lists_of(Some(&shared), &sessions, 10_000_000, None, &[], &none);
+        assert_eq!(lists.len(), 3);
+        assert_eq!(lists[1].rows.len(), 3);
     }
 
     #[test]
@@ -1599,13 +1805,31 @@ mod tests {
             in_web("mgx1a2c-p7qd", "Web"),
             in_web("mgx1a2d-zz01", "docs"),
         ];
-        let lists = lists_of(None, &sessions, 120_000, None, &[]);
-        let labels: Vec<&str> = lists.iter().map(|l| l.label.as_str()).collect();
-        assert_eq!(labels, ["All", "docs", "web · k3x9", "Web · p7qd"]);
+        let lists = lists_of(None, &sessions, 120_000, None, &[], &Lists::default());
         assert_eq!(
-            lists[0].rows[0].watchers,
+            lists[1].rows[0].watchers,
             ["docs", "web · k3x9", "Web · p7qd"]
         );
+    }
+
+    /// Two saved searches' lists, `s1` with A and `s2` with B and C, beside Focus, the Inbox
+    /// and Later.
+    fn two_searches() -> Msg {
+        let listed = |name: &str, urls: &[&str]| Listed {
+            name: name.into(),
+            urls: urls.iter().map(|&u| u.to_owned()).collect(),
+            is_searched: true,
+            ..Listed::default()
+        };
+        Msg::Poller(PollerSaid {
+            own: "prw-1".into(),
+            searches: vec![listed("s1", &[A]), listed("s2", &[B, C])],
+            ..PollerSaid::default()
+        })
+    }
+
+    fn search(name: &str) -> ListId {
+        ListId::Search(name.into())
     }
 
     #[test]
@@ -1866,8 +2090,8 @@ mod tests {
         };
         assert_eq!(ours(10_000).header().poll, Poll::Prw);
         assert_eq!(ours(61_000 + STALE_MS + 1).header().poll, Poll::Stale);
-        // Its own list comes first after All.
-        assert_eq!(ours(10_000).lists()[1].id, ListId::Session("prw-1".into()));
+        // Its own list comes after Focus and the Inbox.
+        assert_eq!(ours(10_000).lists()[2].id, ListId::Session("prw-1".into()));
         assert_eq!(agents_live(&ours(10_000)), []);
         assert_eq!(
             read(Model::new(120, 30), [Msg::Tick(5)]).header().poll,
@@ -1877,26 +2101,25 @@ mod tests {
 
     #[test]
     fn keys_move_per_layout_and_quit() {
-        let sessions = vec![
-            session("s1", by_mod(&[A]), 0),
-            session("s2", by_mod(&[B, C]), 0),
-        ];
-        let model = read(Model::new(120, 30), [Msg::SessionsRead(sessions, 0)]);
-        assert_eq!(model.lists().len(), 3);
-        assert_eq!(model.list_id(), &ListId::All);
+        let model = read(Model::new(120, 30), [two_searches()]);
+        assert_eq!(model.lists().len(), 5);
+        assert_eq!(model.list_id(), &ListId::Inbox);
         let model = read(model, [Msg::Key(Key::Tab)]);
-        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        assert_eq!(model.list_id(), &search("s1"));
         assert_eq!(model.selected(), Some(A));
+        // Round the start, to the end.
         let model = read(model, [Msg::Key(Key::BackTab), Msg::Key(Key::BackTab)]);
-        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        assert_eq!(model.list_id(), &ListId::Focus);
+        let model = read(model, [Msg::Key(Key::BackTab), Msg::Key(Key::BackTab)]);
+        assert_eq!(model.list_id(), &search("s2"));
         // Three panes: h focuses the lists, where j moves between them.
         let model = read(model, [Msg::Key(Key::Char('h')), Msg::Key(Key::Char('k'))]);
         assert_eq!(model.focus(), Focus::Lists);
-        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        assert_eq!(model.list_id(), &search("s1"));
         // Narrower: the lists are a strip, h and l step through them.
         let model = read(model, [Msg::Resize(84, 30), Msg::Key(Key::Char('l'))]);
         assert_eq!(model.focus(), Focus::Prs);
-        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        assert_eq!(model.list_id(), &search("s2"));
         let model = read(model, [Msg::Key(Key::Char('?'))]);
         assert!(model.is_help());
         let (model, cmds) = update(model, Msg::Key(Key::Esc));
@@ -1911,13 +2134,9 @@ mod tests {
 
     #[test]
     fn clicks_pick_lists_and_rows_and_press_keys() {
-        let sessions = vec![
-            session("s1", by_mod(&[A]), 0),
-            session("s2", by_mod(&[B, C]), 0),
-        ];
-        let model = read(Model::new(120, 30), [Msg::SessionsRead(sessions, 0)]);
-        let model = read(model, [Msg::Click(Hit::List(2))]);
-        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        let model = read(Model::new(120, 30), [two_searches()]);
+        let model = read(model, [Msg::Click(Hit::List(3))]);
+        assert_eq!(model.list_id(), &search("s2"));
         assert_eq!(model.focus(), Focus::Lists);
         let second = model.list().rows[1].pr.url.clone();
         let model = read(model, [Msg::Click(Hit::Row(1))]);
@@ -1926,10 +2145,10 @@ mod tests {
         // Past the end, nothing changes.
         let model = read(model, [Msg::Click(Hit::Row(9)), Msg::Click(Hit::List(9))]);
         assert_eq!(model.selected(), Some(second.as_str()));
-        assert_eq!(model.list_id(), &ListId::Session("s2".into()));
+        assert_eq!(model.list_id(), &search("s2"));
         // The wheel moves in the pane it's over, the focus where it was.
         let model = read(model, [Msg::Scroll(Focus::Lists, -1)]);
-        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        assert_eq!(model.list_id(), &search("s1"));
         assert_eq!(model.focus(), Focus::Prs);
         let model = read(model, [Msg::Click(Hit::Pane(Focus::Lists))]);
         assert_eq!(model.focus(), Focus::Lists);
@@ -1946,16 +2165,24 @@ mod tests {
 
     #[test]
     fn a_move_that_stays_on_its_list_keeps_the_pr() {
+        let mut kept = Lists::default();
+        let ready = Now {
+            pill: PillKind::Ready,
+            updated_at: None,
+        };
+        kept.put_aside(A, ready, 0);
+        kept.put_aside(B, ready, 0);
         let model = read(
             Model::new(84, 30),
-            [Msg::SessionsRead(
-                vec![session("s1", by_mod(&[A, B]), 0)],
-                0,
-            )],
+            [
+                Msg::ListsRead(kept),
+                Msg::Key(Key::Tab),
+                Msg::Key(Key::Char('j')),
+            ],
         );
-        let model = read(model, [Msg::Key(Key::Tab), Msg::Key(Key::Char('j'))]);
-        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
+        assert_eq!(model.list_id(), &ListId::Later);
         let was = model.selected().map(str::to_owned);
+        assert!(was.is_some());
         // Three panes, the lists focused: G on the last list stays put.
         let model = read(
             model,
@@ -1965,19 +2192,20 @@ mod tests {
                 Msg::Key(Key::Char('G')),
             ],
         );
+        assert_eq!(model.list_id(), &ListId::Later);
         assert_eq!(model.selected().map(str::to_owned), was);
     }
 
     #[test]
-    fn a_list_whose_session_dies_gives_way_to_all() {
-        let sessions = vec![session("s1", by_mod(&[A]), 0)];
-        let model = read(
-            Model::new(50, 30),
-            [Msg::SessionsRead(sessions, 0), Msg::Key(Key::Tab)],
-        );
-        assert_eq!(model.list_id(), &ListId::Session("s1".into()));
-        let model = read(model, [Msg::Tick(60_000)]);
-        assert_eq!(model.list_id(), &ListId::All);
+    fn a_list_that_goes_gives_way_to_the_inbox() {
+        let model = read(Model::new(50, 30), [two_searches(), Msg::Key(Key::Tab)]);
+        assert_eq!(model.list_id(), &search("s1"));
+        let gone = Msg::Poller(PollerSaid {
+            own: "prw-1".into(),
+            ..PollerSaid::default()
+        });
+        let model = read(model, [gone]);
+        assert_eq!(model.list_id(), &ListId::Inbox);
         assert_eq!(model.selected(), None);
     }
 
@@ -2081,6 +2309,166 @@ mod tests {
         );
         let row = model.current_row().expect("a row");
         assert_eq!(row.updated_at, at("2026-10-22T00:00:00Z"));
+    }
+
+    fn saves(cmds: &[Cmd]) -> Option<&Lists> {
+        cmds.iter().find_map(|cmd| match cmd {
+            Cmd::SaveLists(lists) => Some(lists),
+            _ => None,
+        })
+    }
+
+    fn press(model: Model, c: char) -> (Model, Vec<Cmd>) {
+        update(model, Msg::Key(Key::Char(c)))
+    }
+
+    fn toast(model: &Model) -> &str {
+        model.acts().toast().map_or("", |t| t.text.as_str())
+    }
+
+    fn in_list(model: &Model, id: &ListId) -> Vec<String> {
+        model
+            .lists()
+            .iter()
+            .find(|l| l.id == *id)
+            .map(urls)
+            .unwrap_or_default()
+    }
+
+    const OPENED: &str = "2026-09-01T00:00:00Z";
+    const QUIET: &str = "2026-10-01T00:00:00Z";
+    const PUSHED: &str = "2026-10-20T00:00:00Z";
+
+    /// A and B as read before anything changed on them.
+    fn quiet() -> Shared {
+        shared_of(vec![
+            (A, dated(1, OPENED, QUIET)),
+            (B, dated(2, OPENED, QUIET)),
+        ])
+    }
+
+    /// A Claude session watching A and B, both read, the clock at `at`.
+    fn watched_at(at: i64) -> Model {
+        let sessions = vec![session("s1", watching(&[A, B]), at)];
+        let shared = quiet();
+        read(
+            Model::new(120, 30),
+            [
+                Msg::ListsRead(Lists::default()),
+                Msg::SessionsRead(sessions, at),
+                Msg::SharedRead(Ok(shared), at),
+            ],
+        )
+    }
+
+    #[test]
+    fn p_pins_to_focus_and_unpins_and_each_is_saved() {
+        let model = watched_at(0);
+        assert_eq!(model.list_id(), &ListId::Inbox);
+        assert_eq!(model.selected(), Some(A));
+        let (model, cmds) = press(model, 'p');
+        assert_eq!(
+            saves(&cmds).map(|l| l.focus.clone()),
+            Some(vec![A.to_owned()])
+        );
+        assert_eq!(toast(&model), "★ #1 pinned to Focus");
+        assert_eq!(in_list(&model, &ListId::Focus), [A]);
+        // Out of the Inbox, so the selection moves on to what took its place.
+        assert_eq!(in_list(&model, &ListId::Inbox), [B]);
+        assert_eq!(model.selected(), Some(B));
+        let model = read(model, [Msg::Key(Key::BackTab)]);
+        assert_eq!(model.list_id(), &ListId::Focus);
+        let (model, cmds) = press(model, 'p');
+        assert_eq!(saves(&cmds), Some(&Lists::default()));
+        assert_eq!(toast(&model), "#1 unpinned from Focus");
+        assert_eq!(in_list(&model, &ListId::Focus), [""; 0]);
+        assert_eq!(in_list(&model, &ListId::Inbox), [A, B]);
+    }
+
+    #[test]
+    fn z_puts_a_pr_aside_until_z_brings_it_back() {
+        let (model, cmds) = press(watched_at(0), 'z');
+        let later = &saves(&cmds).expect("saved").later;
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].url, A);
+        assert_eq!(toast(&model), "⏾ #1 in Later: back when something changes");
+        assert_eq!(in_list(&model, &ListId::Inbox), [B]);
+        assert_eq!(in_list(&model, &ListId::Later), [A]);
+        // In the full view too, and from Later, back.
+        let model = read(model, [Msg::Key(Key::Tab)]);
+        assert_eq!(model.list_id(), &ListId::Later);
+        let (model, _) = update(model, Msg::Key(Key::Enter));
+        assert!(model.opened().is_some());
+        let (model, cmds) = press(model, 'z');
+        assert_eq!(saves(&cmds), Some(&Lists::default()));
+        assert_eq!(toast(&model), "↩ #1 back from Later");
+        assert_eq!(in_list(&model, &ListId::Inbox), [A, B]);
+    }
+
+    #[test]
+    fn a_pr_in_later_comes_back_once_it_changes() {
+        let model = watched_at(0);
+        // A from the Inbox, B from Focus.
+        let model = read(
+            model,
+            [
+                Msg::Key(Key::Char('z')),
+                Msg::Key(Key::Char('p')),
+                Msg::Key(Key::BackTab),
+                Msg::Key(Key::Char('z')),
+            ],
+        );
+        assert_eq!(in_list(&model, &ListId::Later), [A, B]);
+        // A round that changes nothing wakes nothing.
+        let (model, cmds) = update(model, Msg::SharedRead(Ok(quiet()), 1));
+        assert_eq!(saves(&cmds), None);
+        assert_eq!(in_list(&model, &ListId::Later), [A, B]);
+        // A pushed to: GitHub says it changed since.
+        let pushed = shared_of(vec![
+            (A, dated(1, OPENED, PUSHED)),
+            (B, dated(2, OPENED, QUIET)),
+        ]);
+        let (model, cmds) = update(model, Msg::SharedRead(Ok(pushed.clone()), 2));
+        assert!(saves(&cmds).is_some());
+        assert_eq!(toast(&model), "↩ #1 changed: back from Later");
+        assert_eq!(in_list(&model, &ListId::Inbox), [A]);
+        assert_eq!(in_list(&model, &ListId::Later), [B]);
+        // B merged: back where it came from, Focus.
+        let mut merged = dated(2, OPENED, QUIET);
+        if let Some(pr) = &mut merged.pr {
+            pr.state = PrState::Merged;
+        }
+        let both = shared_of(vec![(A, pushed.prs[A].clone()), (B, merged)]);
+        let model = read(model, [Msg::SharedRead(Ok(both), 3)]);
+        assert_eq!(in_list(&model, &ListId::Focus), [B]);
+        assert_eq!(in_list(&model, &ListId::Later), [""; 0]);
+    }
+
+    #[test]
+    fn a_pr_nothing_else_lists_comes_back_to_focus() {
+        let model = read(watched_at(0), [Msg::Key(Key::Char('z'))]);
+        // Its session gone, A is listed nowhere but Later, and B nowhere at all.
+        let other = vec![session("s2", watching(&[C]), 70_000)];
+        let model = read(model, [Msg::SessionsRead(other, 70_000)]);
+        assert_eq!(in_list(&model, &ListId::Later), [A]);
+        let pushed = shared_of(vec![(A, dated(1, OPENED, PUSHED))]);
+        let model = read(model, [Msg::SharedRead(Ok(pushed), 70_000)]);
+        assert_eq!(in_list(&model, &ListId::Focus), [A]);
+    }
+
+    #[test]
+    fn the_first_read_of_the_lists_opens_on_focus_where_it_has_prs() {
+        let mut kept = Lists::default();
+        kept.toggle_focus(B);
+        let model = read(Model::new(120, 30), [Msg::ListsRead(kept.clone())]);
+        assert_eq!(model.list_id(), &ListId::Focus);
+        assert_eq!(model.selected(), Some(B));
+        // Later reads (another prw's change) leave the list picked as it is.
+        let model = read(
+            Model::new(120, 30),
+            [Msg::ListsRead(Lists::default()), Msg::ListsRead(kept)],
+        );
+        assert_eq!(model.list_id(), &ListId::Inbox);
     }
 
     #[test]

@@ -8,7 +8,8 @@ use prw_core::full::parse_full;
 use prw_core::gh::PrState;
 use prw_core::handoff::Kind;
 use prw_core::opened::{Got, Opened, ReadDone, Tab};
-use prw_core::ui::{Focus, Hit, Key, LIT_MS, Model, Msg, PollerSaid, Session, update};
+use prw_core::ui::{Focus, Hit, Key, LIT_MS, ListId, Model, Msg, PollerSaid, Session, update};
+use prw_core::watchlist::parse_lists;
 use prw_core::{parse_session, parse_shared};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -21,6 +22,7 @@ use crate::view::{Ctx, Hits, is_animated, render};
 
 const RESULTS: &str = include_str!("../../../demo/results.json");
 const SEARCHES: &str = include_str!("../../../demo/searches.json");
+const LISTS: &str = include_str!("../../../demo/lists.json");
 const SESSIONS: [(&str, &str); 4] = [
     (
         "mh0w2b-k3p9x1aq",
@@ -168,12 +170,10 @@ fn three_panes_at_120() {
             "◆ pr-watch companion",
             "polled by mod · 12s ago · 4 live",
             "Lists",
-            "All",
+            "★ Focus",
+            "Inbox",
             " ⚠ 11",
-            "app-retry",
-            "web-checkout",
-            "billing",
-            "Claude session",
+            "⏾ Later",
             "#57",
             "Prorate plan changes",
             "acme/billing #57",
@@ -210,8 +210,9 @@ fn strip_at_84() {
         &text,
         &[
             "polled by mod",
-            " All 11 ",
-            "◆ app-retry 2",
+            " ★ Focus 0 ",
+            " Inbox 11 ",
+            " ⏾ Later 0 ",
             "#57",
             "Prorate plan",
             "⚠ CONFLICTS",
@@ -221,9 +222,15 @@ fn strip_at_84() {
     // Tab to the next list: the strip marks it, the table is its PRs.
     let model = feed(demo(84, 30), [Msg::Key(Key::Tab)]);
     let text = screen(&model, 84, 30);
-    assert_says(&text, &["╭ app-retry ─", "#412", "#409"]);
+    assert_says(
+        &text,
+        &["╭ Later ─", "Nothing here: z puts a PR aside until it"],
+    );
     let text = screen(&feed(demo(120, 30), [Msg::Key(Key::Tab)]), 120, 30);
-    assert_says(&text, &["app-retry  ·  claude · /work/app", "▌◆ app-retry"]);
+    assert_says(
+        &text,
+        &["Later  ·  put aside until something changes", "▌⏾ Later"],
+    );
 }
 
 #[test]
@@ -233,20 +240,76 @@ fn side_at_49() {
         &text,
         &[
             "polled by mod",
-            "◂ All · 11 ▸",
-            "1/5 lists",
+            "◂ Inbox · 11 ▸",
+            "2/3 lists",
             "#57",
             "⚠ CONFLICTS",
             "acme/billing #57",
         ],
     );
-    // Lists by name: All, app-retry, billing, web-checkout, then the unnamed.
+    // Focus, the Inbox, Later; round the start to the end.
     let model = feed(
         demo(49, 30),
         [Msg::Key(Key::BackTab), Msg::Key(Key::BackTab)],
     );
     let text = screen(&model, 49, 30);
-    assert_says(&text, &["◆ web-checkout · 4 ▸", "4/5 lists", "#88"]);
+    assert_says(&text, &["◂ ⏾ Later · 0 ▸", "3/3 lists"]);
+}
+
+/// The demo with its Focus and Later (`demo/lists.json`) read.
+fn kept(width: u16, height: u16) -> Model {
+    feed(demo(width, height), [Msg::ListsRead(parse_lists(LISTS))])
+}
+
+#[test]
+fn focus_and_later_are_lists_of_your_own() {
+    let model = kept(120, 30);
+    // It opens on Focus, which has PRs.
+    assert_eq!(model.list_id(), &ListId::Focus);
+    let text = screen(&model, 120, 30);
+    assert_says(
+        &text,
+        &[
+            "Focus  ·  the PRs you pinned · p pins or unpins one",
+            "#57",
+            "#412",
+            "p unpin",
+            "z later",
+        ],
+    );
+    let count = |word: &str| {
+        let line = text.lines().nth(row_saying(&text, word)).expect("a row");
+        line.split('│').nth(1).unwrap_or_default().trim().to_owned()
+    };
+    // #57 and #412 left the Inbox for Focus, #140 for Later, where it waits: it hasn't
+    // changed since it was put aside.
+    let focus = count("★ Focus");
+    assert!(
+        focus.starts_with("▌★ Focus") && focus.ends_with("⚠  2"),
+        "{focus}"
+    );
+    assert!(count("Inbox").ends_with(" 8"), "{}", count("Inbox"));
+    assert!(count("⏾ Later").ends_with(" 1"), "{}", count("⏾ Later"));
+    // z puts #57 aside; in Later, z brings #140 back to the Inbox.
+    let model = feed(model, [Msg::Key(Key::Char('z'))]);
+    let text = screen(&model, 120, 30);
+    assert_says(&text, &["⏾ #57 in Later: back when something changes"]);
+    assert_eq!(model.selected_row().map(|r| r.pr.number), Some(412));
+    let model = feed(model, [Msg::Key(Key::BackTab), Msg::Key(Key::Char('G'))]);
+    assert_eq!(model.selected_row().map(|r| r.pr.number), Some(140));
+    let text = screen(&model, 120, 30);
+    assert_says(&text, &["z back", "p focus"]);
+    let model = feed(model, [Msg::Key(Key::Char('z'))]);
+    assert_says(&screen(&model, 120, 30), &["↩ #140 back from Later"]);
+    // The key help says both.
+    let help = feed(model, [Msg::Key(Key::Char('?'))]);
+    assert_says(
+        &screen(&help, 120, 40),
+        &[
+            "pin to Focus, or unpin",
+            "put aside in Later until it changes",
+        ],
+    );
 }
 
 #[test]
@@ -259,7 +322,8 @@ fn too_narrow_at_30() {
 fn errors_and_placeholders_show_as_the_mod_shows_them() {
     // #97: no gh account could see it. #301: watched, not read yet. #140: data, then 502s.
     let rows = |model: &Model| {
-        model.lists()[0]
+        model
+            .list()
             .rows
             .iter()
             .map(|r| r.pr.number)
@@ -392,19 +456,18 @@ fn a_click_picks_a_row_then_a_hint_asks_and_an_answer_closes() {
 fn a_click_picks_a_list_and_the_wheel_moves_where_it_is() {
     let model = demo(120, 30);
     let text = screen(&model, 120, 30);
-    // The lists pane's, not the card's watchers.
-    let model = click(model, row_saying(&text, "│ ◇ billing"), "billing");
-    assert_eq!(model.list().label, "billing");
+    let model = click(model, row_saying(&text, "│ ⏾ Later"), "Later");
+    assert_eq!(model.list().label, "Later");
     assert_eq!(model.focus(), Focus::Lists);
     let (text, hits) = drawn(&model, 120, 30);
     let (x, y) = cell_of(&text, row_saying(&text, "LISTS"), "LISTS");
     assert_eq!(hits.pane_at(x, y), Some(Focus::Lists));
-    let (x, y) = cell_of(&text, row_saying(&text, "CHECKS"), "CHECKS");
+    let (x, y) = cell_of(&text, row_saying(&text, "Nothing here"), "Nothing here");
     assert_eq!(hits.pane_at(x, y), Some(Focus::Prs));
     // The strip's lists, narrower.
     let model = demo(84, 30);
-    let model = click(model, 1, "billing");
-    assert_eq!(model.list().label, "billing");
+    let model = click(model, 1, "Later");
+    assert_eq!(model.list().label, "Later");
 }
 
 #[test]
@@ -529,7 +592,7 @@ fn the_version_shows_and_so_does_a_newer_one() {
     let text = screen(&model, 120, 30);
     assert_says(
         &text,
-        &[&own, "4 sessions live · 5 lists · ↑ prw 99.0.0 is out"],
+        &[&own, "4 sessions live · 3 lists · ↑ prw 99.0.0 is out"],
     );
     assert_says(&screen(&model, 49, 30), &["↑ prw 99.0.0 is out"]);
     let help = feed(model, [Msg::Key(Key::Char('?'))]);
@@ -697,11 +760,11 @@ fn saved_searches_are_lists_of_their_own() {
     // The pane is 22 wide: "Review requests" is cut.
     assert_says(
         &text,
-        &["LISTS", "◎ Review reques…", "◎ Team web", "SESSIONS"],
+        &["LISTS", "◎ Review reques…", "◎ Team web", "⏾ Later"],
     );
-    // Above SESSIONS, with All.
+    // After the Inbox, above Later.
     let at = |word: &str| text.find(word).expect(word);
-    assert!(at("Team web") < at("SESSIONS"));
+    assert!(at("Inbox") < at("Review reques") && at("Team web") < at("⏾ Later"));
     // Tab to Team web: what it asks, and how many GitHub found in all.
     let web = feed(model, [Msg::Key(Key::Tab), Msg::Key(Key::Tab)]);
     assert_says(
@@ -902,7 +965,7 @@ fn what_people_write_shows_as_markdown() {
     }
 }
 
-/// The demo's row for PR `number` in All.
+/// The demo's row for PR `number` in the Inbox.
 fn row_of_pr(number: u64) -> usize {
     let model = demo(120, 36);
     (0..model.list().rows.len())
@@ -978,7 +1041,13 @@ fn a_row_wears_its_repos_chip_and_its_dates_and_s_orders_the_rows() {
     assert_ne!(fg_of("#140", " 5w "), fg_of("#91", " 3d "));
     let by_repo = feed(model, [Msg::Key(Key::Char('s'))]);
     let text = screen(&by_repo, 200, 30);
-    assert_says(&text, &["All  ·  by repo  ·  every PR", "REPO↓"]);
+    assert_says(
+        &text,
+        &[
+            "Inbox  ·  by repo  ·  what your agents' sessions watch",
+            "REPO↓",
+        ],
+    );
     assert!(row_saying(&text, "Release 4.12") < row_saying(&text, "Bump vite"));
     // At 84 the two times share a cell; at 49 only the card says them.
     assert_says(

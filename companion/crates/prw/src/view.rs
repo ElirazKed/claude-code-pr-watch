@@ -609,9 +609,8 @@ fn header(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout) {
 }
 
 fn open_count(model: &Model) -> usize {
-    model.lists()[0]
-        .rows
-        .iter()
+    model
+        .yours()
         .filter(|row| row.pr.state == Some(PrState::Open))
         .count()
 }
@@ -734,6 +733,23 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
     };
     let m = offered("m");
     let close = offered("X");
+    // What `p` and `z` do to this PR.
+    let url = model.current_row().map(|r| r.pr.url.as_str());
+    let (pin, aside) = match url {
+        Some(url) => (
+            if model.watchlist().is_focus(url) {
+                "unpin"
+            } else {
+                "focus"
+            },
+            if model.watchlist().is_later(url) {
+                "back"
+            } else {
+                "later"
+            },
+        ),
+        None => ("", ""),
+    };
     let keys = if model.opened().is_some() {
         vec![
             ("esc", "back", Key::Esc),
@@ -745,6 +761,8 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
+            ("p", pin, char('p')),
+            ("z", aside, char('z')),
             ("o", "browser", char('o')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
@@ -759,6 +777,8 @@ fn hints(frame: &mut Frame, r: Rect, model: &Model, chosen: Layout, hits: &mut H
             ("m", m.as_deref().unwrap_or_default(), char('m')),
             ("c", "comment", char('c')),
             ("f", "hand off", char('f')),
+            ("p", pin, char('p')),
+            ("z", aside, char('z')),
             ("o", "browser", char('o')),
             ("?", "help", char('?')),
             ("q", "quit", char('q')),
@@ -849,6 +869,8 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
             ("m", "merge or auto-merge, after a y; m: method"),
             ("c", "comment: ⏎ posts, alt-⏎ a new line"),
             ("f", "fix, resolve or address: copy the prompt"),
+            ("p", "pin to Focus, or unpin"),
+            ("z", "put aside in Later until it changes, or back"),
             ("R", "re-run failed or skipped checks, after a y"),
             ("X", "close or reopen the PR, after a y"),
             ("o", "open in the browser"),
@@ -906,20 +928,11 @@ fn help(frame: &mut Frame, area: Rect, model: &Model, chosen: Layout) {
 
 fn list_glyph(list: &List) -> Option<(&'static str, Color)> {
     match list.id {
-        ListId::All => None,
-        ListId::Session(_) | ListId::Unnamed => Some(agent_look(list.agent.as_deref())),
+        ListId::Focus => Some(("★", YELLOW)),
+        ListId::Inbox => None,
+        ListId::Session(_) => Some(agent_look(list.agent.as_deref())),
         ListId::Search(_) => Some(("◎", ACCENT)),
-    }
-}
-
-/// Whether a list goes under SESSIONS: an agent's session, not `prw`'s own lists (All, My
-/// PRs, the saved searches).
-fn is_sessions_list(model: &Model, list: &List) -> bool {
-    let own = model.poller().map(|p| p.own.as_str());
-    match &list.id {
-        ListId::All | ListId::Search(_) => false,
-        ListId::Session(id) => own != Some(id.as_str()),
-        ListId::Unnamed => true,
+        ListId::Later => Some(("⏾", DIM)),
     }
 }
 
@@ -958,14 +971,10 @@ fn lists_pane(frame: &mut Frame, r: Rect, model: &Model, hits: &mut Hits) {
     let pad = || Span::raw(" ".repeat(ix));
     let section = |name: &str| Line::from(vec![pad(), span(name.to_owned(), label())]);
     let mut lines = vec![Line::raw(""), section("LISTS")];
-    let first_session = model
-        .lists()
-        .iter()
-        .position(|l| is_sessions_list(model, l));
     for (i, list) in model.lists().iter().enumerate() {
-        if Some(i) == first_session {
+        // Later sits apart, at the end.
+        if list.id == ListId::Later {
             lines.push(Line::raw(""));
-            lines.push(section("SESSIONS"));
         }
         if let Some(at) = row_of(inner, lines.len()) {
             hits.add(at, Hit::List(i));
@@ -1175,9 +1184,13 @@ fn status_cell(row: &Row, bg: Color, beat: u64) -> Vec<Span<'static>> {
 
 fn about(model: &Model, list: &List, home_dir: &str) -> String {
     match list.id {
-        ListId::All if model.header().live == 0 => "every PR in results.json".to_owned(),
-        ListId::All => "every PR a live session watches".to_owned(),
-        ListId::Session(_) | ListId::Unnamed => {
+        ListId::Focus => "the PRs you pinned · p pins or unpins one".to_owned(),
+        ListId::Inbox if model.header().live == 0 => {
+            "every PR in results.json, but Focus's and Later's".to_owned()
+        }
+        ListId::Inbox => "what your agents' sessions watch · p pins, z puts aside".to_owned(),
+        ListId::Later => "put aside until something changes · z brings one back".to_owned(),
+        ListId::Session(_) => {
             let agent = list.agent.as_deref().unwrap_or("agent");
             match &list.cwd {
                 Some(cwd) => format!("{agent} · {}", tilde(cwd, home_dir)),
@@ -1239,15 +1252,21 @@ fn table_empty(model: &Model, list: &List, iw: usize, ctx: Ctx) -> Option<Vec<Li
     if !list.rows.is_empty() {
         return None;
     }
-    // All lists every watched PR (every one in results.json when nobody is live), so empty
-    // means nothing is watched, whoever is live: prw's own session counts as live.
-    if list.search.is_none() && list.id == ListId::All {
+    // Nothing anywhere but My PRs and the searches: how a PR gets here.
+    let is_bare = model
+        .lists()
+        .iter()
+        .all(|l| matches!(l.id, ListId::Session(_) | ListId::Search(_)) || l.rows.is_empty());
+    if list.id == ListId::Inbox && is_bare {
         return Some(first_run(iw));
     }
-    let say = match &list.search {
-        Some(search) if !search.is_searched => " Searching GitHub…",
-        Some(_) => " No open PR matches this search.",
-        None => " Nothing here yet.",
+    let say = match (&list.id, &list.search) {
+        (_, Some(search)) if !search.is_searched => " Searching GitHub…",
+        (_, Some(_)) => " No open PR matches this search.",
+        (ListId::Focus, None) => " Nothing pinned: p on a PR pins it here.",
+        (ListId::Inbox, None) => " Nothing new: the rest is in Focus or Later.",
+        (ListId::Later, None) => " Nothing here: z puts a PR aside until it changes.",
+        _ => " Nothing here yet.",
     };
     Some(vec![
         Line::raw(""),
@@ -1255,7 +1274,7 @@ fn table_empty(model: &Model, list: &List, iw: usize, ctx: Ctx) -> Option<Vec<Li
     ])
 }
 
-/// What the All list says before anything is watched: how a PR gets here.
+/// What the Inbox says before anything is watched: how a PR gets here.
 fn first_run(iw: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw(""),
@@ -1282,6 +1301,10 @@ fn first_run(iw: usize) -> Vec<Line<'static>> {
     for l in wrap(&mine, iw.saturating_sub(2), 2) {
         lines.push(Line::from(span(format!(" {l}"), fg(DIM))));
     }
+    let keys = "On any PR, p pins it to Focus and z puts it aside in Later until it changes.";
+    for l in wrap(keys, iw.saturating_sub(2), 2) {
+        lines.push(Line::from(span(format!(" {l}"), fg(DIM))));
+    }
     lines
 }
 
@@ -1289,7 +1312,7 @@ fn first_run(iw: usize) -> Vec<Line<'static>> {
 /// dates go first where there's too little room for a title beside them.
 #[derive(Debug, Clone, Copy)]
 struct Columns {
-    /// The All list says whose each PR is (an agent glyph).
+    /// Every list but My PRs says whose each PR is (an agent glyph).
     agent: usize,
     /// The repo chip's name, in cells: 0 for no chip. A space follows the chip.
     repo: usize,
@@ -1338,11 +1361,11 @@ impl Columns {
     /// `▌`, the mark, a space, the number, the agent, the repo chip, the title, the dates,
     /// then the status.
     fn new(iw: usize, list: &List, sort: Sort, now: i64) -> Self {
-        // A session's PRs are all its agent's; All's and a search's are anyone's.
-        let agent = if matches!(list.id, ListId::All | ListId::Search(_)) {
-            2
-        } else {
+        // My PRs are prw's own; every other list's are anyone's.
+        let agent = if matches!(list.id, ListId::Session(_)) {
             0
+        } else {
+            2
         };
         let longest = list.rows.iter().map(|r| r.pr.number).max().unwrap_or(0);
         let number = (format!("#{longest}").len() + 1).max(6);

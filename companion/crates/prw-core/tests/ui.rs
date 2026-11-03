@@ -1,6 +1,7 @@
 //! Properties of the TUI's model (the plan's Tests section): after any sequence of
 //! messages, the selected list exists and the selection is a PR of it, or none exactly
-//! when it is empty; and what the model shows is what its inputs give.
+//! when it is empty; a PR in Later is in no other list; and what the model shows is what its
+//! inputs give.
 
 use proptest::prelude::*;
 use prw_core::act::{Done, Outcome};
@@ -9,10 +10,11 @@ use prw_core::gh::{GhPr, PrState};
 use prw_core::merge::MergeRun;
 use prw_core::opened::{Got, Opened, Read, ReadDone, Tab};
 use prw_core::protocol::{FileKind, SessionFile, Writer};
-use prw_core::status::MergeMethod;
+use prw_core::status::{MergeMethod, PillKind};
 use prw_core::ui::{
     Cmd, Key, ListId, Listed, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update,
 };
+use prw_core::watchlist::{Lists, Now};
 use prw_core::{Entry, Shared};
 
 /// A handful of PRs, so reads overlap: the same URLs come and go.
@@ -116,15 +118,44 @@ fn key() -> impl Strategy<Value = Key> {
             Key::CtrlC,
         ]),
         prop::sample::select(vec![
-            'j', 'k', 'h', 'l', 'g', 'G', '?', 'q', 'x', '1', '2', '3'
+            'j', 'k', 'h', 'l', 'g', 'G', '?', 'q', 'x', '1', '2', '3', 'p', 'z'
         ])
         .prop_map(Key::Char),
     ]
 }
 
+/// Focus and Later as another `prw` may have written them: a PR in one of them at most.
+fn lists() -> impl Strategy<Value = Lists> {
+    let pill = prop::sample::select(vec![PillKind::Ready, PillKind::CiFailed, PillKind::Loading]);
+    (
+        urls(),
+        prop::collection::vec((prop::sample::select(&URLS[..]), pill), 0..4),
+    )
+        .prop_map(|(focus, later)| {
+            let mut lists = Lists::default();
+            for url in focus {
+                if !lists.is_focus(&url) {
+                    lists.toggle_focus(&url);
+                }
+            }
+            for (url, pill) in later {
+                lists.put_aside(
+                    url,
+                    Now {
+                        pill,
+                        updated_at: None,
+                    },
+                    0,
+                );
+            }
+            lists
+        })
+}
+
 fn msg() -> impl Strategy<Value = Msg> {
     let at = || 0_i64..400_000;
     prop_oneof![
+        1 => lists().prop_map(Msg::ListsRead),
         2 => (shared(), at()).prop_map(|(s, at)| Msg::SharedRead(Ok(s), at)),
         1 => at().prop_map(|at| Msg::SharedRead(Err(ReadFailure::Missing), at)),
         1 => at().prop_map(|at| Msg::SharedRead(Err(ReadFailure::Unreadable("torn".into())), at)),
@@ -159,7 +190,18 @@ fn msg() -> impl Strategy<Value = Msg> {
 fn check(model: &Model) -> Result<(), TestCaseError> {
     let lists = model.lists();
     prop_assert!(!lists.is_empty());
-    prop_assert_eq!(&lists[0].id, &ListId::All);
+    prop_assert_eq!(&lists[0].id, &ListId::Focus);
+    prop_assert_eq!(&lists[1].id, &ListId::Inbox);
+    prop_assert_eq!(&lists[lists.len() - 1].id, &ListId::Later);
+    // A PR put aside is in Later alone.
+    let later = &lists[lists.len() - 1].rows;
+    for row in later {
+        let elsewhere = lists[..lists.len() - 1]
+            .iter()
+            .flat_map(|l| &l.rows)
+            .any(|r| r.pr.url == row.pr.url);
+        prop_assert!(!elsewhere, "{} in Later and elsewhere", row.pr.url);
+    }
     prop_assert!(
         lists.iter().any(|l| l.id == *model.list_id()),
         "{:?}",
@@ -202,6 +244,7 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
             model.now(),
             model.poller().map(|p| p.own.as_str()),
             model.poller().map_or(&[][..], |p| &p.searches),
+            model.watchlist(),
         )[..]
     );
     Ok(())
