@@ -15,6 +15,7 @@ use prw_core::ui::{
     Cmd, Key, ListId, Listed, Model, Msg, PollerSaid, ReadFailure, Session, lists_of, update,
 };
 use prw_core::watchlist::{Lists, Now};
+use prw_core::web::{ListKind, REPO_HUES, state_of};
 use prw_core::{Entry, Shared};
 
 /// A handful of PRs, so reads overlap: the same URLs come and go.
@@ -166,6 +167,13 @@ fn msg() -> impl Strategy<Value = Msg> {
             Msg::SessionsRead(sessions, at)
         }),
         6 => key().prop_map(Msg::Key),
+        // prw web's ★ and ⏾, which say what they want.
+        2 => (prop::sample::select(&URLS[..]), any::<bool>(), any::<bool>()).prop_map(
+            |(url, is_pin, is_on)| {
+                let url = url.to_owned();
+                if is_pin { Msg::Pin(url, is_on) } else { Msg::Aside(url, is_on) }
+            }
+        ),
         1 => (prop::sample::select(&URLS[..]), any::<bool>()).prop_map(|(url, is_ok)| {
             let got = if is_ok { Ok(Full::default()) } else { Err("HTTP 502".to_owned()) };
             Msg::Read(ReadDone { url: url.to_owned(), got: Got::Pr(got) })
@@ -235,6 +243,7 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
             );
         }
     }
+    check_web(model)?;
     // What the model shows is what its inputs give now.
     prop_assert_eq!(
         lists,
@@ -247,6 +256,32 @@ fn check(model: &Model) -> Result<(), TestCaseError> {
             model.watchlist(),
         )[..]
     );
+    Ok(())
+}
+
+/// What `prw web`'s page gets says what the model's lists do.
+fn check_web(model: &Model) -> Result<(), TestCaseError> {
+    let state = state_of(model, "1.0.0");
+    prop_assert!(serde_json::to_string(&state).is_ok());
+    prop_assert_eq!(state.lists.len(), model.lists().len());
+    let ids: std::collections::HashSet<_> = state.lists.iter().map(|l| &l.id).collect();
+    prop_assert_eq!(ids.len(), state.lists.len(), "page list ids are unique");
+    for (list, view) in model.lists().iter().zip(&state.lists) {
+        let urls: Vec<_> = list.rows.iter().map(|r| &r.pr.url).collect();
+        let shown: Vec<_> = view.rows.iter().map(|r| &r.url).collect();
+        prop_assert_eq!(urls, shown, "the page's rows are the model's, in order");
+        for row in &view.rows {
+            prop_assert_eq!(row.later.is_some(), view.kind == ListKind::Later);
+            prop_assert_eq!(row.is_focus, model.watchlist().is_focus(&row.url));
+            if view.kind == ListKind::Focus {
+                prop_assert!(row.is_focus);
+            }
+            // Read or not, as the card has it.
+            prop_assert_eq!(row.stations.is_none(), row.pill == PillKind::Loading);
+            prop_assert!(!row.next.title.is_empty());
+            prop_assert!(row.hue < REPO_HUES, "a colour the page has");
+        }
+    }
     Ok(())
 }
 

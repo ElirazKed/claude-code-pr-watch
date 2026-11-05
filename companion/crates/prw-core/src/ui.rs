@@ -203,6 +203,11 @@ pub enum Msg {
     Read(ReadDone),
     /// `lists.json` as read: at the start, and whenever another `prw` changed it.
     ListsRead(Lists),
+    /// Pin this PR to Focus (true) or unpin it, where it isn't so already: `prw web`'s ★, which
+    /// says what it wants rather than toggling, so a second click is no undo.
+    Pin(String, bool),
+    /// Put this PR aside in Later (true) or bring it back, where it isn't so already.
+    Aside(String, bool),
 }
 
 /// What a click lands on, as the view drew it.
@@ -359,7 +364,8 @@ impl List {
 }
 
 /// Who keeps `results.json` fresh, as the header says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Poll {
     /// A mod session is live and the results are fresh.
     Mod,
@@ -906,6 +912,19 @@ impl Model {
         let Some(row) = self.current_row() else {
             return Vec::new();
         };
+        let url = row.pr.url.clone();
+        let is_focus = self.watchlist.is_focus(&url);
+        self.pin_to(&url, !is_focus)
+    }
+
+    /// Pins a listed PR to Focus, or unpins it, where it isn't so already.
+    fn pin_to(&mut self, url: &str, is_on: bool) -> Vec<Cmd> {
+        let Some(row) = self.row_of(url) else {
+            return Vec::new();
+        };
+        if self.watchlist.is_focus(url) == is_on {
+            return Vec::new();
+        }
         let (url, number) = (row.pr.url.clone(), row.pr.number);
         let said = if self.watchlist.toggle_focus(&url) {
             format!("★ #{number} pinned to Focus")
@@ -923,6 +942,19 @@ impl Model {
         let Some(row) = self.current_row() else {
             return Vec::new();
         };
+        let url = row.pr.url.clone();
+        let is_later = self.watchlist.is_later(&url);
+        self.aside_to(&url, !is_later)
+    }
+
+    /// Puts a listed PR aside, or brings it back, where it isn't so already.
+    fn aside_to(&mut self, url: &str, is_on: bool) -> Vec<Cmd> {
+        let Some(row) = self.row_of(url) else {
+            return Vec::new();
+        };
+        if self.watchlist.is_later(url) == is_on {
+            return Vec::new();
+        }
         let (url, number, now) = (row.pr.url.clone(), row.pr.number, row.now());
         let said = if self.watchlist.is_later(&url) {
             let to_focus = !self.is_listed_elsewhere(&url);
@@ -1117,6 +1149,8 @@ pub fn update(mut model: Model, msg: Msg) -> (Model, Vec<Cmd>) {
             model.wake()
         }
         Msg::ListsRead(lists) => model.lists_read(lists),
+        Msg::Pin(url, is_on) => model.pin_to(&url, is_on),
+        Msg::Aside(url, is_on) => model.aside_to(&url, is_on),
         Msg::SessionsRead(sessions, at) => {
             model.sessions = sessions;
             model.now = at;
@@ -2367,6 +2401,35 @@ mod tests {
                 Msg::SharedRead(Ok(shared), at),
             ],
         )
+    }
+
+    #[test]
+    fn pin_and_aside_say_what_they_want_so_a_second_is_nothing() {
+        let model = watched_at(0);
+        let (model, cmds) = update(model, Msg::Pin(B.to_owned(), true));
+        assert_eq!(
+            saves(&cmds).map(|l| l.focus.clone()),
+            Some(vec![B.to_owned()])
+        );
+        let (model, cmds) = update(model, Msg::Pin(B.to_owned(), true));
+        assert_eq!(cmds, Vec::new());
+        assert_eq!(in_list(&model, &ListId::Focus), [B]);
+        let (model, cmds) = update(model, Msg::Aside(B.to_owned(), true));
+        assert!(saves(&cmds).is_some_and(|l| l.focus.is_empty() && l.is_later(B)));
+        assert_eq!(toast(&model), "⏾ #2 in Later: back when something changes");
+        let (model, cmds) = update(model, Msg::Aside(B.to_owned(), true));
+        assert_eq!(cmds, Vec::new());
+        // Back where it was put aside from.
+        let (model, _) = update(model, Msg::Aside(B.to_owned(), false));
+        assert_eq!(in_list(&model, &ListId::Focus), [B]);
+        let (model, cmds) = update(model, Msg::Pin(B.to_owned(), false));
+        assert!(saves(&cmds).is_some_and(|l| l.focus.is_empty()));
+        // A PR no list has is left alone.
+        let (_, cmds) = update(
+            model,
+            Msg::Pin("https://github.com/acme/app/pull/99".into(), true),
+        );
+        assert_eq!(cmds, Vec::new());
     }
 
     #[test]

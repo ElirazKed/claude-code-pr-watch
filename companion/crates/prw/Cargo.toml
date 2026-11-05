@@ -22,6 +22,9 @@ serde_json.workspace = true
 ratatui.workspace = true
 unicode-width.workspace = true
 tui-markdown.workspace = true
+tiny_http.workspace = true
+rust-embed.workspace = true
+ctrlc.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

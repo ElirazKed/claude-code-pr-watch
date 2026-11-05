@@ -26,7 +26,7 @@ pub const TEAL: Color = Color::Rgb(0x94, 0xE2, 0xD5);
 /// The repo chips' hues (`repos::hue_of` picks one): sky, lavender, pink, teal, yellow, peach,
 /// green, maroon. Each chip sits on a tint of its own hue, so it reads as a label, not as a
 /// status's coloured words.
-pub const REPO_HUES: [Color; 8] = [
+pub const REPO_HUES: [Color; prw_core::web::REPO_HUES] = [
     Color::Rgb(0x89, 0xDC, 0xEB),
     Color::Rgb(0xB4, 0xBE, 0xFE),
     Color::Rgb(0xF5, 0xC2, 0xE7),

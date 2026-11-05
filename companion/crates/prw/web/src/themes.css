@@ -1,0 +1,288 @@
+/* The themes: each a palette, dark and light. main.tsx sets data-palette and data-theme on
+   <html> from the picker (theme.ts) before the first paint; without them, Graphite follows the
+   system's light or dark. */
+
+/* Graphite: plain greys, one blue accent; status colours muted, and only where they mean something. */
+:root {
+  --bg: #1b1c1e;
+  --rail: #17181a;
+  --card: #222326;
+  --raised: #2a2b2f;
+  --sunk: #141517;
+  --line: #303135;
+  --edge: #3f4146;
+  --fg: #ececed;
+  --body: #d2d2d4;
+  --dim: #a3a4a9;
+  --faint: #818288;
+  --accent: #7fa8dc;
+  --lav: #a99bd2;
+  --green: #8dbd85;
+  --red: #dd7b7b;
+  --yellow: #d8b763;
+  --blue: #8ea3c2;
+  --peach: #d39271;
+  --repo-0: #86bccc;
+  --repo-1: #a99bd2;
+  --repo-2: #d39fc4;
+  --repo-3: #7fbfae;
+  --repo-4: #d8b763;
+  --repo-5: #d39271;
+  --repo-6: #8dbd85;
+  --repo-7: #d58f99;
+  --on-accent: #121315;
+  --scrim: rgba(10, 10, 12, 0.6);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  --fill: rgba(127, 168, 220, 0.07);
+  --tint-red: rgba(221, 123, 123, 0.1);
+  --tint-yellow: rgba(216, 183, 99, 0.11);
+  --tint-accent: rgba(127, 168, 220, 0.12);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f5f5f6;
+    --rail: #efeff1;
+    --card: #ffffff;
+    --raised: #ececee;
+    --sunk: #e4e4e7;
+    --line: #e2e2e5;
+    --edge: #cdcdd2;
+    --fg: #18181b;
+    --body: #2b2b2f;
+    --dim: #55555c;
+    --faint: #6f6f77;
+    --accent: #2c62ad;
+    --lav: #6c58a6;
+    --green: #3d7636;
+    --red: #b03a3a;
+    --yellow: #86620e;
+    --blue: #46608a;
+    --peach: #9f522e;
+    --repo-0: #2b7489;
+    --repo-1: #6c58a6;
+    --repo-2: #9c4682;
+    --repo-3: #2a7766;
+    --repo-4: #80620f;
+    --repo-5: #9f522e;
+    --repo-6: #3c7434;
+    --repo-7: #9f3e4d;
+    --on-accent: #ffffff;
+    --scrim: rgba(24, 24, 27, 0.3);
+    --shadow: 0 20px 60px rgba(24, 24, 27, 0.12);
+    --fill: rgba(44, 98, 173, 0.06);
+    --tint-red: rgba(176, 58, 58, 0.08);
+    --tint-yellow: rgba(134, 98, 14, 0.09);
+    --tint-accent: rgba(44, 98, 173, 0.1);
+    --tint-green: var(--fill);
+    --tint-lav: var(--fill);
+    --tint-blue: var(--fill);
+    color-scheme: light;
+  }
+}
+
+:root[data-palette='graphite'][data-theme='light'] {
+  --bg: #f5f5f6;
+  --rail: #efeff1;
+  --card: #ffffff;
+  --raised: #ececee;
+  --sunk: #e4e4e7;
+  --line: #e2e2e5;
+  --edge: #cdcdd2;
+  --fg: #18181b;
+  --body: #2b2b2f;
+  --dim: #55555c;
+  --faint: #6f6f77;
+  --accent: #2c62ad;
+  --lav: #6c58a6;
+  --green: #3d7636;
+  --red: #b03a3a;
+  --yellow: #86620e;
+  --blue: #46608a;
+  --peach: #9f522e;
+  --repo-0: #2b7489;
+  --repo-1: #6c58a6;
+  --repo-2: #9c4682;
+  --repo-3: #2a7766;
+  --repo-4: #80620f;
+  --repo-5: #9f522e;
+  --repo-6: #3c7434;
+  --repo-7: #9f3e4d;
+  --on-accent: #ffffff;
+  --scrim: rgba(24, 24, 27, 0.3);
+  --shadow: 0 20px 60px rgba(24, 24, 27, 0.12);
+  --fill: rgba(44, 98, 173, 0.06);
+  --tint-red: rgba(176, 58, 58, 0.08);
+  --tint-yellow: rgba(134, 98, 14, 0.09);
+  --tint-accent: rgba(44, 98, 173, 0.1);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: light;
+}
+
+/* Mono: greys only, an amber accent; red and green kept faint, enough to tell a failure from a pass. */
+:root[data-palette='mono'] {
+  --bg: #141414;
+  --rail: #111111;
+  --card: #1c1c1c;
+  --raised: #252525;
+  --sunk: #0e0e0e;
+  --line: #2c2c2c;
+  --edge: #3b3b3b;
+  --fg: #f0f0f0;
+  --body: #d0d0d0;
+  --dim: #9e9e9e;
+  --faint: #7c7c7c;
+  --accent: #e3a54a;
+  --lav: #ababab;
+  --green: #9fb59c;
+  --red: #cf8a8a;
+  --yellow: #c9b37c;
+  --blue: #a3a9b0;
+  --peach: #c99a7d;
+  --repo-0: #9fbcc4;
+  --repo-1: #b3aacb;
+  --repo-2: #c6a6bb;
+  --repo-3: #9fbdb2;
+  --repo-4: #c9b37c;
+  --repo-5: #c99a7d;
+  --repo-6: #a5b89f;
+  --repo-7: #c79ba1;
+  --on-accent: #141414;
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --fill: rgba(227, 165, 74, 0.07);
+  --tint-red: rgba(207, 138, 138, 0.1);
+  --tint-yellow: rgba(201, 179, 124, 0.11);
+  --tint-accent: rgba(227, 165, 74, 0.12);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: dark;
+}
+
+:root[data-palette='mono'][data-theme='light'] {
+  --bg: #fafafa;
+  --rail: #f3f3f3;
+  --card: #ffffff;
+  --raised: #efefef;
+  --sunk: #e6e6e6;
+  --line: #e4e4e4;
+  --edge: #cfcfcf;
+  --fg: #111111;
+  --body: #2a2a2a;
+  --dim: #575757;
+  --faint: #717171;
+  --accent: #a85f00;
+  --lav: #5e5e5e;
+  --green: #4b6b48;
+  --red: #9c4040;
+  --yellow: #7a6222;
+  --blue: #4f5a66;
+  --peach: #8f5a37;
+  --repo-0: #466d77;
+  --repo-1: #615980;
+  --repo-2: #79506e;
+  --repo-3: #476e63;
+  --repo-4: #76612c;
+  --repo-5: #8f5a37;
+  --repo-6: #506949;
+  --repo-7: #825059;
+  --on-accent: #ffffff;
+  --scrim: rgba(0, 0, 0, 0.3);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+  --fill: rgba(168, 95, 0, 0.06);
+  --tint-red: rgba(156, 64, 64, 0.08);
+  --tint-yellow: rgba(122, 98, 34, 0.09);
+  --tint-accent: rgba(168, 95, 0, 0.1);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: light;
+}
+
+/* Nord: blue-grey neutrals and the frost accent, as mockup v4 had them. */
+:root[data-palette='nord'] {
+  --bg: #242933;
+  --rail: #20242c;
+  --card: #2b303b;
+  --raised: #333946;
+  --sunk: #1d2128;
+  --line: #3a4150;
+  --edge: #465062;
+  --fg: #eceff4;
+  --body: #d8dee9;
+  --dim: #aab3c2;
+  --faint: #8891a3;
+  --accent: #88c0d0;
+  --lav: #b48ead;
+  --green: #a3be8c;
+  --red: #d57780;
+  --yellow: #ebcb8b;
+  --blue: #81a1c1;
+  --peach: #d08770;
+  --repo-0: #88c0d0;
+  --repo-1: #a3a9dc;
+  --repo-2: #c895bf;
+  --repo-3: #8fbcbb;
+  --repo-4: #ebcb8b;
+  --repo-5: #d08770;
+  --repo-6: #a3be8c;
+  --repo-7: #d08b94;
+  --on-accent: #1d2128;
+  --scrim: rgba(18, 21, 27, 0.6);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  --fill: rgba(136, 192, 208, 0.07);
+  --tint-red: rgba(213, 119, 128, 0.1);
+  --tint-yellow: rgba(235, 203, 139, 0.11);
+  --tint-accent: rgba(136, 192, 208, 0.12);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: dark;
+}
+
+:root[data-palette='nord'][data-theme='light'] {
+  --bg: #eceff4;
+  --rail: #e5e9f0;
+  --card: #f8f9fb;
+  --raised: #e5e9f0;
+  --sunk: #dde2ea;
+  --line: #d8dee9;
+  --edge: #c3cad6;
+  --fg: #2e3440;
+  --body: #3b4252;
+  --dim: #4c566a;
+  --faint: #5f6a7e;
+  --accent: #3f6f8f;
+  --lav: #8a5f85;
+  --green: #4f7340;
+  --red: #a3404b;
+  --yellow: #8a6516;
+  --blue: #4e6e9a;
+  --peach: #a0522d;
+  --repo-0: #367789;
+  --repo-1: #5f63a3;
+  --repo-2: #94498a;
+  --repo-3: #3a7877;
+  --repo-4: #86661a;
+  --repo-5: #a0522d;
+  --repo-6: #557638;
+  --repo-7: #a4434d;
+  --on-accent: #ffffff;
+  --scrim: rgba(46, 52, 64, 0.3);
+  --shadow: 0 20px 60px rgba(46, 52, 64, 0.15);
+  --fill: rgba(63, 111, 143, 0.06);
+  --tint-red: rgba(163, 64, 75, 0.08);
+  --tint-yellow: rgba(138, 101, 22, 0.09);
+  --tint-accent: rgba(63, 111, 143, 0.1);
+  --tint-green: var(--fill);
+  --tint-lav: var(--fill);
+  --tint-blue: var(--fill);
+  color-scheme: light;
+}

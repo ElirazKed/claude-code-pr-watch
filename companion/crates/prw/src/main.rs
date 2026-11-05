@@ -13,6 +13,8 @@
 //! The action keys (merge, comment, hand-offs, the browser) give the model's commands, which
 //! the loop carries out: a job on a thread of its own (`actions`), a copy or a browser at once
 //! (`desktop`). What came of each goes back to the model as a message.
+//!
+//! `prw web` (`web`) runs the same model with no terminal, behind a page in the browser.
 
 mod actions;
 mod cache;
@@ -26,6 +28,7 @@ mod round;
 mod theme;
 mod view;
 mod watches;
+mod web;
 
 #[cfg(test)]
 mod render_tests;
@@ -70,6 +73,7 @@ Usage: prw [OPTIONS]
        prw watch [<PR URL>...] [--agent <NAME>] [--session <NAME>]
        prw unwatch (<PR URL>... | --all) [--agent <NAME>] [--session <NAME>]
        prw mcp [--agent <NAME>] [--session <NAME>]
+       prw web [--port <PORT>] [--no-open] [OPTIONS]
 
 Shows the PRs the pr-watch mod polls, from its shared cache, every open PR of each gh
 login (\"My PRs\"), and a list per search saved in config.toml. p pins a PR to Focus,
@@ -87,6 +91,9 @@ Commands:
   mcp      A tool server on stdio for an agent (Codex, ...): the mod's `watch` tool and
            an `unwatch`, in this agent's session (its agent: --agent, else the
            client's name)
+  web      The same lists in the browser: serves a page on 127.0.0.1 (--port, else
+           any free port) and opens it, unless --no-open. Its link holds a key that
+           only this run takes; Ctrl-C stops it. Takes the options below too
 
 Options:
       --cache <DIR>  The cache to use [env: PRW_CACHE] [default: ~/.cache/pr-watch]
@@ -128,6 +135,17 @@ struct Options {
     session: Option<String>,
     /// `unwatch --all`.
     is_all: bool,
+    /// `web`: the browser's view in place of the TUI.
+    web: Option<Web>,
+}
+
+/// How `prw web` serves its page.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Web {
+    /// `None`: any free port.
+    port: Option<u16>,
+    /// Only print the link: no browser opens.
+    is_no_open: bool,
 }
 
 impl Options {
@@ -151,7 +169,14 @@ enum Command {
 }
 
 /// The flags that take a value.
-const VALUED: [&str; 5] = ["--cache", "--config", "--lists", "--agent", "--session"];
+const VALUED: [&str; 6] = [
+    "--cache",
+    "--config",
+    "--lists",
+    "--agent",
+    "--session",
+    "--port",
+];
 
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
     let mut options = Options::default();
@@ -162,7 +187,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
         Some("mcp") => Some(cli::Command::Mcp),
         _ => None,
     };
-    if options.sub.is_some() {
+    if args.peek().is_some_and(|a| a == "web") {
+        options.web = Some(Web::default());
+    }
+    if options.sub.is_some() || options.web.is_some() {
         args.next();
     }
     let is_tui = options.sub.is_none();
@@ -188,7 +216,16 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
                 "--cache" => options.cache = Some(value.into()),
                 "--config" if is_tui => options.config = Some(value.into()),
                 "--lists" if is_tui => options.lists = Some(value.into()),
-                "--config" | "--lists" => return Command::Unknown(flag.to_owned()),
+                "--port" if options.web.is_some() => {
+                    let Ok(port) = value.parse() else {
+                        return Command::Usage("--port takes a port number");
+                    };
+                    options.web = Some(Web {
+                        port: Some(port),
+                        ..options.web.unwrap_or_default()
+                    });
+                }
+                "--config" | "--lists" | "--port" => return Command::Unknown(flag.to_owned()),
                 _ if is_tui => return Command::Unknown(flag.to_owned()),
                 "--agent" => options.agent = Some(value),
                 _ => options.session = Some(value),
@@ -200,6 +237,12 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Command {
             "-V" | "--version" => return Command::Version,
             "--demo" if is_tui => options.is_demo = true,
             "--no-poll" if is_tui => options.is_no_poll = true,
+            "--no-open" if options.web.is_some() => {
+                options.web = Some(Web {
+                    is_no_open: true,
+                    ..options.web.unwrap_or_default()
+                });
+            }
             "--all" if options.sub == Some(cli::Command::Unwatch) => options.is_all = true,
             url if takes_urls && !url.starts_with('-') => options.urls.push(url.to_owned()),
             other => return Command::Unknown(other.to_owned()),
@@ -215,6 +258,7 @@ fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
         Command::Run(options) => {
             let (ran, is_usage) = match options.sub {
+                None if options.web.is_some() => (web::run(&options), false),
                 None => (run(&options), false),
                 // A `watch` or `unwatch` argument that names no PR is a usage error.
                 Some(command) => {
@@ -333,28 +377,75 @@ impl Clock {
     }
 }
 
+/// What the TUI and `prw web` alike run on: the cache, read and (unless a demo or
+/// `--no-poll`) polled, the clock, and the jobs' runner.
+struct Parts {
+    dir: PathBuf,
+    clock: Clock,
+    /// This run's files in the cache, while it polls.
+    files: Option<Files>,
+    /// Runs the jobs; `None` in a demo, whose jobs are answered at once.
+    runner: Option<Arc<Runner<gh::System, gh::Wall>>>,
+    reader: Reader,
+    /// Stops the poller.
+    stop: Arc<AtomicBool>,
+}
+
+impl Parts {
+    fn new(options: &Options) -> Self {
+        let dir = cache_dir(options);
+        let files = options
+            .is_polling()
+            .then(|| Files::new(dir.clone(), own_id()));
+        let runner = (!options.is_demo).then(|| {
+            Arc::new(Runner::new(
+                gh::System,
+                gh::Wall,
+                dir.clone(),
+                files.clone(),
+            ))
+        });
+        Self {
+            clock: Clock::new(&dir, options.is_demo),
+            reader: Reader::new(dir.clone(), options.is_demo),
+            dir,
+            files,
+            runner,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Starts the poller, where this run polls; a demo's searches are said once, as found.
+    fn poll(&self, options: &Options) -> Option<Receiver<PollerSaid>> {
+        if options.is_demo {
+            return Some(demo_searches(&self.dir));
+        }
+        self.files.clone().map(|files| {
+            let config = config_path(options).map_or_else(ConfigFile::default, ConfigFile::at);
+            let poller = Poller::new(files, gh::System, gh::Wall)
+                .with_config(config)
+                .with_lists(lists_file(options, &self.dir));
+            poller::spawn(poller, Arc::clone(&self.stop))
+        })
+    }
+
+    /// Its PRs are no longer watched: the session file goes, and a held lease is given back.
+    /// A tick still running dies with the process.
+    fn leave(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(files) = &self.files {
+            files.leave();
+        }
+    }
+}
+
 /// Takes over the terminal, runs until a quit key, and gives it back.
 /// `ratatui::try_init` also installs a panic hook that restores the terminal first.
 /// A failed init (say, stdout is not a terminal) is reported, not a panic, and
 /// undoes whatever part of the setup had already happened (raw mode).
 fn run(options: &Options) -> io::Result<()> {
-    let dir = cache_dir(options);
-    let clock = Clock::new(&dir, options.is_demo);
-    let files = options
-        .is_polling()
-        .then(|| Files::new(dir.clone(), own_id()));
-    // A demo sends nothing to GitHub: its jobs are answered at once.
-    let runner = (!options.is_demo).then(|| {
-        Arc::new(Runner::new(
-            gh::System,
-            gh::Wall,
-            dir.clone(),
-            files.clone(),
-        ))
-    });
-    let demo = options.is_demo.then(|| demo_searches(&dir));
-    let reader = Reader::new(dir.clone(), options.is_demo);
-    let lists = lists_file(options, &dir);
+    let mut parts = Parts::new(options);
+    let lists = lists_file(options, &parts.dir);
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     // Pasted text comes whole, newlines too, rather than as keys that might act.
     let _ = execute!(io::stdout(), EnableBracketedPaste);
@@ -364,41 +455,47 @@ fn run(options: &Options) -> io::Result<()> {
         let _ = execute!(io::stdout(), Clicks(false));
         restore(info);
     }));
-    let stop = Arc::new(AtomicBool::new(false));
-    let said = demo.or_else(|| {
-        files.clone().map(|files| {
-            let config = config_path(options).map_or_else(ConfigFile::default, ConfigFile::at);
-            let poller = Poller::new(files, gh::System, gh::Wall)
-                .with_config(config)
-                .with_lists(lists_file(options, &dir));
-            poller::spawn(poller, Arc::clone(&stop))
-        })
-    });
+    let said = parts.poll(options);
     let (done, finished) = mpsc::channel();
     let hands = Hands {
-        runner: runner.as_ref(),
+        runner: parts.runner.as_ref(),
         done,
         env: desktop::Env::read(),
-        dir: &dir,
+        dir: &parts.dir,
         lists: RefCell::new(lists),
     };
     let result = event_loop(
         &mut terminal,
-        reader,
-        &clock,
+        &mut parts.reader,
+        &parts.clock,
         said.as_ref(),
         &hands,
         &finished,
     );
     let _ = execute!(io::stdout(), Clicks(false), DisableBracketedPaste);
-    // Its PRs are no longer watched: the session file goes, and a held lease is given back.
-    // A tick still running dies with the process.
-    stop.store(true, Ordering::Relaxed);
-    if let Some(files) = &files {
-        files.leave();
-    }
+    parts.leave();
     ratatui::restore();
     result
+}
+
+/// What a tick reads: what the poller said since, `lists.json` where it changed, the cache,
+/// and the time.
+fn ticked(
+    said: Option<&Receiver<PollerSaid>>,
+    hands: &Hands,
+    reader: &mut Reader,
+    now: i64,
+) -> Vec<Msg> {
+    let polled = said
+        .into_iter()
+        .flat_map(Receiver::try_iter)
+        .map(Msg::Poller);
+    let lists = hands.lists.borrow_mut().read().map(Msg::ListsRead);
+    polled
+        .chain(lists)
+        .chain(reader.poll(now))
+        .chain([Msg::Tick(now)])
+        .collect()
 }
 
 /// The demo's saved searches, as a poller would say them: `searches.json` beside its
@@ -472,7 +569,7 @@ fn feed(model: Model, msgs: impl IntoIterator<Item = Msg>, hands: &Hands) -> (Mo
 
 fn event_loop(
     terminal: &mut DefaultTerminal,
-    mut reader: Reader,
+    reader: &mut Reader,
     clock: &Clock,
     said: Option<&Receiver<PollerSaid>>,
     hands: &Hands,
@@ -524,17 +621,7 @@ fn event_loop(
             let timeout = (last_tick + TICK).saturating_duration_since(Instant::now());
             if timeout.is_zero() {
                 last_tick = Instant::now();
-                let now = clock.now();
-                let polled = said
-                    .into_iter()
-                    .flat_map(Receiver::try_iter)
-                    .map(Msg::Poller);
-                let lists = hands.lists.borrow_mut().read().map(Msg::ListsRead);
-                break polled
-                    .chain(lists)
-                    .chain(reader.poll(now))
-                    .chain([Msg::Tick(now)])
-                    .collect();
+                break ticked(said, hands, reader, clock.now());
             }
             let beat = is_animated.then(|| view::BEAT.saturating_sub(drawn_at.elapsed()));
             if beat.is_some_and(|b| b.is_zero()) {
@@ -706,6 +793,33 @@ mod tests {
         assert_eq!(
             parse(&["watch", "--session="]),
             Command::Missing("--session")
+        );
+    }
+
+    #[test]
+    fn parses_web() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|&s| s.to_owned()));
+        let Command::Run(web) = parse(&["web", "--port=7420", "--no-open", "--demo"]) else {
+            panic!("web runs")
+        };
+        let served = Web {
+            port: Some(7420),
+            is_no_open: true,
+        };
+        assert_eq!((web.web, web.sub, web.is_demo), (Some(served), None, true));
+        let Command::Run(web) = parse(&["web"]) else {
+            panic!("web runs")
+        };
+        assert_eq!(web.web, Some(Web::default()));
+        assert!(matches!(
+            parse(&["web", "--port", "http"]),
+            Command::Usage(_)
+        ));
+        assert_eq!(parse(&["--port", "1"]), Command::Unknown("--port".into()));
+        assert_eq!(parse(&["--no-open"]), Command::Unknown("--no-open".into()));
+        assert_eq!(
+            parse(&["web", "--agent", "x"]),
+            Command::Unknown("--agent".into())
         );
     }
 
