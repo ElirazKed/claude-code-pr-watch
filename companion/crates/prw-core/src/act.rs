@@ -280,7 +280,8 @@ pub enum Slot {
 }
 
 /// How a toast reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Tone {
     Good,
     Bad,

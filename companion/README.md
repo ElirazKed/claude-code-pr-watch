@@ -66,6 +66,28 @@ once, so its card is current before the next round.
 - Rows in Focus, the Inbox and Later say which agent watches each PR, and the card names the
   sessions (`◆ app-retry, web`).
 
+### In the browser: `prw web`
+
+`prw web` shows the same lists in a browser tab: Focus as a desk of cards, each with where its PR is
+on the way in (checks, review, merge) and what to do next; the Inbox, My PRs and the searches
+grouped by what needs you, or by repo (`g`); Later with how each PR was when put aside. `p` and `z`
+(and the ★ and ⏾ buttons) pin and put aside as in the TUI, with an Undo, into the same `lists.json`.
+The next step's buttons open the PR's page on GitHub. Each repo has its chip, in the TUI's colour.
+The conversation, logs and files come in a later version.
+
+- **Running it:** it takes the TUI's options (`--cache`, `--config`, `--lists`, `--no-poll`,
+  `--demo`) and polls as the TUI does. It serves the page on `127.0.0.1`, on any free port
+  (`--port <port>` for one), prints the link and opens it, unless `--no-open` (over SSH, say:
+  forward the port and open the link on your machine). Ctrl-C stops it, leaving the cache as the TUI
+  does on `q`.
+- **Who it answers:** the link holds a key this run made up (`/#k=…`, in the fragment, so it reaches
+  no server log); the page sends it with each request, and nothing else is answered. It takes only
+  requests addressed to `127.0.0.1` or `localhost` on its port (a DNS rebinding finds nothing),
+  changes only as JSON from its own origin, and its page runs only its own script (a strict CSP).
+  It never sends anything to GitHub from the browser: the binary does, as the TUI does.
+- **The page** is a React app in `crates/prw/web` (TypeScript, Vite), built into `web/dist`, which
+  is committed and compiled into the binary, so building prw needs no npm (below).
+
 ### The full PR view
 
 Enter (or a click on the selected row) opens the PR full size: its title, pill and branch on top,
@@ -152,6 +174,20 @@ cargo test --workspace
 
 `--cache <dir>` (or `PRW_CACHE`) uses another cache directory than `~/.cache/pr-watch`. `prw` runs
 `gh` from `PATH`, as each login (`gh auth token --user`), and never switches gh's active account.
+
+`prw web`'s page needs Node 22 or newer to change, not to build prw: the binary embeds
+`crates/prw/web/dist` as committed. After a change to `crates/prw/web`:
+
+```sh
+cd companion/crates/prw/web
+npm ci
+npm run dev       # live reload, its API from `prw web --demo --cache companion/demo --port 7420 --no-open`
+npm run lint      # eslint and prettier
+npm test          # vitest
+npm run build     # into dist/: commit it with the change (CI fails on a dist that isn't the build)
+```
+
+The lock file names no registry (`.npmrc`), so `npm ci` installs from whichever one npm uses.
 
 ### Saved searches
 
@@ -319,9 +355,11 @@ when something changes.
   the MCP messages (`mcp`), Focus and Later (`watchlist`), and the actions (`act`: what each key asks and shows; `merge`, `comment`,
   and the hand-off prompts in `handoff`, `fix`, `resolve` and `address`), the full view (`full`: one
   PR read whole; `opened`: its tabs, selection and reads), tested with properties and against the mod's fixtures
-  (`tests/fixtures.rs`).
+  (`tests/fixtures.rs`), and `prw web`'s rules (`web`: what its page gets, each PR's group, stations
+  and next step, and whom its server answers).
 - `crates/prw`: the binary: the terminal (ratatui), reading the cache (`cache.rs`), Focus and Later's file (`lists.rs`), drawing the model
   (`view.rs`, the full view in `view/full.rs`), and the poller thread (`poller.rs`: a tick every 10 s; `round.rs`: asking GitHub; `gh.rs`:
   running `gh` and the clock, behind traits the tests fake), the actions (`actions.rs`: running each one as its own thread; `desktop.rs`: the clipboard and the
   browser), and the other commands (`cli.rs`: `watch`
-  and `unwatch`; `mcp.rs`: the tool server; `watches.rs`: the watch files and their sessions).
+  and `unwatch`; `mcp.rs`: the tool server; `watches.rs`: the watch files and their sessions), and
+  `web.rs`: `prw web`'s server; its page is `web/` (React, built into `web/dist`).
