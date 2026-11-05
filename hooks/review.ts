@@ -1,6 +1,6 @@
 // A PR's review state as a card shows it: where each reviewer stands, the review threads still
 // open, and which reviews landed since the last look.
-import type { Reviewer, Reviews, Verdict } from '../types'
+import type { Reviewer, Reviews, TrackedPr, Verdict } from '../types'
 
 type Actor = { __typename?: string; login?: string; slug?: string } | null
 
@@ -89,6 +89,14 @@ export function threadsBeside(headline: string, reviews: Reviews): { line: strin
   if (!isCounted) return { line: threadLine(reviews), note: '' }
 
   return { line: '', note: reviews.outdated > 0 ? `${reviews.outdated} outdated` : '' }
+}
+
+// The footer: "PR #7: Approved · 2 unresolved threads". Open threads (a bot's too) are added
+// unless the headline counts them already.
+export function statusText(pr: Pick<TrackedPr, 'number' | 'headline' | 'state' | 'reviews'>): string {
+  const threads = pr.state === 'OPEN' && pr.reviews !== null ? threadsBeside(pr.headline, pr.reviews).line : ''
+
+  return `PR #${pr.number}: ${pr.headline}${threads === '' ? '' : ` · ${threads}`}`
 }
 
 const ICON: Record<Verdict, string> = { approved: '✓', changes: '✗', commented: '💬', requested: '◷' }
