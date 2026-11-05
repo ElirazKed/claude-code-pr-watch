@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { newReviews, reviewToasts, reviewsOf, threadLine, threadsBeside, verdictLine } from './review'
+import { newReviews, reviewToasts, reviewsOf, statusText, threadLine, threadsBeside, verdictLine } from './review'
 import type { GhReview, ReviewFacts } from './review'
 
 const review = (login: string, state: string, submittedAt: string, __typename = 'User'): GhReview => ({
@@ -156,5 +156,28 @@ describe('new reviews', () => {
     expect(reviewToasts([r('nadav', 'commented')], 532)).toEqual(['💬 nadav commented on #532'])
     expect(reviewToasts([r('alice', 'approved'), r('bob', 'changes')], 12)).toEqual(['✓ alice approved #12', '✗ bob requested changes on #12'])
     expect(reviewToasts([r('a', 'commented'), r('b', 'commented'), r('c', 'approved')], 12)).toEqual(['💬 3 new reviews on #12'])
+  })
+})
+
+describe('the footer', () => {
+  const pr = (headline: string, threads: ReturnType<typeof thread>[], state = 'OPEN') => ({
+    number: 7,
+    headline,
+    state,
+    reviews: reviewsOf(facts([], [], [], threads)),
+  })
+
+  test('open threads the headline does not count are added', async () => {
+    expect(statusText(pr('CI running', [thread(false), thread(false)]))).toBe('PR #7: CI running · 2 unresolved threads')
+  })
+
+  test('a headline that counts them says it once', async () => {
+    expect(statusText(pr('3 comments to address', [thread(false), thread(false), thread(false)]))).toBe('PR #7: 3 comments to address')
+  })
+
+  test('no open threads, a closed PR, or no review facts: the headline alone', async () => {
+    expect(statusText(pr('CI running', [thread(true)]))).toBe('PR #7: CI running')
+    expect(statusText(pr('Merged', [thread(false)], 'MERGED'))).toBe('PR #7: Merged')
+    expect(statusText({ number: 7, headline: 'CI running', state: 'OPEN', reviews: null })).toBe('PR #7: CI running')
   })
 })

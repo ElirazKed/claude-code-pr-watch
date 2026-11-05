@@ -39,7 +39,7 @@ import { failingChecks, fixHeading, fixPrompt, logError, logProblems, toFetch } 
 import type { Failure, Handoff } from './fix'
 import { resolveHeading, resolvePrompt } from './resolve'
 import { commentArgv, commentError, commentPlaceholder, commentUrl, isPostable } from './comment'
-import { cells, newReviews, reviewToasts, reviewsOf, threadsBeside } from './review'
+import { cells, newReviews, reviewToasts, reviewsOf, statusText, threadsBeside } from './review'
 import { TABS, approvalsHeading, approvalsOf, approvalsQuery, checkRows, gateNote, parseApprovals, parseTeams, ruledTeamIds, seenOf, stillNeeded, tabLabel, teamsQuery, threadRows } from './tabs'
 import { CHECK_MS, PRW_LINE, PRW_PILL, PRW_TEXT, PRW_URL, companionIn, headOf, howToUpdate, isNewer, isPrwIn, noticeLines, noticeToast, versionIn } from './update'
 import type { CompanionState } from './update'
@@ -1434,7 +1434,7 @@ async function pickTheme($: EngineInterface, name: ThemeName): Promise<string> {
 async function refreshStatus($: EngineInterface) {
   const list = await read($, prs)
   const focus = list.find(isActive) ?? list[list.length - 1]
-  $.ui.status(focus === undefined ? undefined : `PR #${focus.number}: ${focus.headline}`)
+  $.ui.status(focus === undefined ? undefined : statusText(focus))
 }
 
 // `isExplicit`: the person named the PR, so it is watched whatever its state. Otherwise (a PR
